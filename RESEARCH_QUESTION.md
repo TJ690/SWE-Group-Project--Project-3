@@ -24,7 +24,7 @@ The GitSkills dataset (Hugging Face: `mvaccargiu/gitskills`) has 3,797,117 SKILL
 Features (independent variables):
 - Structural: heading/patterm, section consistency, document length
 - Linguistic: imperative-language density
-- Commit metadata: single-commit vs. iterative-edit flag, commit message patterns
+- Commit metadata: single-commit vs. iterative-editing, commit message patterns
 - Repository context: repository size, contributor count, tool-family indicators
 
 ## Outcome (dependent variable)
@@ -32,7 +32,6 @@ Features (independent variables):
 
 ## Expected Contribution
 A documented, reproducible heuristic method for surfacing likely 
-authorship patterns in AI-native software artifacts, along with an 
-honest accounting of where and why that signal is unreliable. This is useful 
-as a starting point for future work on trust in AI-generated development artifacts, without claiming unfounded certainty.
+authorship patterns in AI-native software artifacts, along with accounting for where and why that signal is unreliable. This is useful 
+as a starting point for future work on trust in AI-generated development artifacts.
 
