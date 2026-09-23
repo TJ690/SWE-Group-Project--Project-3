@@ -17,6 +17,23 @@ Information about agent skills exists both within individual project repositorie
 * **Bundled Folders &amp; Files**: Optional subdirectories stored alongside `SKILL.md` containing executable scripts (e.g., `scripts/`), templates (e.g., `templates/`), or reference documentation (e.g., `references/`)[1].
 * **Directory Paths**: Skills commonly reside in canonical paths like `.claude/skills/
 
+---
+### References
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | GitSkills — sample for the MSR 2027 Mining Challenge proposal
+2. **Source Title 2** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description
+3. **Source Title 3** - Gitskills_Preprint.pdf | HIGH-LEVEL OVERVIEW Paragraph 1
+4. **Source Title 5** - GitHub - giuseppedestefanis/gitskills-sample | Description Paragraph 2
+5. **Source Title 6** - Gitskills_Preprint.pdf | HIGH-LEVEL OVERVIEW Paragraph 3
+6. **Source Title 7** - MSR 2027 - Mining Challenge - MSR 2027 | Gitskills
+7. **Source Title 8** - Gitskills_Preprint.pdf | Web Artifacts Builder
+8. **Source Title 9** - mvaccargiu/gitskills · Datasets at Hugging Face | references/safety.md
+9. **Source Title 10** - mvaccargiu/gitskills · Datasets at Hugging Face
+10. **Source Title 11** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+11. **Source Title 12** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+12. **Source Title 13** - Gitskills_Preprint.pdf | Deduplication
+13. **Source Title 14** - Gitskills_Preprint.pdf | HIGH-LEVEL OVERVIEW Paragraph 4
+---
+
 ## Q2: What is the license of the dataset? Was there any other criteria of project selection from github apart from having skill.md? Github has millions of dataset. How did the data collection team identify which projects have skill.md and download metadata of only those projects?
 ### 1\. Dataset License
 
@@ -63,12 +80,44 @@ The identification and collection process ran in three main stages:
   * **File &amp; Sibling Contents**: The raw `SKILL.md` text, parsed YAML front matter, and bundled sibling files (up to size caps) were fetched via the raw-content CDN and stored in the `artifacts` and `artifact_siblings` tables[5].
   * **Commit History**: First- and last-commit histories were sampled and anonymized for representative skills[5].
 
+---
+1. **Source Title 1** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Target URL, License, and Citation
+2. **Source Title 2** - mvaccargiu/gitskills · Datasets at Hugging Face | License
+3. **Source Title 3** - Gitskills_Preprint.pdf | GitHub public repositories
+4. **Source Title 4** - Gitskills_Preprint.pdf | Web Artifacts Builder Paragraph 4
+5. **Source Title 5** - mvaccargiu/gitskills · Datasets at Hugging Face | Discovery
+6. **Source Title 6** - GitHub - giuseppedestefanis/gitskills-sample | Two views of the full dataset
+7. **Source Title 7** - mvaccargiu/gitskills · Datasets at Hugging Face | Anonymization
+8. **Source Title 8** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description Paragraph 4 & 5
+9. **Source Title 9** - Gitskills_Preprint.pdf | High Level Overview Paragraph 4
+10. **Source Title 10** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+11. **Source Title 11** - GitHub - giuseppedestefanis/gitskills-sample | How data was collected
+12. **Source Title 12** - mvaccargiu/gitskills · Datasets at Hugging Face | artifact-repos & siblings
+13. **Source Title 13** - Gitskills_Preprint.pdf | APPENDIX A DATASET CONSTRUCTION
+14. **Source Title 14** - GitHub - giuseppedestefanis/gitskills-sample | GitSkills — sample for the MSR 2027 Mining Challenge proposal
+15. **Source Title 15** - mvaccargiu/gitskills · Datasets at Hugging Face | GitSkills: A Dataset of Agent Skills on GitHub
+16. **Source Title 16** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+17. **Source Title 17** - Gitskills_Preprint.pdf | GitHub public repositories
+18. **Source Title 18** - GitHub - giuseppedestefanis/gitskills-sample | repos, artifact_siblings & mining_runs tables
+---
+
 ## Q3: What was the timeframe of the github metadata that is present in the dataset?
 The GitHub metadata in the GitSkills dataset covers the following specific timeframes:
 
 * **Collection Snapshot**: The dataset represents a point-in-time snapshot collected in **July 2026**[1].
 * **Commit History Range**: The recorded commit timestamps span from **2014 through July 2026**[2][5]. The earliest commits date back to 2014 because the case-insensitive search matched legacy files (such as lowercase `skill.md`) created long before the official format was established[5][6].
 * **Agent Skill Format Era**: The bulk of agent skills in the specification format emerged between **October 2025** (when Anthropic introduced the open specification) and **July 2026** when data mining took place[1].
+---
+References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | GitSkills
+2. **Source Title 2** - GitHub - giuseppedestefanis/gitskills-sample | How the data was collected
+3. **Source Title 3** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Desription
+4. **Source Title 4** - Gitskills_Preprint.pdf | HIGH-LEVEL OVERVIEW
+5. **Source Title 5** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive statistics
+6. **Source Title 6** - Gitskills_Preprint.pdf | Web Artifacts Builder
+7. **Source Title 7** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description
+8. **Source Title 8** - Gitskills_Preprint.pdf | HIGH-LEVEL OVERVIEW
+---
 
 ## Q4: How did the dataset creators identify matching skills.md files among other repositories? How did they perform match of gitfile contents with all other repositories skills.md?
 The dataset creators used a three-stage automated pipeline to discover, match, and deduplicate `SKILL.md` files across public GitHub repositories[1][2]:
