@@ -539,6 +539,24 @@ A `SKILL.md` file and its surrounding directory reveal rich information about ho
 * **Official Repositories**: Frontier model creators like Anthropic published the initial open specification in October 2025 and released official, reference skills in public repositories (e.g., Anthropic's official skills repository containing skills like `web-artifacts-builder`)[2].
 * **Directory Path Conventions**: The file path often indicates whether a skill was written for a specific vendor's CLI agent or a vendor-neutral setup[6]:
   * **Canonical / Tool-Specific Paths**: Paths like `.claude/skills/
+  * **Vendor-Neutral / General Paths**: Files located under generic `skills/` directories or elsewhere in the repository indicate open-specification or multi-agent usage
+### 2\. Identifying Tools, Agents, and Runtimes Inside the File &amp; Folder
+
+* **Front Matter &amp; Instruction Body**: The YAML header (`name`, `description`) and Markdown body frequently mention specific tools, CLI environment variables (e.g., `CLAUDE_CMD`), API configurations, or model specifications (e.g., OpenRouter, `grok-4-1-fast-reasoning`, or `kimi-k2.5`)[1].
+* **Bundled Metadata &amp; Registry Files**: Sibling files inside the skill folder often reveal specific tooling, package managers, or registries used to generate or install the skill[9][12]:
+  * **Registry Footprints**: Files like `.clawhub/origin.json` or `_meta.json` log publishing origins, slug names, and versions from community hubs[9][13].
+  * **Build and Script Manifests**: Associated files like `pyproject.toml`, bash scripts (`scripts/`), or schema files explicitly document author emails, requirements, and execution tools[12].
+
+### 3\. Detecting Creation by Bots vs. Human–LLM Collaboration
+
+* **Commit Author Types**: In the dataset's commit history, commits are classified by account type (`User`, `Bot`, or `Organization`)[1]. Bot accounts retain their actual GitHub handle (e.g., `github-actions[bot]`), signaling automated creation or deployment[1].
+* **AI Assistant Commit Trailers**: While human author names and emails are masked for privacy, **names of AI assistants in** **Co-authored-by** **commit message trailers are explicitly preserved** (e.g., `Co-authored-by: Claude &lt;...&gt;`)[3][16]. This provides direct commit-level evidence of human-LLM co-creation[3][16].
+* **Linguistic &amp; Structural Cues**: LLM-generated or agent-maintained skills can be identified by shrinking semantic diversity, formulaic template structures, or standardized metaprompts embedded directly in the instruction text[17].
+
+### 4\. Widely Shared Templates &amp; Mass-Copied Skills
+
+* **Verbatim Copying**: Because agent skills lack a central package manager, **50.5% of all** **SKILL.md** **files in the dataset are byte-for-byte verbatim copies** of another file[7][20].
+* **Scaffolding &amp; Boilerplate**: Highly copied skills (identifiable by high copy counts for a single content hash `file_sha`) point directly to widely promoted project templates, community catalogs, or framework scaffolding tools that auto-generate skill files when initializing new projects[20].
 
 ## Q12: How did the authors test data sanctity? How did they handle when github APIs hit rate limit or any network error caused improper repo information. Trying to figure how to eliminate records that have data quality issues
 To ensure data sanctity and build a reliable dataset despite the scale and unpredictability of GitHub's network APIs, the creators of **GitSkills** implemented several automated validation steps, fallback repair mechanisms, and explicit tracking flags[1].
