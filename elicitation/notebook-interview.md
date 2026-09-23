@@ -145,6 +145,23 @@ To match and compare skill file contents across all repositories without downloa
 * **Grouping by Git Content Hash (** **file\_sha** **)**: Every file on Git/GitHub is identified by a deterministic Git blob SHA (`file_sha`), where identical bytes produce the exact same hash[9][10]. The creators grouped all 3.8 million discovered occurrences by their `file_sha`[3][8]. This revealed that **50.5% of all files are verbatim copies**, compressing the dataset into **1,877,981 distinct skill contents**[3].
 * **Selecting a Representative File**: For each group of identical content hashes, **one representative file** was selected for full text download and metadata enrichment[2]. The selection algorithm preferred files located in standard canonical paths (such as `.claude/skills/
 
+---
+1. **Source Title 1** - Gitskills_Preprint.pdf
+2. **Source Title 2** - mvaccargiu/gitskills · Datasets at Hugging Face | Discovery
+3. **Source Title 3** - GitHub - giuseppedestefanis/gitskills-sample | How the data was collected
+4. **Source Title 4** - Gitskills_Preprint.pdf | Appendix
+5. **Source Title 5** - Gitskills_Preprint.pdf | Web Artifacts Builder
+6. **Source Title 6** - GitHub - giuseppedestefanis/gitskills-sample | Two Views of the Full Dataset
+7. **Source Title 7** - mvaccargiu/gitskills · Datasets at Hugging Face | Collection Methodology
+8. **Source Title 8** - Gitskills_Preprint.pdf | High-Level Overview
+9. **Source Title 9** - GitHub - giuseppedestefanis/gitskills-sample | Data Schema
+10. **Source Title 10** - Gitskills_Preprint.pdf | Internal Structure
+11. **Source Title 11** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+12. **Source Title 12** - Gitskills_Preprint.pdf | Deduplication
+13. **Source Title 13** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description
+14. **Source Title 14** - Gitskills\_Preprint.pdf | APPENDIX A DATASET CONSTRUCTION
+---
+
 ## Q5: Explain about all the schemas involved. Describe each table and how they can be joined? What is estimated size of each table and number of records in each table. Is there a possibility of orphan records in any of the table. If there is no documentation about help me with queries to identify orphaned rows in each table.
 ### 1\. Overview of Schemas Involved
 
@@ -289,6 +306,23 @@ The **artifact\_siblings** table contains bundled sibling files **only for repre
   * These joins link exclusively to the primary representative row where `dedup_primary = 1`[5][7].
   * Other repositories containing verbatim copies of the same `SKILL.md` file do not have their local directory contents recorded in `artifact_siblings`[3].
 
+---
+References:
+1. **Source Title 1** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description
+2. **Source Title 2** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description
+3. **Source Title 3** - GitHub - giuseppedestefanis/gitskills-sample | Quickstart
+4. **Source Title 4** - Gitskills_Preprint.pdf | Internal Structure
+5. **Source Title 5** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+6. **Source Title 6** - GitHub - giuseppedestefanis/gitskills-sample | repos, artifact_siblings & mining_runs tables
+7. **Source Title 7** - Gitskills_Preprint.pdf | Table # Records Content
+8. **Source Title 8** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+9. **Source Title 9** - GitHub - giuseppedestefanis/gitskills-sample | Anonymisation
+11. **Source Title 11** - GitHub - giuseppedestefanis/gitskills-sample | Example Queries
+13. **Source Title 13** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | File Size
+14. **Source Title 14** - mvaccargiu/gitskills · Datasets at Hugging Face | contact
+15. **Source Title 15** - GitHub - giuseppedestefanis/gitskills-sample | How data was collected
+---
+
 ## Q6: Is there a way to identify the original repository of the representative skill. Meaning first time skill was documented in a repository. Can it be traced as the source repository of a git skill?
 
 Yes, the original repository can be traced, but the representative skill (** **dedup\_primary = 1** **) in the dataset is not automatically the original source.
@@ -321,6 +355,17 @@ When tracing origin repositories, keep these dataset nuances in mind:
 * **File Renames**: `first_commit_at` records the first commit of the file **at its current path only**[6]. If a developer renamed or moved a `SKILL.md` file within a repository, `first_commit_at` dates the move rather than its original creation[6].
 * **Sampled History**: Commit history was fetched for all skills in standard locations plus a size-stratified sample of others (`history_fetched = 1`)[4][6].
 * **Deleted or Private Repositories**: The dataset reflects public GitHub default branches as of July 2026[6][7]. If a skill originated in a private, deleted, or unindexed repository, the dataset can only trace the earliest *surviving public copy*.
+
+---
+References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | repos, artifact_siblings & mining_runs tables
+2. **Source Title 2** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description
+3. **Source Title 3** - Gitskills_Preprint.pdf | Internal Structure
+4. **Source Title 4** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+5. **Source Title 5** - Gitskills_Preprint.pdf | Table # Records Content
+6. **Source Title 6** - mvaccargiu/gitskills · Datasets at Hugging Face | Discovery
+7. **Source Title 7** - GitHub - giuseppedestefanis/gitskills-sample | Example Queries
+---
 
 ## Q7: What do below columns mean?
 
