@@ -613,7 +613,14 @@ A `SKILL.md` file and its surrounding directory reveal rich information about ho
 
 ---
 ## References:
-1. **Source Title 1** - GitHub - giuseppedestefanis/g
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+2. **Source Title 2** - Gitskills\_Preprint.pdf | Index terms: "Frontier model creators"
+3. **Source Title 3** - mvaccargiu/gitskills · Datasets at Hugging Face | Anonymisation
+4. **Source Title 4** - Gitskills\_Preprint.pdf | REFERENCES
+5. **Source Title 5** - Gitskills\_Preprint.pdf | web-artifacts-builder
+6. **Source Title 6** - Gitskills\_Preprint.pdf | GitHub public repositories Point 4
+7. **Source Title 7** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+8. **Source Title 8** - mvaccargiu/gitskills · Datasets at Hugging Face | Data examples
 ---
 
 ## Q12: How did the authors test data sanctity? How did they handle when github APIs hit rate limit or any network error caused improper repo information. Trying to figure how to eliminate records that have data quality issues
