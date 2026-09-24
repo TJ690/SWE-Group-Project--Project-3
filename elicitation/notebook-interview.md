@@ -429,6 +429,19 @@ These three columns serve as process and retrieval tracking flags for the collec
 
 * **Meaning**: A folder-listing bookkeeping flag (`1` or `0`) set to `1` when a skill directory contained more files than the pipeline's **listing size cap**[1][9]. This alerts researchers that the corresponding entries in `artifact_siblings` represent a partial listing rather than an exhaustive index of the folder[1][9].
 
+---
+## References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+2. **Source Title 2** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+3. **Source Title 3** - GitHub - giuseppedestefanis/gitskills-sample | Known Limitations
+4. **Source Title 4** - Gitskills_Preprint.pdf | Deduplication
+5. **Source Title 5** - Gitskills_Preprint.pdf | Web Artifacts Builder
+6. **Source Title 6** - Gitskills_Preprint.pdf | GitHub public repositories
+7. **Source Title 7** - Gitskills_Preprint.pdf | High-Level Overview Paragraph 3
+8. **Source Title 8** - Gitskills_Preprint.pdf | Table # Records Content
+9. **Source Title 9** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+---
+
 ## Q8: Is there any identifier to in artifacts table that identifies if a commit was done by agent or human?
 Yes, the **artifacts** table includes specific columns and metadata flags that help distinguish commits made by automated bots/agents versus human users:
 
@@ -464,6 +477,14 @@ While `author_type = 'Bot'` explicitly isolates dedicated bot accounts, **if a d
 
 For this reason, quantifying how many skills are created or maintained by AI agents versus human developers remains an active empirical research question highlighted in the dataset's challenge paper[3][4].
 
+---
+References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+2. **Source Title 2** - GitHub - giuseppedestefanis/gitskills-sample | Anonymisation
+3. **Source Title 3** - Gitskills_Preprint.pdf | GitHub public repositories points b and c
+4. **Source Title 4** - MSR 2027 - Mining Challenge - MSR 2027 | Challenges
+---
+
 ## Q9: Is revision history of the skill file or just first and last commit? A skill file could have been copied and later that file could have been updated with additional skills. So initially the sha will be same but as commit history moves the file could have new sha. Is there any way to identify this link?
 ### 1\. Revision History: Summary Fields vs. Full Commit Logs
 
@@ -495,6 +516,23 @@ However, you can trace and identify links between modified versions using these 
 #### **B. External Mining (Bring Your Own Data)**
 
 The MSR Mining Challenge explicitly supports a **"Bring Your Own Data" (BYOD)** policy[13]. Because `artifacts` contains `repo_full_name` and file `path` values[1], researchers can query the GitHub REST/GraphQL APIs or run local `git log -p` commands on cloned repositories to extract full revision histories, commit trees, and exact line-by-line diffs as files evolve over time[13].
+
+---
+## References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+2. **Source Title 2** - GitHub - giuseppedestefanis/gitskills-sample | Known Limitations
+3. **Source Title 3** - GitHub - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description Paragraph 2
+4. **Source Title 4** - Gitskills_Preprint.pdf | High-Level Overview Paragraph 3
+5. **Source Title 5** - Gitskills_Preprint.pdf | Table # Records Content | History
+6. **Source Title 6** - GitHub - giuseppedestefanis/gitskills-sample | Anonymisation 
+7. **Source Title 7** - Gitskills_Preprint.pdf | Internal Structure
+8. **Source Title 8** - GitHub - giuseppedestefanis/gitskills-sample | How the data was collected
+9. **Source Title 9** - Gitskills_Preprint.pdf | Development of a shared format Point 2
+10. **Source Title 10** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+11. **Source Title 11** - Gitskills_Preprint.pdf | Development of a shared format Point 3
+12. **Source Title 12** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description Paragraph 3
+13. **Source Title 13** - MSR 2027 - Mining Challenge - MSR 2027 | FAQ 1
+---
 
 ## Q10: Is there any information about skills/subsets of skills that are reused? Any quality indicator implying from the number of copies made? Hot skills? Subset of skills divided and shared among multiple repositories?
 ### 1\. Reused Skills and Reuse Distribution
@@ -529,6 +567,21 @@ ORDER BY copies DESC LIMIT 10;
   * **55.4%** sit under a general `skills/` directory[1].
   * **9.8%** sit in canonical paths like `.claude/skills/
 
+---
+## References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+2. **Source Title 2** - Gitskills_Preprint.pdf | GitHub public repositories Point 3
+3. **Source Title 3** - MSR 2027 - Mining Challenge - MSR 2027 | Development of a shared format Point 2
+4. **Source Title 4** - GitSkills: A Dataset of Agent Skills on GitHub | Zenodo | Description Paragraph 2
+5. **Source Title 5** - GitSkills: A Dataset of Agent Skills on GitHub | Abstract
+6. **Source Title 6** - GitHub - giuseppedestefanis/gitskills-sample | Two views of the full dataset
+7. **Source Title 7** - MSR 2027 - Mining Challenge - MSR 2027 | Giskills
+8. **Source Title 8** - Gitskills_Preprint.pdf | GitHub public repositories Point 4
+9. **Source Title 9** - Gitskills_Preprint.pdf | Gitskils Point 4
+10. **Source Title 11** - Gitskills_Preprint.pdf | GitHub public repositories Point 5
+11. **Source Title 12** - MSR 2027 - Mining Challenge - MSR 2027 | Gitskills Point 5
+---
+
 ## Q11: Can the skill.md file give any information of its creation - agent, tool, official skills from frontier model creators, templates widely shared or promoted, bots or shared collaboration with user &amp; LLM?
 A `SKILL.md` file and its surrounding directory reveal rich information about how the skill was created, which tools or frontier models it targets, whether it originated from official creators, and whether human-LLM collaboration or automated bots were involved[1].
 
@@ -557,6 +610,11 @@ A `SKILL.md` file and its surrounding directory reveal rich information about ho
 
 * **Verbatim Copying**: Because agent skills lack a central package manager, **50.5% of all** **SKILL.md** **files in the dataset are byte-for-byte verbatim copies** of another file[7][20].
 * **Scaffolding &amp; Boilerplate**: Highly copied skills (identifiable by high copy counts for a single content hash `file_sha`) point directly to widely promoted project templates, community catalogs, or framework scaffolding tools that auto-generate skill files when initializing new projects[20].
+
+---
+## References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/g
+---
 
 ## Q12: How did the authors test data sanctity? How did they handle when github APIs hit rate limit or any network error caused improper repo information. Trying to figure how to eliminate records that have data quality issues
 To ensure data sanctity and build a reliable dataset despite the scale and unpredictability of GitHub's network APIs, the creators of **GitSkills** implemented several automated validation steps, fallback repair mechanisms, and explicit tracking flags[1].
@@ -636,4 +694,15 @@ WHERE history_fetched = 1        -- Commit history successfully fetched [1]
   AND composition_fetched = 1    -- Directory contents successfully fetched [1]
   AND composition_truncated = 0; -- Excludes massive folders that exceeded the l
 ```
-
+---
+## References:
+1. **Source Title 1** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+2. **Source Title 2** - GitHub - giuseppedestefanis/gitskills-sample | How the data was collected
+3. **Source Title 3** - Gitskills_Preprint.pdf | Appendix of Data Construction
+4. **Source Title 4** - Gitskills_Preprint.pdf | Web Artifacts Builder
+5. **Source Title 5** - GitHub - giuseppedestefanis/gitskills-sample | Anonymisation
+6. **Source Title 6** - Gitskills_Preprint.pdf | High-Level Overview Paragraph 1
+7. **Source Title 7** - GitHub - giuseppedestefanis/gitskills-sample | Descriptive Statistics
+8. **Source Title 8** - Gitskills\_Preprint.pdf | Table # Records Content
+9. **Source Title 9** - GitHub - giuseppedestefanis/gitskills-sample | Schema
+---
