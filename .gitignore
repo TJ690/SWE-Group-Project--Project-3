@@ -1,7 +1,9 @@
 .DS_Store
-src/data/gitskills_data/data/
+src/data/gitskills_data/*
 src/data/gitskills_data/generated_data/
 /src/data/gitskills_data/export.log
 /src/data/gitskills_data/upload.log
 /src/data/gitskills_data/README.md
 /src/data/gitskills_data/.gitattributes
+/src/notebooks/.ipynb_checkpoints/*
+/src/data/generated_data/*
