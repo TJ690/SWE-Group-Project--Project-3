@@ -10,8 +10,10 @@ This project aims to investigate whether we can distinguish likely human-authore
 
 ## Repository Structure
 - src/ - pipeline code
+- src/data/ - data download script; holds the git-ignored dataset and generated files (see Dataset Acquisition)
+- src/notebooks/ - EDA notebooks
+- db/ - DuckDB SQL that builds the generated data and runs exploratory queries
 - tests/ - unit tests
-- data/ data acquisition instructions and small samples (see data/README.md)
 - results/ - generated output tables
 - figures/ - generated plots
 - report/ - research report drafts
@@ -52,7 +54,65 @@ Use Python 3.13. Commands below are run from the repository root.
    Select the **GitSkills (.venv)** kernel in each notebook.
 
 ## Dataset Acquisition
-This project uses a sample of the GitSkills dataset (Hugging Face: mvaccargiu/gitskills). See data/README.md for download instructions. Only commit the sample in data/samples/.
+The analysis uses the full GitSkills dataset (Hugging Face: [mvaccargiu/gitskills](https://huggingface.co/datasets/mvaccargiu/gitskills)). It is about 13 GB, so it is never committed to git.
+
+### Where the data lives
+Both folders sit under `src/data/` and are listed in `.gitignore`:
+
+```
+src/data/
+  download_data.py          tracked: downloads the dataset
+  gitskills_data/           ignored: raw dataset (download)
+    data/
+      artifacts/*.parquet
+      artifact_siblings/*.parquet
+      mining_runs/*.parquet
+      repos/*.parquet
+  generated_data/           ignored: derived files built from the raw data
+    skill_features.parquet
+    file_agents.parquet
+    repo_profile.parquet
+    sibling_files.parquet
+```
+
+Keep these exact paths. The notebooks in `src/notebooks/` and the SQL in `db/` read from them. Run `git status` after downloading. It should list no files under `src/data/` other than `download_data.py`.
+
+### 1. Download the raw data
+With the virtual environment active (see Setup), run the script from `src/data/`. It writes to `./gitskills_data`, relative to the current folder:
+
+```bash
+cd src/data
+python download_data.py
+cd ../..
+```
+
+The download is large and can take a long time. Re-running the script resumes and skips files that are already complete. Check that `src/data/gitskills_data/data/artifacts/` contains `part-*.parquet` files.
+
+### 2. Build the generated files
+The EDA notebooks also read four derived Parquet files. Each is built by one SQL script in `db/`. Run these from the repository root. DuckDB is already installed by `requirements.txt`:
+
+```bash
+mkdir -p src/data/generated_data
+python -c "import duckdb; duckdb.connect().execute(open('db/content_and_structure.sql').read())"
+python -c "import duckdb; duckdb.connect().execute(open('db/agent_ecosystem.sql').read())"
+python -c "import duckdb; duckdb.connect().execute(open('db/repos.sql').read())"
+python -c "import duckdb; duckdb.connect().execute(open('db/siblings_data.sql').read())"
+```
+
+| Script | Writes |
+|---|---|
+| `db/content_and_structure.sql` | `generated_data/skill_features.parquet` |
+| `db/agent_ecosystem.sql` | `generated_data/file_agents.parquet` |
+| `db/repos.sql` | `generated_data/repo_profile.parquet` |
+| `db/siblings_data.sql` | `generated_data/sibling_files.parquet` |
+
+On Windows, use `mkdir src\data\generated_data` (PowerShell: `New-Item -ItemType Directory -Force src/data/generated_data`).
+
+### 3. Update the data paths
+The notebooks and SQL files currently hard-code absolute paths to the original author's machine, for example `/Users/home/workspace/.../src/data/gitskills_data/...`. After cloning, replace that prefix with the location of your clone:
+
+- In each notebook in `src/notebooks/`, edit the `*_path` variables in the first code cell.
+- In each `db/*.sql` file, edit the `SET VARIABLE` lines and the `COPY ... TO` path.
 
 ## Running the Pipeline
 To be added once the pipeline is implemented

@@ -1,10 +1,9 @@
 .DS_Store
 .venv/
-src/data/gitskills_data/*
-src/data/gitskills_data/generated_data/
-/src/data/gitskills_data/export.log
-/src/data/gitskills_data/upload.log
-/src/data/gitskills_data/README.md
-/src/data/gitskills_data/.gitattributes
-/src/notebooks/.ipynb_checkpoints/*
-/src/data/generated_data/*
+.ipynb_checkpoints/
+
+# Raw GitSkills dataset downloaded from Hugging Face (about 13 GB). Never commit.
+src/data/gitskills_data/
+
+# Derived Parquet files written by db/*.sql (about 0.5 GB). Rebuild locally.
+src/data/generated_data/
