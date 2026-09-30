@@ -1,6 +1,6 @@
-SET VARIABLE repos = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/repos/*.parquet';
-SET VARIABLE artifacts = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/artifacts/*.parquet';
-SET VARIABLE repo_profile = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/repo_profile.parquet';
+SET VARIABLE repos = 'src/data/gitskills_data/data/repos/*.parquet';
+SET VARIABLE artifacts = 'src/data/gitskills_data/data/artifacts/*.parquet';
+SET VARIABLE repo_profile = 'src/data/generated_data/repo_profile.parquet';
 
 COPY (
 WITH per_repo AS (
@@ -22,5 +22,5 @@ SELECT r.full_name, r.owner, r.stars, r.forks, r.is_fork, r.language, r.license,
             WHEN p.files <= 100 THEN '21-100' WHEN p.files <= 1000 THEN '101-1000' ELSE '>1000' END AS size_tier
 FROM read_parquet(getvariable('repos')) r
 JOIN per_repo p ON p.repo_full_name = r.full_name
-) TO '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/repo_profile.parquet' (FORMAT parquet);
+) TO 'src/data/generated_data/repo_profile.parquet' (FORMAT parquet);
 

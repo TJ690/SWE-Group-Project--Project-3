@@ -1,4 +1,4 @@
-SET VARIABLE artifacts = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/artifacts/*.parquet';
+SET VARIABLE artifacts = 'src/data/gitskills_data/data/artifacts/*.parquet';
 
 COPY (
 SELECT repo_full_name, path, file_sha, location_class,
@@ -23,5 +23,5 @@ SELECT repo_full_name, path, file_sha, location_class,
          ELSE 'Other dot-folder'
        END AS agent_folder
 FROM read_parquet(getvariable('artifacts'))
-) TO '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/file_agents.parquet' (FORMAT parquet);
+) TO 'src/data/generated_data/file_agents.parquet' (FORMAT parquet);
 

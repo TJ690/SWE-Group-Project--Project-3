@@ -1,7 +1,7 @@
-SET VARIABLE repos = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/repos/*.parquet';
-SET VARIABLE artifacts = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/artifacts/*.parquet';
-SET VARIABLE artifact_siblings = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/artifact_siblings/*.parquet';
-SET VARIABLE mining_runs = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/mining_runs/*.parquet';
+SET VARIABLE repos = 'src/data/gitskills_data/data/repos/*.parquet';
+SET VARIABLE artifacts = 'src/data/gitskills_data/data/artifacts/*.parquet';
+SET VARIABLE artifact_siblings = 'src/data/gitskills_data/data/artifact_siblings/*.parquet';
+SET VARIABLE mining_runs = 'src/data/gitskills_data/data/mining_runs/*.parquet';
 
 SELECT SUM(history_fetched = 1) AS with_history,
        COUNT(*)                 AS distinct_skills,

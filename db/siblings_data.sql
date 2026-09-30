@@ -1,5 +1,5 @@
-SET VARIABLE artifact_siblings = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/artifact_siblings/*.parquet';
-SET VARIABLE siblings = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/sibling_files.parquet';
+SET VARIABLE artifact_siblings = 'src/data/gitskills_data/data/artifact_siblings/*.parquet';
+SET VARIABLE siblings = 'src/data/generated_data/sibling_files.parquet';
 
 COPY (
 SELECT s.repo_full_name, s.artifact_path, s.entry_name, s.entry_size, s.entry_sha,
@@ -25,6 +25,6 @@ SELECT s.repo_full_name, s.artifact_path, s.entry_name, s.entry_size, s.entry_sh
        END AS file_category
 FROM read_parquet(getvariable('artifact_siblings')) s
 WHERE s.entry_type = 'file'
-) TO '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/sibling_files.parquet' (FORMAT parquet, COMPRESSION zstd);
+) TO 'src/data/generated_data/sibling_files.parquet' (FORMAT parquet, COMPRESSION zstd);
 
 

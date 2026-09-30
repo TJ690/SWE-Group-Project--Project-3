@@ -108,11 +108,11 @@ python -c "import duckdb; duckdb.connect().execute(open('db/siblings_data.sql').
 
 On Windows, use `mkdir src\data\generated_data` (PowerShell: `New-Item -ItemType Directory -Force src/data/generated_data`).
 
-### 3. Update the data paths
-The notebooks and SQL files currently hard-code absolute paths to the original author's machine, for example `/Users/home/workspace/.../src/data/gitskills_data/...`. After cloning, replace that prefix with the location of your clone:
+### 3. How the paths resolve
+The notebooks and SQL use relative paths, so nothing needs editing after you clone. Relative paths depend on the folder the code runs from:
 
-- In each notebook in `src/notebooks/`, edit the `*_path` variables in the first code cell.
-- In each `db/*.sql` file, edit the `SET VARIABLE` lines and the `COPY ... TO` path.
+- **Notebooks** in `src/notebooks/` read `../data/gitskills_data/data/...` and `../data/generated_data/...`. Jupyter and VS Code/Cursor use the notebook's own folder as the working directory. If you run a notebook's code from another folder, change the `*_path` variables in its first cell.
+- **SQL** in `db/` reads and writes `src/data/...`. Run it from the repository root, as in step 2.
 
 ## Running the Pipeline
 To be added once the pipeline is implemented

@@ -1,4 +1,4 @@
-SET VARIABLE artifacts = '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/gitskills_data/data/artifacts/*.parquet';
+SET VARIABLE artifacts = 'src/data/gitskills_data/data/artifacts/*.parquet';
 
 COPY (
 WITH s AS (
@@ -30,7 +30,7 @@ SELECT file_sha, location_class, frontmatter_valid, body_chars,
        length(regexp_replace(body, '[\x00-\x7F]', '', 'g')) * 1.0
          / greatest(length(body), 1)                                          AS non_ascii_ratio
 FROM s
-) TO '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/skill_features.parquet' (FORMAT parquet, COMPRESSION zstd);
+) TO 'src/data/generated_data/skill_features.parquet' (FORMAT parquet, COMPRESSION zstd);
 
 SELECT COUNT(*)                                            AS skills,
        quantile_cont(body_words, [.1, .25, .5, .75, .9])  AS body_words_p10_p25_p50_p75_p90,
@@ -48,7 +48,7 @@ SELECT COUNT(*)                                            AS skills,
        ROUND(AVG(fm_license::INT), 3)                      AS share_fm_license,
        ROUND(AVG(fm_version_or_metadata::INT), 3)          AS share_fm_version_metadata,
        ROUND(AVG((non_ascii_ratio > 0.2)::INT), 3)         AS share_mostly_non_english
-FROM '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/skill_features.parquet';
+FROM 'src/data/generated_data/skill_features.parquet';
 
 SELECT location_class, COUNT(*) AS skills,
        median(body_words)                          AS median_words,
@@ -56,12 +56,12 @@ SELECT location_class, COUNT(*) AS skills,
        ROUND(AVG((code_blocks > 0)::INT), 3)       AS share_code_blocks,
        ROUND(AVG(has_examples_section::INT), 3)    AS share_examples_section,
        ROUND(AVG(has_when_to_use::INT), 3)         AS share_when_to_use
-FROM '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/skill_features.parquet'
+FROM 'src/data/generated_data/skill_features.parquet'
 GROUP BY 1 ORDER BY skills DESC;
 
 SELECT CASE WHEN body_words < 100 THEN '<100' WHEN body_words < 250 THEN '100-249'
             WHEN body_words < 500 THEN '250-499' WHEN body_words < 1000 THEN '500-999'
             WHEN body_words < 2000 THEN '1000-1999' WHEN body_words < 5000 THEN '2000-4999'
             ELSE '5000+' END AS words, MIN(body_words) AS sort_key, COUNT(*) AS skills
-FROM '/Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/generated_data/skill_features.parquet'
+FROM 'src/data/generated_data/skill_features.parquet'
 GROUP BY 1 ORDER BY sort_key;
