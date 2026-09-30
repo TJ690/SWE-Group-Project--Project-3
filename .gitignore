@@ -1,4 +1,5 @@
 .DS_Store
+.venv/
 src/data/gitskills_data/*
 src/data/gitskills_data/generated_data/
 /src/data/gitskills_data/export.log

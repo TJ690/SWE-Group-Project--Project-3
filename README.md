@@ -20,11 +20,36 @@ This project aims to investigate whether we can distinguish likely human-authore
 - ai-use-log.md - AI usage disclosure
 
 ## Setup
-1. Clone the repository: `https://github.com/TJ690/SWE-Group-Project--Project-3`
-2. Create the virtual environment:
-  - python -m venv .venv
-  - .venv\Scripts\Activate.ps1
-3. Install dependencies: pip install -r requirements.txt
+Use Python 3.13. Commands below are run from the repository root.
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/TJ690/SWE-Group-Project--Project-3
+   cd SWE-Group-Project--Project-3
+   ```
+2. Create and activate a virtual environment.
+
+   macOS and Linux:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+   Windows (PowerShell):
+   ```powershell
+   python -m venv .venv
+   .venv\Scripts\Activate.ps1
+   ```
+   The shell prompt shows `(.venv)` while the environment is active. Leave it with `deactivate`.
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Point Jupyter at this environment before opening notebooks in `src/notebooks/`:
+   ```bash
+   python -m ipykernel install --user --name gitskills --display-name "GitSkills (.venv)"
+   ```
+   Select the **GitSkills (.venv)** kernel in each notebook.
 
 ## Dataset Acquisition
 This project uses a sample of the GitSkills dataset (Hugging Face: mvaccargiu/gitskills). See data/README.md for download instructions. Only commit the sample in data/samples/.
