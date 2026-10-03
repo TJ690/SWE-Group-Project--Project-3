@@ -1,1 +1,8 @@
-
+duckdb==1.5.5
+huggingface_hub==2.0.0
+ipykernel==7.3.0
+matplotlib==3.11.1
+numpy==2.5.2
+pandas==3.0.5
+scikit-learn==1.9.0
+seaborn==0.13.2
