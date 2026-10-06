@@ -115,13 +115,40 @@ The notebooks and SQL use relative paths, so nothing needs editing after you clo
 - **SQL** in `db/` reads and writes `src/data/...`. Run it from the repository root, as in step 2.
 
 ## Running the Pipeline
-To be added once the pipeline is implemented
+After completing the Setup and Dataset Acquisition above:
+1. Open any notebook in `src/notebooks/` using **GitSkills (.venv)** kernel.
+2. Run all cells top to bottom.
+
+Each notebook covers one topic and runs independently:
+
+| Notebook | Topic |
+|---|---|
+| `EDA_integrity` | Row counts, key integrity, mining runs, adoption over time |
+| `EDA_copies` | Exact duplicates, most-copied skills, in-repo vs. cross-owner reuse |
+| `EDA_near_duplicates` | Near-duplicate detection via whitespace merges and TF-IDF similarity |
+| `EDA_names` | Skill-name distribution |
+| `EDA_content` | Body length, structure, and front-matter features |
+| `EDA_agents` | Agent folders (`.claude`, `.cursor`, etc.) and cross-agent mirroring |
+| `EDA_authorship` | Commit history, bots, AI trailers, Claude models, revisions, bulk commits |
+| `EDA_repos`, `EDA_siblings` | Repository profile and sibling-file analysis |
 
 ## Outputs
-To be added
+Each notebook in `src/notebooks/` contains its own tables and plots as saved cell outputs. Open the notebook directly to view the results. The headline findings so far:
+- 3,797,117 `SKILL.md` files, but only 1,877,981 distinct contents. This means 50.5% of files are redundant copies.
+- Whitespace/formatting normalization merges 198,374 additional contents, about 10.65% of distinct contents that exact-hashing misses.
+- On a 20,000-skill sample, 12.1% have a near-twin at cosine similarity >= 0.8. This ranges from 5.3% at a .95 threshold to 15.4% at a .60 threshold.
+
+**Adoption over time**
+- Skill creation closely tracks the agent-skill format's launch (Oct 2025): new skills grew from 1,265/month at launch and peaked at 86,000/month by April 2026. It holds at a similar level through June before dropping off in the partial July 2026 snapshot month.
+- New repository adoption follows a similar curve, peaking around 48,700 new repos/month in April 2026.
+
+**Data Integrity**
+- 0 malformed deduplication groups and 0 representative rows missing content.
+
+  Generated derived data lives in `src/data/generate_data/` (git-ignored, and built with the `db/*.sql` scripts described above).
 
 ## Current Status
-Pre-sprint: repository skeleton, finalized research question, pulled initial data sample
+Sprint 1 complete: research questions finalized, full dataset acquisition pipeline built, 8 exploratory-analysis notebooks covering integrity, duplication, content structure, agent ecosystems, authorship signals, and repository/sibling-file profiles. Initial Sprint 1 report and figures added.
 
 ## Limitations
 See THREATS_TO_VALIDITY.md for full report. Key limitation: There is no way to be sure of the authorship label for GitSkills artifacts, so all classifications are heuristic signals, not facts. 
