@@ -148,7 +148,7 @@ Each notebook in `src/notebooks/` contains its own tables and plots as saved cel
   Generated derived data lives in `src/data/generate_data/` (git-ignored, and built with the `db/*.sql` scripts described above).
 
 ## Current Status
-Sprint 1 complete: research questions finalized, full dataset acquisition pipeline built, 8 exploratory-analysis notebooks covering integrity, duplication, content structure, agent ecosystems, authorship signals, and repository/sibling-file profiles. Initial Sprint 1 report and figures added.
+Sprint 1 complete: research questions finalized, full dataset acquisition pipeline built, 8 exploratory-analysis notebooks covering integrity, duplication, content structure, agent ecosystems, authorship signals, and repository/sibling-file profiles. Initial Sprint 1 report and figures added. See Retrospective-report for full breakdown of what was learned and how we will be moving forward.
 
 ## Limitations
 See THREATS_TO_VALIDITY.md for full report. Key limitation: There is no way to be sure of the authorship label for GitSkills artifacts, so all classifications are heuristic signals, not facts. 
