@@ -20,3 +20,13 @@ Deduplication by content hash is clean and reliable, but a large amount of addit
 ## What changed in our back log/plan as a result
 
 ## Action items for Sprint 2
+• A working implementation of the core mining, extraction, similarity, classification,
+traceability, or visualization method.
+• Automated tests for important parsing, transformation, matching, or metric functions.
+• A validation sample, manual annotation protocol, or other evaluation design.
+• Preliminary results with reproducible figures or tables.
+• At least one pull request reviewed by a different team member than the author.
+• An updated research report containing the background, method, implementation, and
+preliminary results.
+• A retrospective that records changes to the research question, method, scope, or
+interpretation.
