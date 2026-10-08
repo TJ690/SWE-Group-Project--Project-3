@@ -8,12 +8,11 @@
 
 ## What was challenging
 - The one source of direct authorship-adjacent signals is only available for a minority of skills, which limits how far commit-based classification alone can go.
-- Bulk commits can make a single person's tooling activity look like widespread "authorship", which isn't what we're trying to measure.
-- Everything we build has to be treated as a heuristic signal, not a confirmed label, which decides how cautious we have to be when stating any result.
+- Several of our candidate signals turned out to be location not authorship. Location correlates with tool family, not necessarily authorship mode; our templated-category threshold, which is 10+ copies, could be re-measuring duplication. And adoption timing could explain class differences on its own. This information shaped how we scoped our project.
+- No field in the dataset labels authorship directly.
 
 ## What we learned about the data/problem
-- Commit-history coverage is a hard ceiling. Our classification approach needs two tiers: a higher-confidence tier for the subset with commit history, and a content-only tier for the rest.
-- Bulk-commit activity distorts what commit metadata can tell us about authorship. We need an explicit rule for detecting and excluding or flagging these before treating commit type as a signal.
+- Commit metadata is not a clean authorship signal. An AI co-author trailer on a bulk install records who ran the install, not who wrote the skill. This became one of our 5 competing explanations, with an exclusion-cutoff baseline to test against.
 - Highly templated skills are clearly different from the others: longer, more often have Examples and "When to use" sections, rarely edited, and live in large repositories.
 - A real AI-authorship signal exists in the data in the form of explicit `Co-authored-by` trailers, dominated by Claude, but only covers skills where someone discloses it.
 - Deduplication by content hash is clean and reliable, but a large amount of additional duplication (whitespace/formatting variants) is invisible to exact-hash matching and needs near-duplicate detection to be found.
