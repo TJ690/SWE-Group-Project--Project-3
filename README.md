@@ -1,25 +1,41 @@
 # SWE-Group-Project--Project-3 - GitSkills Authorship Signal Detection
 
 ## Overview
-This project aims to investigate whether we can distinguish likely human-authored, agent-assisted, and highly templated skills by observing structural, linguistic, and commit-metadata patterns in GitSkills artifacts. This is a class project for SWE-380/CSC-580, inspired by the MSR 2027 Mining Challenge, focusing on research question #6. Results are framed as heuristic signals and not confirmed authorship claims - See THREATS_TO_VALIDITY.md.
+This research studies authorship signals in the GitSkills dataset. It addresses the following question, inspired by the MSR 2027 Mining Challenge:
+
+> Can we distinguish likely human-authored, agent-assisted, and highly templated skills using their structure, wording, and commit history, and how reliable are these signals?
+
+The analysis explores the data and applies simple label rules. Wording features and checks of label reliability are planned. The labels are clues about authorship, not confirmed facts or measures of skill quality. See [the research question](RESEARCH_QUESTION.md), [Sprint 1 report](report/sprint1_report.md), and [limits of the study](THREATS_TO_VALIDITY.md).
 
 ## Team
- - Product Owner
- - Scrum Master
- - Developers/Researchers
+
+- Product Owner
+
+- Scrum Master
+
+- Developers/Researchers
 
 ## Repository Structure
-- src/ - pipeline code
-- src/data/ - data download script; holds the git-ignored dataset and generated files (see Dataset Acquisition)
-- src/notebooks/ - EDA notebooks
-- db/ - DuckDB SQL that builds the generated data and runs exploratory queries
-- tests/ - unit tests
-- results/ - generated output tables
-- figures/ - generated plots
-- report/ - research report drafts
-- docs/decisions/ - decision log
-- docs/meeting-notes/ - sprint meeting notes
-- ai-use-log.md - AI usage disclosure
+
+- `src/data/download_data.py` - downloads the raw dataset
+
+- `src/notebooks/` - nine exploratory analysis notebooks
+
+- `db/` - four SQL build scripts and other exploratory SQL queries
+
+- `figures/` - charts used in the research report
+
+- `report/` - research report drafts
+
+- `docs/` - challenge paper, work progress, and retrospectives
+
+- `elicitation/` - notebook interview notes
+
+- `RESEARCH_QUESTION.md` - research question, competing explanations, and planned checks
+
+- `DATA_DICTIONARY.md` - data fields used in the analysis
+
+- `THREATS_TO_VALIDITY.md` - current limits of the study
 
 ## Setup
 Use Python 3.13. Commands below are run from the repository root.
@@ -29,6 +45,7 @@ Use Python 3.13. Commands below are run from the repository root.
    git clone https://github.com/TJ690/SWE-Group-Project--Project-3
    cd SWE-Group-Project--Project-3
    ```
+
 2. Create and activate a virtual environment.
 
    macOS and Linux:
@@ -43,10 +60,12 @@ Use Python 3.13. Commands below are run from the repository root.
    .venv\Scripts\Activate.ps1
    ```
    The shell prompt shows `(.venv)` while the environment is active. Leave it with `deactivate`.
+
 3. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
+
 4. Point Jupyter at this environment before opening notebooks in `src/notebooks/`:
    ```bash
    python -m ipykernel install --user --name gitskills --display-name "GitSkills (.venv)"
@@ -109,17 +128,22 @@ python -c "import duckdb; duckdb.connect().execute(open('db/siblings_data.sql').
 On Windows, use `mkdir src\data\generated_data` (PowerShell: `New-Item -ItemType Directory -Force src/data/generated_data`).
 
 ### 3. How the paths resolve
-The notebooks and SQL use relative paths, so nothing needs editing after you clone. Relative paths depend on the folder the code runs from:
+Keep the raw data in `src/data/gitskills_data/` and the generated files in `src/data/generated_data/`.
 
-- **Notebooks** in `src/notebooks/` read `../data/gitskills_data/data/...` and `../data/generated_data/...`. Jupyter and VS Code/Cursor use the notebook's own folder as the working directory. If you run a notebook's code from another folder, change the `*_path` variables in its first cell.
-- **SQL** in `db/` reads and writes `src/data/...`. Run it from the repository root, as in step 2.
+- **Notebooks:** Run from the repository root or a folder inside it. The notebooks find the data folders automatically. If a required file is missing, download the raw data or build the generated files first.
+
+- **SQL scripts:** Run from the repository root. Their paths start with `src/data/`, as shown in the build commands above.
 
 ## Running the Pipeline
 After completing the Setup and Dataset Acquisition above:
-1. Open any notebook in `src/notebooks/` using **GitSkills (.venv)** kernel.
-2. Run all cells top to bottom.
 
-Each notebook covers one topic and runs independently:
+1. Build all four generated files first, since even the shared notebook setup checks for generated files.
+
+2. Open any notebook in `src/notebooks/` using **GitSkills (.venv)** kernel.
+
+3. Run all cells top to bottom.
+
+Each notebook covers one topic and runs independently after the data files are built:
 
 | Notebook | Topic |
 |---|---|
@@ -130,25 +154,37 @@ Each notebook covers one topic and runs independently:
 | `EDA_content` | Body length, structure, and front-matter features |
 | `EDA_agents` | Agent folders (`.claude`, `.cursor`, etc.) and cross-agent mirroring |
 | `EDA_authorship` | Commit history, bots, AI trailers, Claude models, revisions, bulk commits |
-| `EDA_repos`, `EDA_siblings` | Repository profile and sibling-file analysis |
+| `EDA_repos` | Repository size, age, stars, and context by label |
+| `EDA_siblings` | Extra files bundled with skills |
+
+The pipeline is: **download raw Parquet files → build four derived files with DuckDB → run the notebooks → review tables and plots**. The notebooks group skills using copy counts and commit history.
 
 ## Outputs
 Each notebook in `src/notebooks/` contains its own tables and plots as saved cell outputs. Open the notebook directly to view the results. The headline findings so far:
+
 - 3,797,117 `SKILL.md` files, but only 1,877,981 distinct contents. This means 50.5% of files are redundant copies.
-- Whitespace/formatting normalization merges 198,374 additional contents, about 10.65% of distinct contents that exact-hashing misses.
-- On a 20,000-skill sample, 12.1% have a near-twin at cosine similarity >= 0.8. This ranges from 5.3% at a .95 threshold to 15.4% at a .60 threshold.
+
+- Removing front matter, ignoring case, and normalizing spacing merges 198,374 additional contents (10.6% of distinct contents). This groups similar bodies even when their headers differ.
+
+- In a 20,000-skill sample with bodies of at least 200 characters, 12.1% have a near-twin within that sample at cosine similarity >= 0.8. The comparison uses the first 5,000 characters of each normalized text. The share ranges from 5.3% at a .95 threshold to 15.4% at a .60 threshold.
 
 **Adoption over time**
-- Skill creation closely tracks the agent-skill format's launch (Oct 2025): new skills grew from 1,265/month at launch and peaked at 86,000/month by April 2026. It holds at a similar level through June before dropping off in the partial July 2026 snapshot month.
-- New repository adoption follows a similar curve, peaking around 48,700 new repos/month in April 2026.
+
+- Among distinct skills with history, first commits grew from 1,265 in October 2025 to a peak of 86,254 in May 2026. June stayed at a similar level. July is only partly collected, so its lower count does not show a confirmed decline.
+
+- Creation dates of repositories that host skills peak at 48,669 in April 2026. These dates show when the repositories were created, not when they first added a skill.
 
 **Data Integrity**
+
 - 0 malformed deduplication groups and 0 representative rows missing content.
 
-  Generated derived data lives in `src/data/generate_data/` (git-ignored, and built with the `db/*.sql` scripts described above).
+Derived data lives in `src/data/generated_data/` and is ignored by git. Report charts are stored in `figures/`.
 
-## Current Status
-Sprint 1 complete: research questions finalized, full dataset acquisition pipeline built, 8 exploratory-analysis notebooks covering integrity, duplication, content structure, agent ecosystems, authorship signals, and repository/sibling-file profiles. Initial Sprint 1 report and figures added. See Retrospective-report for full breakdown of what was learned and how we will be moving forward.
+## Sprint 1 Report
+The [Sprint 1 report](report/sprint1_report.md) summarizes the dataset exploration, initial findings, and label rules developed during Sprint 1.
+
+## Work Progress and Retrospectives
+See [work progress and retrospectives](docs/sprints/README.md) for completed work, lessons learned, and planned next steps.
 
 ## Limitations
-See THREATS_TO_VALIDITY.md for full report. Key limitation: There is no way to be sure of the authorship label for GitSkills artifacts, so all classifications are heuristic signals, not facts. 
+Only 24.4% of distinct skills have commit history. An AI co-author note can record an installation or sync rather than writing, and a missing note does not prove human authorship. The highly templated label currently means the same text appears in at least 10 files; it does not prove that a template was used. See [THREATS_TO_VALIDITY.md](THREATS_TO_VALIDITY.md).

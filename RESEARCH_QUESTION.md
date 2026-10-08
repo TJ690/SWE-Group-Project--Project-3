@@ -20,14 +20,14 @@ These categories represent the best available proxy given observable signals (se
 An individual GitSkill artifact -- one SKILL.md file, removing duplicated copies through content hash.
 
 ## Population and Sample
-The GitSkills dataset (Hugging Face: `mvaccargiu/gitskills`) has 3,797,117 SKILL.md files across 282,200 repositories, but once duplicate content is removed, we have 1,877,981 distinct contents. We work from a sample for development and reproducibility.
+The GitSkills dataset (Hugging Face: `mvaccargiu/gitskills`) has 3,797,117 SKILL.md files across 282,200 repositories, but once duplicate content is removed, we have 1,877,981 distinct contents. The exploratory analysis uses all distinct contents. Only the near-duplicate similarity check (TF-IDF) uses a 20,000-skill sample, because the full comparison does not fit in memory.
 
 ## Variables
 Features (independent variables):
 - Structural: heading/pattern, section consistency, document length
 - Linguistic: imperative-language density
 - Commit metadata: single-commit vs. iterative editing, commit message patterns
-- Repository context: repository size, contributor count, tool-family indicators
+- Repository context: repository size, age, stars, tool-family indicators (the dataset has no contributor count)
 
 ## Outcome (dependent variable)
 - Heuristic authorship-signal label produced by our classification method -- not a 100% verifiable truth.
