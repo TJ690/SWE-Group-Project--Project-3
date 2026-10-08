@@ -180,6 +180,9 @@ Each notebook in `src/notebooks/` contains its own tables and plots as saved cel
 
 Derived data lives in `src/data/generated_data/` and is ignored by git. Report charts are stored in `figures/`.
 
+## GitHub Project
+Our backlog and sprint tasks are tracked on the [GitHub project board](https://github.com/users/TJ690/projects/2).
+
 ## Sprint 1 Report
 The [Sprint 1 report](report/sprint1_report.md) summarizes the dataset exploration, initial findings, and label rules developed during Sprint 1.
 
