@@ -8,7 +8,7 @@ Our research question:
 
 > Can we tell apart skills that look **human-written**, **agent-assisted**, or **highly templated** (copied from a standard template), using the file's structure, its wording, and its commit history? And how far can we trust that signal?
 
-Why it matters: an agent follows a skill's instructions, and about one in nine skills ships scripts the agent may run. If we can say how a skill was probably made, people can judge how much to trust it.
+Why it matters: an agent follows a skill's instructions, and about one in nine skills ships scripts the agent may run. Understanding how a skill may have been made can help people review it. Authorship alone does not tell us whether it is safe or useful.
 
 **This sprint:** explore the data to learn what signals exist and how good they are. The wording analysis (such as how many commands a skill gives) is planned for the next phase.
 
@@ -24,19 +24,34 @@ We use the public **GitSkills** dataset (Hugging Face: `mvaccargiu/gitskills`).
 | **Distinct skills** (after removing exact copies) | **1,877,981** |
 | Distinct skills that have commit history | 458,548 (24.4%) |
 
-We count each distinct skill once (the unit of analysis), so a skill copied 500 times counts as one.
+We count each distinct content hash once (the unit of analysis), so a skill copied 500 times counts as one. The main counts use the full dataset. The TF-IDF similarity check uses a 20,000-skill sample.
+
+### How the pipeline works
+
+1. Download the raw Parquet files with `src/data/download_data.py`.
+
+2. Run four DuckDB scripts in `db/` to build content features, agent-folder mappings, repository profiles, and sibling-file data.
+
+3. Run the nine notebooks in `src/notebooks/`. They check data integrity, explore the dataset, apply label rules, and compare the groups.
+
+4. Read the saved tables and plots in the notebooks. The charts used in this report are stored in `figures/`.
+
+The notebooks group skills using copy counts and commit history. See [the README](../README.md) for the commands.
 
 ## 3. What the skill world looks like
 
 ### 3.1 The format is new and grew fast
 
-Skills were introduced in October 2025. Most of the activity is in the months since. The last month (July 2026) is only partly collected, so its drop is not a real decline.
+The chart tracks first commits for distinct skills with history from October 2025 onward. Their monthly count peaks at 86,254 in May 2026. It also shows creation dates of repositories that host skills, which are not the dates those repositories first added skills. July 2026 is only partly collected, so its lower count does not show a confirmed decline.
 
 ![New skills and host repositories per month](../figures/01_adoption_over_time.png)
 
 Most repositories are small, personal projects:
+
 - 86.2% of repositories were created in October 2025 or later.
+
 - 59.3% have no stars. Only 4.1% have 100 or more.
+
 - The most common languages are Python (25.4%) and TypeScript (23.8%).
 
 ### 3.2 A few big repositories hold a huge share of the files
@@ -48,7 +63,9 @@ Most repositories are small, personal projects:
 ### 3.3 Skills are copied a lot
 
 - 79.3% of distinct skills exist as a single file.
+
 - But **50.5% of all files are exact copies** of a skill that exists elsewhere.
+
 - The most copied skill appears in 1,409 files.
 
 The chart uses log scales: most skills have one copy, and very few have hundreds.
@@ -63,7 +80,7 @@ Where do the copies live? Of the 388,501 skills that are copied at all:
 |---|---:|---:|
 | inside one repository only | 82,413 | 21.2% |
 | across repositories of one owner | 75,733 | 19.5% |
-| across different owners (real reuse) | 230,355 | 59.3% |
+| across different owners | 230,355 | 59.3% |
 
 ### 3.4 What a typical skill looks like
 
@@ -72,9 +89,12 @@ The typical skill is short: a median of **639 words**. Seven in ten have between
 ![Skill length](../figures/05_skill_length.png)
 
 Other facts:
+
 - 36.3% of skills include extra files besides `SKILL.md`. 11.4% include scripts, mostly Python (63% of those) and shell.
+
 - 13.4% have broken or invalid front matter (the header block at the top).
-- Most skills are never edited after they are added: **66.3% have a single commit**.
+
+- Among distinct skills with collected history, **66.3% have one recorded commit**. This does not tell us whether they were edited elsewhere.
 
 ![Number of commits per skill](../figures/06_revision_activity.png)
 
@@ -82,18 +102,22 @@ Other facts:
 
 We cannot see who typed a skill, so we use clues and call the result a **heuristic label**, not a fact.
 
-| Clue | What it tells us |
-|---|---|
-| Commit message says `Co-authored-by: Claude` (or Cursor, Copilot, Codex, Gemini) | An AI tool was involved in the commit |
-| The commit was made by a coding-agent bot | An agent made the commit |
-| Same text appears in 10 or more files | Probably a template or a widely shared skill |
-| Committed alone by a person, no AI clue, text appears once | No sign of AI, "likely human" |
+The rules in `EDA_authorship.ipynb` are applied in this order:
 
-**Important:** 30.3% of skills with history have an AI co-author line, and 95.2% of those name Claude.
+| Label | Rule used in Sprint 1 |
+|---|---|
+| Highly templated | The same content hash appears in at least 10 files, with or without commit history. |
+| Agent-assisted | History is available, the first-commit batch has fewer than 6 skills, and the first commit has a recognized AI co-author note or a coding-agent bot author. Release, sync, distribution, and other non-coding bots are excluded. |
+| Likely human | History is available, a `User` account added the skill alone, neither the first nor last commit has a recognized AI note, and the content appears in only one file. |
+| Insufficient evidence | None of the rules above apply. |
+
+The AI note check looks for Claude/Anthropic, Cursor, Copilot, Codex/OpenAI, and Gemini. Bot groups are based on account-name patterns. These rules can miss tools or misread account names. A highly templated label takes priority even if the skill also has an AI note. Copy count is a sign of reuse, not proof that a template was used.
+
+**Important:** 30.3% of distinct skills with history have a recognized AI co-author line in their first commit, and 95.2% of those name Claude.
 
 ### The bulk-install problem
 
-If someone asks an AI tool to copy 1,000 skills into a project, all 1,000 get the AI co-author line, but the AI wrote none of them. So we ignore the commit clues when 6 or more skills arrive in the same commit.
+If someone asks an AI tool to copy 1,000 skills into a project, all 1,000 get the AI co-author line, but the AI wrote none of them. So we exclude commit-based agent labels when the estimated batch contains 6 or more skills. The notebook estimates a batch by grouping representative skills with history by repository and first-commit timestamp, rather than by commit ID. This can miss copies or group separate commits that share a timestamp. A large batch is a warning sign, not proof of an install.
 
 ![How many skills are added in the same commit](../figures/07_bulk_commit_batches.png)
 
@@ -122,7 +146,9 @@ The rules are applied in order: templated first, then agent-assisted, then likel
 | Insufficient evidence | 1,699,301 | 90.5% |
 
 Two things to keep in mind:
+
 - "Likely human" only means we found no sign of AI. A missing AI note does not prove a person wrote it.
+
 - 90.5% is "insufficient evidence" mostly because three out of four skills have no commit history. It does not mean a fourth kind of author.
 
 ## 5. Do the three groups look different?
@@ -138,13 +164,13 @@ Highly templated skills are only 1.9% of distinct skills, but they make up **31.
 | Has an "Examples" section | 12.9% | 12.3% | 28.5% |
 | Has a "When to use" section | 14.1% | 13.5% | 35.5% |
 | Has a `license` field | 5.2% | 3.6% | 20.8% |
-| Single commit, never edited | 57.8% | 54.6% | 94.4% |
+| One recorded commit (among skills with history) | 57.8% | 54.6% | 94.4% |
 | Median skill files in its repository | 5 | 8 | 238 |
 | Lives in a repository with 100+ skill files | 4.0% | 5.4% | 61.3% |
 
 ![Structure by authorship label](../figures/09_structure_by_label.png)
 
-In short, templated skills are longer, more formal, rarely edited, and live inside large collections.
+The highly templated group has longer text, more sections, fewer recorded edits, and larger skill collections. Because copy count defines this group, these differences do not independently prove template-based authorship.
 
 ### 5.2 Human vs agent-assisted: barely
 
@@ -160,9 +186,9 @@ These two groups look almost the same on everything we measured:
 | Median repository size (skill files) | 5 | 8 |
 | Zero-star repository | 49.3% | 52.2% |
 
-The small differences mostly come from **where the skill is stored**. 71.8% of agent-assisted skills sit in a standard agent folder, against 42.8% of likely-human skills. Inside those folders, the two groups match almost exactly (median 694 vs 736 words).
+The comparisons suggest that **where the skill is stored** may explain some differences. 71.8% of agent-assisted skills sit in a standard agent folder, against 42.8% of likely-human skills. Inside those folders, the two groups match almost exactly (median 694 vs 736 words).
 
-Commit messages show one gap: 19.6% of agent-assisted skills have "install / sync / import" wording, against 8.7% for likely human. That is again the install effect.
+Commit messages show one gap: 19.6% of agent-assisted skills have "install / sync / import" wording, against 8.7% for likely human. This is consistent with an install effect, but does not establish the cause.
 
 ### 5.3 Repository clues
 
@@ -177,40 +203,39 @@ The `.claude/` number is partly circular. Claude Code both stores skills in `.cl
 ## 6. Other findings that affect later work
 
 - **Names are not identities.** The same front-matter `name` is used by many different texts. For example, `skill-creator` covers 2,765 different texts. We use the text hash, not the name.
-- **Exact-copy removal misses some copies.** After ignoring case and spacing, 198,374 more skills turn out to be copies. In a 20,000-skill sample, 12.1% have a near-twin (similarity of 0.8 or higher), and most twins belong to the same owner.
+
+- **Exact-copy removal misses some copies.** Removing front matter, ignoring case, and normalizing spacing merges 198,374 additional contents (10.6%). These bodies match under that rule even if their headers differ. In a 20,000-skill sample with bodies of at least 200 characters, 12.1% have a near-twin within the sample (similarity of 0.8 or higher). The TF-IDF check uses the first 5,000 normalized characters; it is not a full-dataset estimate. Most sampled near-twin pairs belong to the same owner.
+
 - **Bots are rare as authors.** Only 4,630 skills were first committed by a bot. Of those, 65% came from `github-actions[bot]`, which syncs or publishes files and does not write them.
 
 ## 7. What this means for the research question
 
 | Part of the question | Where we stand |
 |---|---|
-| Can we spot **highly templated** skills? | **Yes.** They differ clearly on copy count, structure, repository size and edit history. |
-| Can we spot **agent-assisted** skills? | **Partly.** The commit co-author line is the one clear signal. Text and structure add little on their own. |
+| Can we spot **highly templated** skills? | **We can identify highly copied text.** This group differs in structure, repository size and recorded edits, but copy count alone does not prove template use. |
+| Can we spot **agent-assisted** skills? | **We can identify disclosed AI involvement.** Commit notes and coding-agent bot names provide clues. Structure shows limited differences so far. Wording has not been compared yet. |
 | Can we spot **human-written** skills? | **Weak.** We can only say "no sign of AI". |
 | How reliable is the signal? | **Not measured yet.** We have no ground truth to check the labels against. |
 
-Competing explanations we must rule out (listed in `RESEARCH_QUESTION.md`):
-1. The label may just reflect **where** a skill is stored (tool folder).
-2. "Highly templated" may be only a **copy count**.
-3. The AI note may record **who ran an install**, not who wrote the text.
-4. Differences may reflect **when** a repository adopted skills.
-5. There may be **no real text signal** for human vs agent.
+## 8. Limits and open questions
 
-## 8. Limits to keep in mind
+Here is what limits our results. We still need to check these in Sprint 2, and `THREATS_TO_VALIDITY.md` has the same list.
 
-- Commit history exists for only 24.4% of skills, so most skills cannot get a commit-based label.
-- Labels are rules we chose, not verified facts. The cutoffs (6 files in a batch, 10 copies) are judgment calls.
-- Commit history describes the one chosen copy of a skill, which may sit in a different repository from the one that wrote it.
-- Skills from early adopters and Claude Code users are over-represented in the history-backed group.
-- The data covers public repositories only and is a lower bound.
+- We can't see who actually wrote a skill, so our labels are only clues, and "likely human" just means we didn't spot any sign of AI.
+- An AI note in a commit might only mean someone installed the skill, and some tools don't leave a note at all.
+- Finding the same skill in lots of places doesn't mean it came from a template.
+- Only about one in four skills has commit history, and most of those come from early adopters and Claude Code users.
+- We haven't yet checked how often our labels are right.
 
-## 9. Next steps (Phase 2)
+## 9. Next steps (Sprint 2 / Phase 2)
 
-1. **Wording features.** Measure command-style language, tone and typical AI phrasing, for all skills including the 76% with no history.
-2. **Hand-label a sample** of about 200-300 skills so we can measure how often the labels are right.
-3. **Test the simple explanations.** Check whether the full method beats simple baselines: folder alone, copy count alone, AI note alone.
-4. **Check the cutoffs.** Show how the labels change when the batch and copy thresholds move.
-5. **Write `THREATS_TO_VALIDITY.md`** with the limits above.
+1. **Wording features.** Compute command-style language, tone and typical AI phrasing for all skills, including the 76% with no commit history.
+
+2. **Hand-label a sample** of about 200 to 300 skills and report how often each labelling rule is right.
+
+3. **Check the cutoffs.** Test how the labels change when the cutoffs (6 skills in a batch, 10 copies) move.
+
+4. **Near-duplicates.** Run near-duplicate detection on the full population.
 
 ## 10. Where to find things
 
