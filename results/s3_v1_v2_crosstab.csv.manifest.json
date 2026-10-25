@@ -1,0 +1,18 @@
+{
+  "config_hash": "sha256:25fdf5268dc7456b480e2c8d742321eb9b5815a0350ba7cdaef93e9600187339",
+  "created_utc": "2026-10-24T06:31:37+00:00",
+  "git_commit": "d7f76c23a6e07d4c8aa9c68bdeb03b57db5ca620",
+  "inputs": {
+    "src/data/derived/s2_clusters.parquet": "sha256:0636795b5683f277e112addcc418724f9ea107364ef08cd47a23a18de5c68828",
+    "src/data/derived/s2_commit.parquet": "sha256:6ee6bc65872fa12b9e0a7aef9eff434caa5f9822929d327c66ba2a0ce5fd7cac",
+    "src/data/derived/s2_repo.parquet": "sha256:10edb098742bb50ec3ccdc6427b56d13b1454a247ffc790efe57e99dc3254f8d",
+    "src/data/derived/s2_structure.parquet": "sha256:9cb48067f2f757f37e8503a486fe6f1e9e49e92b207de5250f6b5ebabced1211",
+    "src/data/derived/s2_template.parquet": "sha256:ab47a4fadb62c801a761717cd264279faa2faeea6e55e8a8236ed7cbd29219a3",
+    "src/data/derived/s2_types.parquet": "sha256:0bad228602be5f2d05fc4bca845d1fbbd2e228589417dbac1a88f4bdf778f459",
+    "src/data/derived/s2_wording.parquet": "sha256:470ccd8e77445151a80b16a82c1dd68d749e069df8249c7cc0b85fa1fd2dc81f",
+    "src/data/derived/s3_labels_v1.parquet": "sha256:94b47905c58838e4d2f3105e28ec1934fead3ac8163c71dcb53440c53ac8dcf5",
+    "src/data/gitskills_data/data/artifacts": "dir_sha256:0435eb382d0cbb563c7833e6c4fa3cad49e5559652bb3bb924565cc7ef4630a8"
+  },
+  "output": "results/s3_v1_v2_crosstab.csv",
+  "rows": 11
+}

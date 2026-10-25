@@ -1,0 +1,43 @@
+# config/default.yaml  (loaded by skillsig.config.Config)
+seed: 20261015
+chunk_rows: 50000
+
+paths:
+  raw: src/data/gitskills_data/data
+  generated: src/data/generated_data
+  registry_repos: src/data/registry_repos
+  derived: src/data/derived
+  cache: src/data/cache
+  results: results
+  figures: figures
+
+thresholds:
+  bulk_batch_min: 6          # batch of >= this many skills = bulk install
+  templated_copies_min: 10   # copy count that marks highly_templated (v1 and baseline)
+  templated_jaccard_min: 0.80  # est. Jaccard to a registry version for near match (v2)
+  insufficient_conf_floor: low
+
+minhash:
+  num_perm: 128
+  shingle_words: 5
+  body_max_chars: 5000
+  lsh_threshold: 0.80
+  lsh_threshold_low: 0.60    # sensitivity + similarity validation pairs
+
+rq2:
+  substantive_body_change_pct: 5
+  grace_days: 30
+  grace_days_sensitivity: [0, 30, 90]
+  snapshot_date: auto        # max(mining_runs.finished_at)
+
+sample:
+  per_label: 60
+  boundary_oversample: true
+  similarity_pairs: 120
+
+github:
+  user_agent: skillsig-research/0.1
+  per_page: 100
+  max_calls: 2000
+  live_sample_repos: 300
+  checkpoint_every: 25

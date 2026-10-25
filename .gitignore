@@ -7,3 +7,13 @@ src/data/gitskills_data/
 
 # Derived Parquet files written by db/*.sql (about 0.5 GB). Rebuild locally.
 src/data/generated_data/
+
+# skillsig pipeline: registry clones, stage outputs, API cache, secrets, large exports.
+src/data/registry_repos/
+src/data/derived/
+src/data/cache/
+.env
+results/export/*.parquet
+results/annotation/
+
+.cursor/
