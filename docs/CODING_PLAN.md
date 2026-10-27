@@ -32,7 +32,7 @@ Equivalent CLI: `python -m skillsig <stage> [--dev-sample] [--force] [--config P
 
 - **Dev vs full:** always build with `--dev-sample` (50k skills, minutes). Full runs only at the end.
 - **Environment:** `GITHUB_TOKEN` (optional but recommended), `SKILLSIG_CONFIG` (default `config/default.yaml`).
-- **Stage to module map:** data -> `s0_data`; registry -> `s1_registry`; features and dedup -> `s2_features`; label -> `s3_labeling`; sample and evaluate -> `s4_validation`; analyze and rq2 -> `s5_analysis`; export -> `s6_report`.
+- **Stage to module map:** data -> `s0_intake`; registry -> `s1_registry`; features and dedup -> `s2_features`; label -> `s3_labeling`; sample and evaluate -> `s4_validation`; analyze and rq2 -> `s5_analysis`; export -> `s6_report`.
 - **Stage contract:** every module exposes `run(cfg, *, dev=False, force=False) -> StageResult`.
 
 ## 2. Data to download
@@ -68,7 +68,7 @@ src/
   notebooks/             (existing, untouched)
   skillsig/
     __init__.py __main__.py cli.py config.py paths.py provenance.py pipeline.py
-    s0_data/             loader.py schema_check.py devsample.py
+    s0_intake/           loader.py schema_check.py devsample.py
     s1_registry/         sources.py github_client.py mine_git.py versions.py changes.py
                          change_classifier.py match.py discover_popular.py adoption.py adoption_live.py
     s2_features/         structure.py commit.py repo_context.py wording.py minhash_cluster.py

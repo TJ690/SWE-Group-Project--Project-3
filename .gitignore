@@ -17,3 +17,9 @@ results/export/*.parquet
 results/annotation/
 
 .cursor/
+# Python bytecode caches, rebuilt on every run.
+__pycache__/
+*.py[cod]
+*.tmp
+# pipeline run logs
+logs/
