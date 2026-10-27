@@ -1,0 +1,4 @@
+grp,skills,p10,p50,p90,pct_lean_agent,pct_lean_human
+"1 history, disclosed trailer",3740,0.665,0.988,1.0,80.0,5.0
+"2 history, no trailer",6389,0.589,0.899,1.0,68.4,10.2
+3 NO history (pilot),30952,0.608,0.898,1.0,69.9,8.8
