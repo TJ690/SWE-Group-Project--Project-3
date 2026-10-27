@@ -20,7 +20,7 @@ import duckdb
 from skillsig.config import Config
 from skillsig.paths import resolve
 from skillsig.provenance import StageResult, inputs_unchanged, manifest_path, write_manifest
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s3_labeling.rules_v1 import label_v1
 
 log = logging.getLogger(__name__)
@@ -442,6 +442,7 @@ def _labels_sql(cfg: Config, dest: Path, sample: Path | None) -> str:
         commit=_sql_string(_derived(cfg, "s2_commit.parquet")),
         template=_sql_string(_derived(cfg, "s2_template.parquet")),
         clusters=_sql_string(_derived(cfg, "s2_clusters.parquet")),
+        cluster_threshold=repr(float(cfg.minhash.lsh_threshold)),
         artifacts=_sql_string(_artifacts_dir(cfg) / "*.parquet"),
         sample_and=sample_and,
         dest=_sql_string(dest),
@@ -516,6 +517,8 @@ COPY (
                     ORDER BY cluster_size DESC, cluster_id
                 ) AS rn
             FROM read_parquet({clusters})
+            -- Primary threshold only; lsh_threshold_low rows are for sensitivity runs.
+            WHERE abs(threshold - {cluster_threshold}) < 1e-9
         ) AS ranked
         WHERE rn = 1
     ),

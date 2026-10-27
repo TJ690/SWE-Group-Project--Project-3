@@ -12,7 +12,7 @@ import pytest
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s3_labeling.rules_v2 import LABELS, TEMPLATED_BASIS, label_row, run
 
 _ORIGIN = "origin/repo::demo"
@@ -259,6 +259,26 @@ def test_run_dev_keeps_sampled_ids(tmp_cfg: Config) -> None:
     assert got["exact_copy"][0] == "highly_templated"
 
 
+def test_cluster_basis_uses_the_primary_threshold(tmp_cfg: Config) -> None:
+    """Only cfg.minhash.lsh_threshold clusters count; the low threshold is for sensitivity."""
+    _write_inputs(tmp_cfg)
+    primary = float(tmp_cfg.minhash.lsh_threshold)
+    low = float(tmp_cfg.minhash.lsh_threshold_low)
+    _parquet(
+        resolve(tmp_cfg, tmp_cfg.paths.derived) / "s2_clusters.parquet",
+        [
+            _cluster("no_hist", 1, 1, primary),
+            _cluster("no_hist", 2, 50, low),
+            _cluster("bulk8", 3, 15, primary),
+            _cluster("bulk8", 4, 15, low),
+        ],
+    )
+    got = _read_labels(run(tmp_cfg).outputs[0])
+    assert got["no_hist"][0] == "insufficient_evidence"
+    assert "cluster" not in got["no_hist"][3]
+    assert got["bulk8"][:2] == ("highly_templated", "cluster")
+
+
 def test_missing_v1_names_command(tmp_cfg: Config) -> None:
     with pytest.raises(FileNotFoundError, match=r"label --only rules_v1"):
         run(tmp_cfg)
@@ -370,6 +390,16 @@ def _template(file_sha: str, kind: str, lineage: str, score: float) -> dict[str,
         "nearest_blob": "blob",
         "nearest_lineage_id": lineage,
         "est_jaccard": score,
+    }
+
+
+def _cluster(file_sha: str, cluster_id: int, size: int, threshold: float) -> dict[str, object]:
+    return {
+        "file_sha": file_sha,
+        "cluster_id": cluster_id,
+        "cluster_size": size,
+        "threshold": threshold,
+        "nn_sim_est": None,
     }
 
 

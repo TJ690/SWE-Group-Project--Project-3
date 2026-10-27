@@ -10,7 +10,7 @@ import pytest
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s3_labeling import LABELS as PACKAGE_LABELS
 from skillsig.s3_labeling import run as package_run
 from skillsig.s3_labeling.rules_v1 import LABELS, label_v1, run
