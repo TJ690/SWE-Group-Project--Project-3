@@ -1,0 +1,11 @@
+{
+  "config_hash": "sha256:f2e3f39407c2d92801d5a8f7d8d7b5c4f6e1855785fd7b024fad892f24347fab",
+  "created_utc": "2026-10-26T16:35:16+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/gitskills_data/data/artifact_siblings": "dir_sha256:c005b2548180b53622d30f5cff34630d7a39b250ad7bbf0d2147181c63297012",
+    "src/data/gitskills_data/data/artifacts": "dir_sha256:0435eb382d0cbb563c7833e6c4fa3cad49e5559652bb3bb924565cc7ef4630a8"
+  },
+  "output": "results/s2_scaffold_top_outlines.csv",
+  "rows": 200
+}
