@@ -1,0 +1,19 @@
+{
+  "n": 1877981,
+  "dev": false,
+  "disclosed_agent": 157774,
+  "reuse_and_disclosure": 57027,
+  "legacy_templated_with_disclosure": 14706,
+  "history_unavailable": 1419844,
+  "note": "Independent observed evidence; no verified authorship or copying direction.",
+  "reuse_summary_order": [
+    "exact_content_shared",
+    "near_duplicate_signal",
+    "scaffold_signal",
+    "no_reuse_signal_observed",
+    "reuse_not_assessed"
+  ],
+  "cluster_note": "LSH candidate components, not pairwise-verified similarity families.",
+  "scaffold_note": "Measured candidate signal; manual validation remains incomplete.",
+  "agent_note": "First/last commit disclosure or coding-agent bot; may concern install or maintenance. No disclosure does not establish human authorship."
+}
