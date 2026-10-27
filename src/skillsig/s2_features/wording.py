@@ -1,10 +1,10 @@
 """
 STAGE: s2_features
 MODULE: wording
-PURPOSE: Compute wording features W1-W10 and description idiom for readable skills.
+PURPOSE: Compute wording features W1-W12 and description idiom for readable skills.
 INPUTS: artifacts primary rows (file_sha, content, description) with the T02 readable filter
 OUTPUTS: src/data/derived/s2_wording.parquet
-RQ LINK: RQ1 (wording variables: imperative lines, address, commands, grade, diversity, emphasis)
+RQ LINK: RQ1 (wording: imperatives, address, commands, grade, diversity, emphasis, burstiness)
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import pyarrow.parquet as pq
 from skillsig.config import Config
 from skillsig.paths import resolve
 from skillsig.provenance import StageResult, inputs_unchanged, manifest_path, write_manifest
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s1_registry.versions import description_idiom
 
 log = logging.getLogger(__name__)
@@ -64,6 +64,9 @@ _FEATURE_COLUMNS = (
     "w_uniformity_heading_entropy",
     "w_phrase_hits",
     "w_non_english",
+    "w_sentence_cv",
+    "w_prose_sentences",
+    "w_emdash_per_1kw",
 )
 _SCHEMA = pa.schema(
     [
@@ -101,10 +104,13 @@ _SHELL_LANGS = frozenset(
     }
 )
 _VOWELS = frozenset("aeiouy")
+# W11: sentences end at . ! ? followed by space, or at a line break (bullets are fragments).
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+_MIN_SENTENCES = 5
 
 
 def wording_features(text: str) -> dict[str, float]:
-    """W1-W10 for one skill body. An empty body is zeros, never NaN."""
+    """W1-W12 for one skill body. An empty body is zeros, never NaN."""
     words = _words(text)
     chars = len(text)
     return {
@@ -118,6 +124,8 @@ def wording_features(text: str) -> dict[str, float]:
         "w_uniformity_heading_entropy": _heading_entropy(text),
         "w_phrase_hits": _phrase_hits(text),
         "w_non_english": _non_english(text),
+        **_burstiness(text),
+        "w_emdash_per_1kw": _emdash_rate(text),
     }
 
 
@@ -317,6 +325,40 @@ def _phrase_hits(text: str) -> float:
     return float(sum(lowered.count(phrase.lower()) for phrase in PHRASE_LEXICON if phrase))
 
 
+def _prose(text: str) -> str:
+    """Body text with fenced code, tables, headings and list markers removed."""
+    lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        stripped = line.strip()
+        if in_fence or not stripped or stripped.startswith("|") or _HEADING.match(stripped):
+            continue
+        lines.append(_LIST_PREFIX.sub("", stripped))
+    return "\n".join(lines)
+
+
+def _burstiness(text: str) -> dict[str, float]:
+    """W11 sentence-length coefficient of variation over prose; 0 below 5 sentences."""
+    sentences = [s for s in _SENTENCE_SPLIT.split(_prose(text)) if _TOKEN.search(s)]
+    lengths = [len(_TOKEN.findall(s)) for s in sentences]
+    count = float(len(lengths))
+    if len(lengths) < _MIN_SENTENCES:
+        return {"w_sentence_cv": 0.0, "w_prose_sentences": count}
+    mean = sum(lengths) / len(lengths)
+    sd = math.sqrt(sum((n - mean) ** 2 for n in lengths) / len(lengths))
+    return {"w_sentence_cv": sd / mean if mean else 0.0, "w_prose_sentences": count}
+
+
+def _emdash_rate(text: str) -> float:
+    """W12 em dashes (U+2014) per 1,000 words of prose; code is excluded."""
+    prose = _prose(text)
+    words = len(_TOKEN.findall(prose))
+    return prose.count("\u2014") * 1000.0 / words if words else 0.0
+
+
 def _non_english(text: str) -> float:
     if not text:
         return 0.0
@@ -418,8 +460,7 @@ def _parts(rows: list[tuple[object, ...]], workers: int) -> list[list[tuple[obje
 
 def _featurize_rows(rows: list[tuple[object, ...]]) -> list[dict[str, object]]:
     return [
-        _featurize_row(file_sha, content, description)
-        for file_sha, content, description in rows
+        _featurize_row(file_sha, content, description) for file_sha, content, description in rows
     ]
 
 

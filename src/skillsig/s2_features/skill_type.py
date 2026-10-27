@@ -1,8 +1,8 @@
 """
 STAGE: s2_features
 MODULE: skill_type
-PURPOSE: Assign a v0 keyword skill type from the skill name and description.
-INPUTS: artifacts primary rows (name, description); src/data/derived/s2_repo.parquet
+PURPOSE: Assign a v1 keyword skill type from the name and description (body as fallback).
+INPUTS: artifacts primary rows (name, description, content); src/data/derived/s2_repo.parquet
 OUTPUTS: src/data/derived/s2_types.parquet, results/s2_skill_type_by_project.csv
 RQ LINK: RQ1 (skill type as context for authorship signals) and RQ2 (type by project kind)
 """
@@ -19,7 +19,7 @@ import duckdb
 from skillsig.config import Config
 from skillsig.paths import resolve
 from skillsig.provenance import StageResult, inputs_unchanged, manifest_path, write_manifest
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +46,86 @@ SKILL_TYPES = (
 
 # First match wins. Edit a pattern and re-run the skill-type tests.
 # `unclassified` is the fallback when nothing matches, so it has no pattern.
-# The word `test` is intentionally broad (known v0 false positives).
+# v1 (T46): no bare `test` or `design`; planning, meta, and data words widened.
 RULES: list[tuple[str, str]] = [
+    (
+        "meta",
+        r"skill-creator|skill-installer|find-skills|writing-skills|template-skill"
+        r"|writing[- ]great[- ]skills|skill[- ]authoring|creating[- ]skills|skill[- ]writer",
+    ),
+    (
+        "office_documents",
+        r"pdf|docx|xlsx|pptx|spreadsheet|powerpoint",
+    ),
+    (
+        "security",
+        r"\bsecurity\b|cybersecur|vulnerab|pentest|penetration[- ]test"
+        r"|\bowasp\b|\bcve-\d|\bxss\b|\bcsrf\b|malware|infosec"
+        r"|\bsast\b|\bdast\b|threat[- ]model",
+    ),
+    (
+        "testing_debugging",
+        r"(?<!stress-)(?<!stress )(?<!a/b )\b(?:tests|testing|tester|tested)\b"
+        r"|\bunit[- ]?tests?\b|\bintegration[- ]tests?\b|end[- ]to[- ]end[- ]tests?|\be2e\b"
+        r"|\btest (?:suite|cases?|coverage|runner)s?\b|\bdebug(?:s|ging|ger|ged)?\b"
+        r"|\bpytest\b|\btdd\b|\bunittest\b|\bjest\b|\bvitest\b|\bbugfix(?:es)?\b"
+        r"|systematic-debugging|test-driven",
+    ),
+    (
+        "review_git",
+        r"code-review|\breviews?\b|\bcommits?\b|\bgit\b"
+        r"|pull[- ]requests?|merge[- ]requests?|\bchangelog\b|\bworktrees?\b",
+    ),
+    (
+        "frontend_design",
+        r"frontend|front-end|\breact\b|\bvue\b|\bsvelte\b|\bangular\b"
+        r"|\bcss\b|tailwind|\bfigma\b|\bui\b|\bux\b|design[- ]system"
+        r"|\b(?:ui|ux|web|visual|graphic)[- ]design\b|landing[- ]page",
+    ),
+    (
+        "planning_agent_workflow",
+        r"brainstorm|\bplans?\b|\bplanning\b|workflow|subagent|orchestrat"
+        r"|multi-agent|agentic|writing-plans|executing-plans"
+        r"|\bhandoffs?\b|\bspecs?\b|\btickets?\b|agent session",
+    ),
+    (
+        "devops_cloud",
+        r"devops|kubernetes|\bk8s\b|\bdocker\b|terraform|\bci/?cd\b"
+        r"|\baws\b|\bazure\b|\bgcp\b|\bcloud\b|deploy(?:ment|ing|s)?\b"
+        r"|\binfrastructure\b|\bhelm\b",
+    ),
+    (
+        "data_ml_research",
+        r"machine[- ]learning|\bml\b|\bllm\b|\bnlp\b|data[- ]science"
+        r"|\bpandas\b|jupyter|\bresearch\b|pytorch|tensorflow"
+        r"|\bsklearn\b|\bembedding\b|\bdataset\b"
+        r"|time[- ]series|\bstatistic(?:s|al)?\b|\banalytics\b|data[- ]analysis|\bforecast",
+    ),
+    (
+        "backend_api_languages",
+        r"\bapis?\b|backend|back-end|\bpython\b|\bjava\b|\bgolang\b|\brust\b"
+        r"|\btypescript\b|\bjavascript\b|node\.?js|\bgraphql\b|\brest\b"
+        r"|\bpostgres(?:ql)?\b|\bredis\b|\bdjango\b|\bflask\b|\bfastapi\b",
+    ),
+    (
+        "docs_writing_marketing",
+        r"documentation|\breadme\b|copywriting|\bmarketing\b|\bblog\b"
+        r"|technical[- ]writing|\bseo\b|\bnewsletter\b",
+    ),
+    (
+        "business_product",
+        r"\bproduct\b|\bprd\b|\broadmap\b|\bpricing\b|\bsales\b|\bfinance\b"
+        r"|\binvoice\b|\bstartup\b|go-to-market|\bgtm\b|\bcustomers?\b|\bokrs?\b",
+    ),
+    (
+        "integrations_tools",
+        r"\bmcp\b|\bslack\b|\bnotion\b|\bjira\b|\bwebhooks?\b|\bzapier\b"
+        r"|\bintegrations?\b|\boauth\b|github[- ]actions?",
+    ),
+]
+
+# The v0 rules (T16), kept unchanged so T29 can report v0 against v1.
+RULES_V0: list[tuple[str, str]] = [
     (
         "meta",
         r"skill-creator|skill-installer|find-skills|writing-skills|template-skill",
@@ -123,15 +201,59 @@ _COMPILED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
-def skill_type(name: str | None, description: str | None) -> str:
-    """First matching keyword rule on lowercased name and description."""
-    text = _haystack(name, description)
+TYPE_VERSION = "v1"
+_BODY_CHARS = 500
+_FRONT_BODY = re.compile(r"^\s*---.*?\n---[ \t]*\n?", re.DOTALL)
+_PACK = "\x1f"
+_LIST = "\x1e"
+
+
+def skill_type(name: str | None, description: str | None, body: str | None = None) -> str:
+    """First matching rule on name + description; the first 500 body chars when both are empty."""
+    found = skill_types_all(name, description, body)
+    return found[0] if found else "unclassified"
+
+
+def skill_types_all(
+    name: str | None, description: str | None, body: str | None = None
+) -> list[str]:
+    """Every matching type, in rule order; empty when nothing matches."""
+    text, _source = _text_and_source(name, description, body)
     if not text:
-        return "unclassified"
-    for label, pattern in _COMPILED:
-        if pattern.search(text):
-            return label
-    return "unclassified"
+        return []
+    return [label for label, pattern in _COMPILED if pattern.search(text)]
+
+
+def type_source(name: str | None, description: str | None, body: str | None = None) -> str:
+    """Where the matched text came from: front_matter, body, or none."""
+    return _text_and_source(name, description, body)[1]
+
+
+def _text_and_source(
+    name: str | None, description: str | None, body: str | None
+) -> tuple[str, str]:
+    text = _haystack(name, description)
+    if text:
+        return text, "front_matter"
+    snippet = _body_snippet(body)
+    if snippet:
+        return snippet, "body"
+    return "", "none"
+
+
+def _body_snippet(body: str | None) -> str:
+    if not body:
+        return ""
+    stripped = _FRONT_BODY.sub("", str(body), count=1)
+    return stripped[:_BODY_CHARS].strip().lower()
+
+
+def _packed(name: str | None, description: str | None, body: str | None) -> str:
+    """skill_type, type_source, and every match, joined for one DuckDB call per row."""
+    text, source = _text_and_source(name, description, body)
+    found = [label for label, pattern in _COMPILED if pattern.search(text)] if text else []
+    first = found[0] if found else "unclassified"
+    return _PACK.join([first, source, _LIST.join(found)])
 
 
 def run(cfg: Config, *, dev: bool = False, force: bool = False) -> StageResult:
@@ -218,9 +340,9 @@ def _write(cfg: Config, types_path: Path, csv_path: Path, *, dev: bool) -> tuple
 
 def _register(con: duckdb.DuckDBPyConnection) -> None:
     con.create_function(
-        "skill_type",
-        skill_type,
-        ["VARCHAR", "VARCHAR"],
+        "skill_type_packed",
+        _packed,
+        ["VARCHAR", "VARCHAR", "VARCHAR"],
         "VARCHAR",
         null_handling="special",
     )
@@ -237,13 +359,34 @@ def _count(con: duckdb.DuckDBPyConnection, path: Path) -> int:
 
 _TYPES_SQL = """
 COPY (
+    WITH packed AS (
+        SELECT
+            file_sha,
+            skill_type_packed(
+                CAST(name AS VARCHAR),
+                CAST(description AS VARCHAR),
+                -- the body is read only when name and description are both empty
+                CASE
+                    WHEN coalesce(trim(CAST(name AS VARCHAR)), '') = ''
+                     AND coalesce(trim(CAST(description AS VARCHAR)), '') = ''
+                    THEN left(CAST(content AS VARCHAR), 4000)
+                END
+            ) AS p
+        FROM read_parquet({artifacts})
+        WHERE coalesce(TRY_CAST(dedup_primary AS INTEGER), 0) = 1
+          AND file_sha IS NOT NULL
+          {sample_filter}
+    )
     SELECT
         file_sha,
-        skill_type(CAST(name AS VARCHAR), CAST(description AS VARCHAR)) AS skill_type
-    FROM read_parquet({artifacts})
-    WHERE coalesce(TRY_CAST(dedup_primary AS INTEGER), 0) = 1
-      AND file_sha IS NOT NULL
-      {sample_filter}
+        split_part(p, chr(31), 1) AS skill_type,
+        CASE
+            WHEN split_part(p, chr(31), 3) = '' THEN CAST([] AS VARCHAR[])
+            ELSE string_split(split_part(p, chr(31), 3), chr(30))
+        END AS skill_types_all,
+        split_part(p, chr(31), 2) AS type_source,
+        '{version}' AS type_version
+    FROM packed
     ORDER BY file_sha
 ) TO {dest} (FORMAT PARQUET, COMPRESSION ZSTD)
 """
@@ -273,6 +416,7 @@ def _types_sql(artifacts: Path, dest: Path, sample: Path | None) -> str:
         artifacts=_sql_string(artifacts / "*.parquet"),
         dest=_sql_string(dest),
         sample_filter=sample_filter,
+        version=TYPE_VERSION,
     )
 
 

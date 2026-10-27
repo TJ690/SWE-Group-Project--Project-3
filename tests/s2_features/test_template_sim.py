@@ -13,7 +13,7 @@ from datasketch import MinHashLSH
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s1_registry.sources import Source, clone_dir
 from skillsig.s2_features.minhash_cluster import signature
 from skillsig.s2_features.template_sim import build_registry_index, nearest_registry, run

@@ -1,4 +1,4 @@
-"""Wording features W1-W10 and description idiom."""
+"""Wording features W1-W12 and description idiom."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s1_registry.versions import description_idiom as registry_idiom
 from skillsig.s2_features.wording import description_idiom, run, wording_features
 
@@ -30,6 +30,9 @@ _KEYS = (
     "w_uniformity_heading_entropy",
     "w_phrase_hits",
     "w_non_english",
+    "w_sentence_cv",
+    "w_prose_sentences",
+    "w_emdash_per_1kw",
 )
 _COLUMNS = ("file_sha", *_KEYS, "desc_idiom")
 
@@ -48,6 +51,9 @@ def test_three_line_fixture_matches_hand_computed_values() -> None:
         "w_uniformity_heading_entropy": 0.0,
         "w_phrase_hits": 0.0,
         "w_non_english": 0.0,
+        "w_sentence_cv": 0.0,  # 2 prose sentences (heading dropped) < 5
+        "w_prose_sentences": 2.0,
+        "w_emdash_per_1kw": 0.0,
     }
     got = wording_features(_THREE)
     assert tuple(got) == _KEYS
@@ -220,3 +226,33 @@ def _write_devsample(cfg: Config, file_shas: list[str]) -> None:
         }
     )
     pq.write_table(table, path, compression="zstd")
+
+
+def test_burstiness_is_cv_of_prose_sentence_lengths() -> None:
+    # Sentence lengths 2, 4, 6, 8, 10 words; the fence, heading and table are ignored.
+    text = (
+        "# Title words here\n"
+        "One two. One two three four. One two three four five six.\n"
+        "- One two three four five six seven eight\n"
+        "One two three four five six seven eight nine ten.\n"
+        "```bash\nignored code line here please\n```\n"
+        "| a | table | row |\n"
+    )
+    lengths = [2, 4, 6, 8, 10]
+    mean = sum(lengths) / 5
+    sd = math.sqrt(sum((n - mean) ** 2 for n in lengths) / 5)
+    got = wording_features(text)
+    assert got["w_prose_sentences"] == 5.0
+    assert got["w_sentence_cv"] == pytest.approx(sd / mean)
+
+
+def test_uniform_sentences_have_zero_burstiness() -> None:
+    text = " ".join(["Run the tests now."] * 6)
+    assert wording_features(text)["w_sentence_cv"] == 0.0
+
+
+def test_emdash_rate_counts_prose_only() -> None:
+    text = "Use the tool \u2014 carefully \u2014 and check.\n```\na \u2014 b\n```"
+    # prose words: use the tool carefully and check = 6; two em dashes
+    assert wording_features(text)["w_emdash_per_1kw"] == pytest.approx(2 * 1000 / 6)
+    assert wording_features("a -- b - c \u2013 d")["w_emdash_per_1kw"] == 0.0

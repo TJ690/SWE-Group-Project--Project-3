@@ -9,8 +9,8 @@ import pytest
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import output_path as devsample_path
-from skillsig.s0_data.loader import connect
+from skillsig.s0_intake.devsample import output_path as devsample_path
+from skillsig.s0_intake.loader import connect
 from skillsig.s2_features import run, split_front_matter, structure_features
 
 _COLUMNS: tuple[str, ...] = (

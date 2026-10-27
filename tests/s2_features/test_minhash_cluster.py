@@ -12,7 +12,7 @@ import pytest
 from skillsig.cli import resolve_runner
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import output_path as devsample_path
+from skillsig.s0_intake.devsample import output_path as devsample_path
 from skillsig.s2_features.minhash_cluster import cluster_shard, normalise, run, signature
 
 _FRONT = (
