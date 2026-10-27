@@ -1,0 +1,10 @@
+label,confidence,n
+agent_assisted,high,119
+agent_assisted,low,77909
+agent_assisted,medium,64767
+highly_templated,high,48549
+highly_templated,low,28382
+highly_templated,medium,222742
+insufficient_evidence,low,1374553
+likely_human,low,50661
+likely_human,medium,10299
