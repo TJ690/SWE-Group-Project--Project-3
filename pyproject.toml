@@ -19,6 +19,7 @@ dependencies = [
     "datasketch==2.0.0",
     "httpx==0.28.1",
     "matplotlib==3.11.2",
+    "openpyxl==3.1.5",
 ]
 
 [project.optional-dependencies]

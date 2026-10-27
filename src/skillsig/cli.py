@@ -22,7 +22,7 @@ from skillsig.provenance import StageResult
 log = logging.getLogger(__name__)
 
 COMMAND_PACKAGES: dict[str, str] = {
-    "data": "s0_data",
+    "data": "s0_intake",
     "registry": "s1_registry",
     "features": "s2_features",
     "dedup": "s2_features",

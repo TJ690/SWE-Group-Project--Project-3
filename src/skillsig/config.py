@@ -40,6 +40,11 @@ class ThresholdsConfig:
     templated_copies_min: int
     templated_jaccard_min: float
     insufficient_conf_floor: str
+    collection_copy_share_min: float
+    collection_files_min: int
+    human_min_commits: int
+    human_min_span_days: int
+    min_body_chars: int
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,22 @@ class MinhashConfig:
     body_max_chars: int
     lsh_threshold: float
     lsh_threshold_low: float
+
+
+@dataclass(frozen=True)
+class ScaffoldConfig:
+    placeholder_min: int
+    outline_len_min: int
+    owners_min: int
+    line_owners_min: int
+    line_min_chars: int
+    shared_frac_min: float
+    outline_stoplist: tuple[str, ...]
+    outline_lsh_threshold: float
+    outline_sim_min: float
+    outline_bucket_max: int
+    winnow_k: int
+    winnow_w: int
 
 
 @dataclass(frozen=True)
@@ -82,6 +103,7 @@ class Config:
     paths: PathsConfig
     thresholds: ThresholdsConfig
     minhash: MinhashConfig
+    scaffold: ScaffoldConfig
     rq2: Rq2Config
     sample: SampleConfig
     github: GithubConfig
@@ -141,6 +163,7 @@ def load_config(path: str | Path | None = None) -> Config:
         "paths": PathsConfig,
         "thresholds": ThresholdsConfig,
         "minhash": MinhashConfig,
+        "scaffold": ScaffoldConfig,
         "rq2": Rq2Config,
         "sample": SampleConfig,
         "github": GithubConfig,

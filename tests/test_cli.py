@@ -30,7 +30,7 @@ def test_help_lists_all_stages() -> None:
     }
 
 
-@pytest.mark.parametrize("stage", ["export", "rq2"])
+@pytest.mark.parametrize("stage", ["rq2"])
 def test_unimplemented_stage_exits_2(stage: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([stage]) == 2
     assert f"not implemented: {stage}" in capsys.readouterr().err

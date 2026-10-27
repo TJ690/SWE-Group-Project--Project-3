@@ -8,8 +8,8 @@ import pyarrow.parquet as pq
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.devsample import build_devsample
-from skillsig.s0_data.loader import connect
+from skillsig.s0_intake.devsample import build_devsample
+from skillsig.s0_intake.loader import connect
 
 _OTHER_VIEWS = (
     "repos/part-00000.parquet",

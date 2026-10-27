@@ -1,5 +1,5 @@
 """
-STAGE: s0_data
+STAGE: s0_intake
 MODULE: schema_check
 PURPOSE: Report missing GitSkills columns and full-dataset row-count mismatches.
 INPUTS: DuckDB views registered by loader.connect

@@ -9,8 +9,8 @@ import pytest
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.loader import connect, run, snapshot_date
-from skillsig.s0_data.schema_check import VIEW_COLUMNS, VIEW_NAMES
+from skillsig.s0_intake.loader import connect, run, snapshot_date
+from skillsig.s0_intake.schema_check import VIEW_COLUMNS, VIEW_NAMES
 
 _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     "artifact_siblings": (

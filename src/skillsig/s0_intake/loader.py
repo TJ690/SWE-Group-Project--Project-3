@@ -1,5 +1,5 @@
 """
-STAGE: s0_data
+STAGE: s0_intake
 MODULE: loader
 PURPOSE: Register DuckDB views over the GitSkills Parquet files and expose the snapshot date.
 INPUTS: raw Parquet under Config.paths.raw and generated Parquet under Config.paths.generated
@@ -19,8 +19,8 @@ import duckdb
 from skillsig.config import Config
 from skillsig.paths import resolve
 from skillsig.provenance import StageResult, inputs_unchanged, manifest_path, write_manifest
-from skillsig.s0_data.devsample import build_devsample, output_path
-from skillsig.s0_data.schema_check import VIEW_NAMES, check_schema
+from skillsig.s0_intake.devsample import build_devsample, output_path
+from skillsig.s0_intake.schema_check import VIEW_NAMES, check_schema
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def run(cfg: Config, *, dev: bool = False, force: bool = False) -> StageResult:
     if not force and inputs_unchanged(output, cfg=cfg, inputs=inputs):
         log.info("dev sample up to date: %s", output)
         return StageResult(
-            stage="s0_data", outputs=[output], skipped=True, rows=_saved_rows(output)
+            stage="s0_intake", outputs=[output], skipped=True, rows=_saved_rows(output)
         )
     con = connect(cfg)
     try:
@@ -94,7 +94,7 @@ def run(cfg: Config, *, dev: bool = False, force: bool = False) -> StageResult:
     write_manifest(written, cfg=cfg, inputs=inputs, rows=rows)
     log.info("wrote %s (%s rows)", written, rows)
     return StageResult(
-        stage="s0_data", outputs=[written], skipped=False, rows={"s0_devsample_ids": rows}
+        stage="s0_intake", outputs=[written], skipped=False, rows={"s0_devsample_ids": rows}
     )
 
 

@@ -1,5 +1,5 @@
 """
-STAGE: s0_data
+STAGE: s0_intake
 MODULE: devsample
 PURPOSE: Draw a seeded, stratified dev sample of skill file_sha ids.
 INPUTS: artifacts view (file_sha, location_class, history_fetched, dedup_primary)

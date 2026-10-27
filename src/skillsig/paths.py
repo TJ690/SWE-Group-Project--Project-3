@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from skillsig.config import Config
 
 STAGES = (
-    "s0_data",
+    "s0_intake",
     "s1_registry",
     "s2_features",
     "s3_labeling",

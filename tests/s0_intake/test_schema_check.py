@@ -8,8 +8,8 @@ import pytest
 
 from skillsig.config import Config
 from skillsig.paths import resolve
-from skillsig.s0_data.loader import connect, snapshot_date
-from skillsig.s0_data.schema_check import VIEW_COLUMNS, check_schema
+from skillsig.s0_intake.loader import connect, snapshot_date
+from skillsig.s0_intake.schema_check import VIEW_COLUMNS, check_schema
 
 _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     "artifact_siblings": ("repo_full_name", "artifact_path", "entry_name"),
