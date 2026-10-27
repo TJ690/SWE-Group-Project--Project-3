@@ -135,15 +135,35 @@ Keep the raw data in `src/data/gitskills_data/` and the generated files in `src/
 - **SQL scripts:** Run from the repository root. Their paths start with `src/data/`, as shown in the build commands above.
 
 ## Running the Pipeline
-After completing the Setup and Dataset Acquisition above:
+After completing the Setup and Dataset Acquisition above (including the generated files in step 2), the `skillsig` command-line pipeline rebuilds every table and figure. Run it from the repository root with the project environment active:
 
-1. Build all four generated files first, since even the shared notebook setup checks for generated files.
+```bash
+source .venv/bin/activate
+pip install -e .
+bash scripts/run_full.sh
+```
 
-2. Open any notebook in `src/notebooks/` using **GitSkills (.venv)** kernel.
+`scripts/run_full.sh` runs every stage in order on the full dataset with `--force`: intake, registry, features, labels, evaluations, the spot-check, and the report figures. It writes tables to `results/`, figures to `figures/report/`, and a log to `logs/`. `DRY_RUN=1 bash scripts/run_full.sh` lists the steps without running them. It never overwrites finished annotations: once `results/annotation/spot_A_done.xlsx` exists, it keeps the sample and scores it instead of drawing new sheets.
 
-3. Run all cells top to bottom.
+To run one step, use `python -m skillsig <stage> [--only <module>] [--dev-sample] [--force]`, for example:
 
-Each notebook covers one topic and runs independently after the data files are built:
+```bash
+python -m skillsig label --only rules_v2_1
+python -m skillsig export
+```
+
+`--dev-sample` runs on a 50,000-skill sample for quick checks. A step whose inputs and config are unchanged is skipped; code changes are not tracked, so add `--force` after editing code. The tests run with `python -m pytest -q`, and the full-data regression checks with `python -m pytest -q -m data tests/regression`.
+
+| Guide | Contents |
+|---|---|
+| [docs/PIPELINE_RUNBOOK.md](docs/PIPELINE_RUNBOOK.md) | Every step in order, with what to check after each |
+| [docs/EXECUTION_STEPS.md](docs/EXECUTION_STEPS.md) | Each step's command, inputs, outputs and data size |
+| [docs/stages/](docs/stages/README.md) | Design notes for each stage |
+| [docs/report/FINDINGS.md](docs/report/FINDINGS.md) | The results and their charts |
+
+### Sprint 1 notebooks
+
+The exploratory analysis that the pipeline was built from lives in `src/notebooks/`. Each notebook runs on its own after the generated files are built: open it with the **GitSkills (.venv)** kernel and run all cells top to bottom.
 
 | Notebook | Topic |
 |---|---|
@@ -157,10 +177,8 @@ Each notebook covers one topic and runs independently after the data files are b
 | `EDA_repos` | Repository size, age, stars, and context by label |
 | `EDA_siblings` | Extra files bundled with skills |
 
-The pipeline is: **download raw Parquet files → build four derived files with DuckDB → run the notebooks → review tables and plots**. The notebooks group skills using copy counts and commit history.
-
 ## Outputs
-Each notebook in `src/notebooks/` contains its own tables and plots as saved cell outputs. Open the notebook directly to view the results. The headline findings so far:
+The pipeline's results and charts are summarised in [docs/report/FINDINGS.md](docs/report/FINDINGS.md). Each notebook in `src/notebooks/` also contains its own tables and plots as saved cell outputs. The Sprint 1 headline findings:
 
 - 3,797,117 `SKILL.md` files, but only 1,877,981 distinct contents. This means 50.5% of files are redundant copies.
 
