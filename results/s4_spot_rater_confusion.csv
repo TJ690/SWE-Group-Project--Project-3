@@ -1,0 +1,17 @@
+label_a,label_b,n
+highly_templated,highly_templated,0
+highly_templated,agent_assisted,0
+highly_templated,likely_human,0
+highly_templated,insufficient_evidence,0
+agent_assisted,highly_templated,1
+agent_assisted,agent_assisted,13
+agent_assisted,likely_human,2
+agent_assisted,insufficient_evidence,4
+likely_human,highly_templated,1
+likely_human,agent_assisted,0
+likely_human,likely_human,3
+likely_human,insufficient_evidence,3
+insufficient_evidence,highly_templated,0
+insufficient_evidence,agent_assisted,2
+insufficient_evidence,likely_human,6
+insufficient_evidence,insufficient_evidence,5

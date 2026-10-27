@@ -1,0 +1,31 @@
+{
+  "note": "Separate evidence-aware review; original blind annotations unchanged.",
+  "pairs": 120,
+  "pairs_with_text": 108,
+  "review_status": "awaiting independent content-reuse judgments",
+  "seed": 20261015,
+  "selection": "one subject per owner and cluster; deterministic candidate partner, not necessarily the closest pair; no attribution direction inferred",
+  "strata": {
+    "cluster_candidate": {
+      "drawn": 30,
+      "requested": 30,
+      "shortfall": 0
+    },
+    "exact_registry": {
+      "drawn": 30,
+      "requested": 30,
+      "shortfall": 0
+    },
+    "near_registry": {
+      "drawn": 30,
+      "requested": 30,
+      "shortfall": 0
+    },
+    "scaffold_candidate": {
+      "drawn": 30,
+      "requested": 30,
+      "shortfall": 0
+    }
+  },
+  "text_snapshot_sha256": "sha256:3c54905752fb8ee2ba8512162f591f2f9eb12bbb179c23ac5f11a7637650c93c"
+}

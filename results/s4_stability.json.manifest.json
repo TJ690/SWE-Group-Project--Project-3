@@ -1,0 +1,14 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-26T22:07:43+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_clusters.parquet": "sha256:2555c6630d9dc0d2db672cff4ae2901534c1383f6e13dbe03b6cab6e9a3b8ca0",
+    "src/data/derived/s2_commit.parquet": "sha256:7deec9709765cb8e6baeb5ac95b54bd31c7a945858500dc760b98dc0715b8d28",
+    "src/data/derived/s2_template.parquet": "sha256:aa2e6594502d8c93e30ac5728ab360f08c10c4c2319d9a51b7ca8b7f969ecc01",
+    "src/data/derived/s3_labels_v1.parquet": "sha256:94b47905c58838e4d2f3105e28ec1934fead3ac8163c71dcb53440c53ac8dcf5",
+    "src/data/derived/s3_labels_v2_1.parquet": "sha256:5067294d607fbb3360ae923e6079654747cd99f2b84cc603860a867c258f9382"
+  },
+  "output": "results/s4_stability.json",
+  "rows": 1
+}

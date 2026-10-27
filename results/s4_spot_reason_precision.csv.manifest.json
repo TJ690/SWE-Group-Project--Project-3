@@ -1,0 +1,13 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T19:11:13+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "results/annotation/key.parquet": "sha256:46902d60795acb6d9765f82fa0711d3103cc4c5add5306b234ba48560ed7a89d",
+    "results/annotation/spot_A_done.xlsx": "sha256:af197c09a0e839b3fb0ad9179196d64885d3d5bb19b8eb48bebbfbb4d6efe69e",
+    "results/annotation/spot_B_done.xlsx": "sha256:a22b1ccaeb1de9163ac645c777af14b4e10c11970beeb717af40844977c13549",
+    "results/annotation/spot_C_done.xlsx": "sha256:24a5aab1a8d758844aa1b87add464430bd6f17ec147c2b8a55708935df5cd1e5"
+  },
+  "output": "results/s4_spot_reason_precision.csv",
+  "rows": 55
+}
