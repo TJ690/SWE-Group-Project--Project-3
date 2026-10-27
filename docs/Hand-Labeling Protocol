@@ -66,7 +66,18 @@ Near-miss: a15c48e936690da34a42a3296032dc5ba4b87c3a. Mostly code, but has enough
 - Agreement (percent agreement and Cohen's kappa) is computed from each labeler's original, pre-discussion labels.
 - After agreement is computed, labelers discuss disagreements and record a final_label.
 
-***7. Limitations***
+***7. What the pilot contributed***
+The pilot (12 skills, two labelers) was done before any written rules existed. Labelers had the four label names and one sample rule entry, and each judged skills from their own sense of the labels. This protocol was written from what the pilot showed. Agreement in the pilot without written rules was 5 of 12 (41.7%), Cohen's kappa 0.18, computed from each labeler's pre-discussion labels. See the report for details.
+
+| Rule or feature | What in the pilot led to it |
+|---|---|
+| Emoji named as a style feature | Cited on three skills, but labelers had no shared list of features |
+| likely_human requires no agent features |Two skills labeled human on specificity alone were flipped after discussion (9c93, eef7) |
+| Vague wording is a supporting feature only | The word "boilerplate" was used for both vague wording and empty structure|
+| Context markers need a second feature | Raised while reviewing a skill that referenced CLAUDE.md|
+| Labelers must confirm their viewer shows emoji | An editor hid the emoji on one skill, so the first-pass label and notes missed a named feature (eef7)|
+
+***8. Limitations***
 - Labels are text-based signals. The pipeline's heuristic uses commit metadata and similarity checks that labelers cannot see, so the two methods measure different things.
 - agent_assisted cannot be verified from text. Humans can write in AI-like styles and edit AI output until it looks human.
 - The pilot is 12 skills and two labelers, so any agreement figure is a rough estimate.
