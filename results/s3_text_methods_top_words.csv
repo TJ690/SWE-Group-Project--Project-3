@@ -1,0 +1,81 @@
+term,coef,direction
+arguments,4.2426496,agent
+noreply,3.7282026,agent
+noreply com,3.5802076,agent
+ver,2.8009553,agent
+by noreply,2.7791753,agent
+patterns,2.7600217,agent
+prompt role,2.629755,agent
+see,2.6096408,agent
+role objective,2.5673196,agent
+verify,2.483517,agent
+rules constraints,2.473583,agent
+operational rules,2.4033554,agent
+md if,2.3192058,agent
+streaming,2.2712145,agent
+approach,2.255222,agent
+voice,2.239482,agent
+use when,2.2044268,agent
+to main,2.1815128,agent
+exists,2.147036,agent
+tier,2.1337407,agent
+downstream,2.116175,agent
+examples example,2.0857446,agent
+2025,2.078433,agent
+lesson,2.0725753,agent
+touches,2.062328,agent
+pre,2.0616612,agent
+advisory,2.0559757,agent
+approved,2.0545733,agent
+fail,2.0501122,agent
+complete,2.0461411,agent
+framework,1.9890902,agent
+related,1.9704931,agent
+vs,1.9678521,agent
+level,1.9367698,agent
+grep,1.9356858,agent
+timestamp,1.9264064,agent
+company,1.9210886,agent
+when to,1.9196248,agent
+pack,1.9071562,agent
+subagent_type,1.9026423,agent
+prefer,-4.0033464,human
+openclaw,-3.3350654,human
+or,-3.298038,human
+references,-3.1419067,human
+use this,-2.8287416,human
+always,-2.8174613,human
+inside,-2.733786,human
+and,-2.6601305,human
+assets,-2.6317832,human
+search,-2.4613123,human
+chinese,-2.4383879,human
+when,-2.4133465,human
+use,-2.390773,human
+github,-2.3871372,human
+the user,-2.3823655,human
+antigravity,-2.3181334,human
+goal,-2.3058903,human
+already,-2.285293,human
+debug,-2.2573957,human
+concrete,-2.1932921,human
+调用,-2.1735275,human
+like,-2.1614618,human
+no co,-2.1005335,human
+browser,-2.0881424,human
+repeated,-2.0727248,human
+例如,-2.052621,human
+this for,-2.0450437,human
+senior,-2.0071273,human
+behavior,-2.0014102,human
+do not,-1.9942989,human
+the current,-1.9897935,human
+read references,-1.9702176,human
+inspect,-1.950374,human
+git commit,-1.9502838,human
+trailing,-1.9444727,human
+md docs,-1.9197558,human
+stable,-1.9137635,human
+claude_plugin_root,-1.9102713,human
+reusable,-1.8900241,human
+say so,-1.8861167,human
