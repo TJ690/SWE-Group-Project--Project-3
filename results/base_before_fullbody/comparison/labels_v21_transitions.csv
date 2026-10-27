@@ -1,0 +1,11 @@
+before,after,n
+agent_assisted,agent_assisted,142337
+agent_assisted,highly_templated,458
+highly_templated,agent_assisted,330
+highly_templated,highly_templated,292162
+highly_templated,insufficient_evidence,7090
+highly_templated,likely_human,91
+insufficient_evidence,highly_templated,10776
+insufficient_evidence,insufficient_evidence,1363777
+likely_human,highly_templated,121
+likely_human,likely_human,60839

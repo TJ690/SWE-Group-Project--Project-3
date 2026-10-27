@@ -1,0 +1,28 @@
+{
+  "default_shares": {
+    "agent_assisted": 0.075235,
+    "agent_assisted:low": 0.5420349571343125,
+    "highly_templated": 0.160565,
+    "highly_templated:high": 0.16429483386790397,
+    "insufficient_evidence": 0.731595,
+    "likely_human": 0.032605,
+    "likely_human:medium": 0.1752798650513725
+  },
+  "largest_change": {
+    "delta_pp": 3.341999999999998,
+    "label": "highly_templated",
+    "parameter": "cluster_threshold",
+    "value": 0.6
+  },
+  "max_abs_change_pp": {
+    "agent_assisted": 0.1449999999999993,
+    "agent_assisted:low": 0.4933920338215714,
+    "highly_templated": 3.341999999999998,
+    "highly_templated:high": 2.0495055534527684,
+    "insufficient_evidence": 3.168000000000004,
+    "likely_human": 0.02899999999999986,
+    "likely_human:medium": 6.992792516485203
+  },
+  "sample_n": 200000,
+  "self_check_agreement_with_stored_v21": 1.0
+}

@@ -1,0 +1,3 @@
+threshold,skills,changed_membership,changed_share,near_dup_before,near_dup_after,near_dup_lost,near_dup_gained,cluster10_before,cluster10_after,cluster10_lost,cluster10_gained,clusters_ge2_before,clusters_ge2_after
+0.6,1840872,178873,0.09716753799286425,686254,693250,9549,16545,341569,344328,7318,10077,137400,138731
+0.8,1840872,174329,0.09469914258025544,595911,602662,14001,20752,274085,277852,8403,12170,129365,130255

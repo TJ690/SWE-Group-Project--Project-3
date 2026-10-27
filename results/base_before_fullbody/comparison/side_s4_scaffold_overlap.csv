@@ -1,0 +1,7 @@
+scaffold_basis,registry_exact_before,registry_near_before,cluster_before,copy_count_before,none_before,total_before,registry_exact_after,registry_near_after,cluster_after,copy_count_after,none_after,total_after
+generator,0,0,129,0,62,191,0,0,129,0,62,191
+masked_copy,942,9568,25839,8,137,36494,942,9842,25564,8,138,36494
+none,603,744,111826,10468,1425328,1548969,603,675,111819,10469,1425403,1548969
+outline,42,115,400,525,19985,21067,42,123,388,525,19989,21067
+placeholder,218,295,1140,98,7507,9258,218,406,1012,94,7528,9258
+shared_lines,4676,28725,96067,6124,89301,224893,4676,31058,97904,5899,85356,224893

@@ -1,0 +1,12 @@
+v1_label,v2_label,n
+agent_assisted,agent_assisted,78091
+agent_assisted,highly_templated,1839
+agent_assisted,insufficient_evidence,137
+agent_assisted,likely_human,47
+highly_templated,highly_templated,35768
+insufficient_evidence,agent_assisted,16
+insufficient_evidence,highly_templated,260165
+insufficient_evidence,insufficient_evidence,1439104
+insufficient_evidence,likely_human,16
+likely_human,highly_templated,1901
+likely_human,likely_human,60897

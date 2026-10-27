@@ -1,0 +1,96 @@
+{
+  "clusters": [
+    {
+      "threshold": 0.6,
+      "skills": 1840872,
+      "changed_membership": 178873,
+      "changed_share": 0.09716753799286425,
+      "near_dup_before": 686254,
+      "near_dup_after": 693250,
+      "near_dup_lost": 9549,
+      "near_dup_gained": 16545,
+      "cluster10_before": 341569,
+      "cluster10_after": 344328,
+      "cluster10_lost": 7318,
+      "cluster10_gained": 10077,
+      "clusters_ge2_before": 137400,
+      "clusters_ge2_after": 138731
+    },
+    {
+      "threshold": 0.8,
+      "skills": 1840872,
+      "changed_membership": 174329,
+      "changed_share": 0.09469914258025544,
+      "near_dup_before": 595911,
+      "near_dup_after": 602662,
+      "near_dup_lost": 14001,
+      "near_dup_gained": 20752,
+      "cluster10_before": 274085,
+      "cluster10_after": 277852,
+      "cluster10_lost": 8403,
+      "cluster10_gained": 12170,
+      "clusters_ge2_before": 129365,
+      "clusters_ge2_after": 130255
+    }
+  ],
+  "label_counts": [
+    {
+      "label": "agent_assisted",
+      "before": 142795,
+      "after": 142667,
+      "change": -128
+    },
+    {
+      "label": "highly_templated",
+      "before": 299673,
+      "after": 303517,
+      "change": 3844
+    },
+    {
+      "label": "insufficient_evidence",
+      "before": 1374553,
+      "after": 1370867,
+      "change": -3686
+    },
+    {
+      "label": "likely_human",
+      "before": 60960,
+      "after": 60930,
+      "change": -30
+    }
+  ],
+  "templated_basis": [
+    {
+      "basis": "cluster",
+      "before": 235401,
+      "after": 236816,
+      "change": 1415
+    },
+    {
+      "basis": "copy_count",
+      "before": 18344,
+      "after": 18116,
+      "change": -228
+    },
+    {
+      "basis": "none",
+      "before": 1578308,
+      "after": 1574464,
+      "change": -3844
+    },
+    {
+      "basis": "registry_exact",
+      "before": 6481,
+      "after": 6481,
+      "change": 0
+    },
+    {
+      "basis": "registry_near",
+      "before": 39447,
+      "after": 42104,
+      "change": 2657
+    }
+  ],
+  "labels_changed": 18866,
+  "labels_total": 1877981
+}
