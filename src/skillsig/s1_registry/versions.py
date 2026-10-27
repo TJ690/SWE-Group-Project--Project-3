@@ -25,7 +25,7 @@ import pyarrow.parquet as pq
 from skillsig.config import Config
 from skillsig.paths import resolve
 from skillsig.provenance import StageResult, inputs_unchanged, manifest_path, write_manifest
-from skillsig.s0_data.loader import snapshot_date
+from skillsig.s0_intake.loader import snapshot_date
 from skillsig.s1_registry.sources import Source, clone_dir, load_sources
 from skillsig.s2_features.structure import split_front_matter
 

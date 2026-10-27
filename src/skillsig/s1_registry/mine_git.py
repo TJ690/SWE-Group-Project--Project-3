@@ -149,6 +149,9 @@ def _remote_url(source: Source) -> str:
 
 def _ensure_clone(dest: Path, url: str, repo: str) -> None:
     if (dest / ".git").exists():
+        if os.environ.get("SKILLSIG_NO_FETCH") == "1":
+            log.info("keep existing clone of %s (SKILLSIG_NO_FETCH=1)", repo)
+            return
         log.info("fetch %s", repo)
         _fetch(dest)
         return

@@ -305,3 +305,17 @@ def _write_sources(root: Path, text: str) -> None:
     path = root / "config" / "registry_sources.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.strip() + "\n", encoding="utf-8")
+
+
+def test_no_fetch_env_keeps_existing_clone(tmp_path, monkeypatch) -> None:
+    from skillsig.s1_registry import mine_git
+
+    (tmp_path / ".git").mkdir()
+    calls = []
+    monkeypatch.setattr(mine_git, "_fetch", lambda dest: calls.append(dest))
+    monkeypatch.setenv("SKILLSIG_NO_FETCH", "1")
+    mine_git._ensure_clone(tmp_path, "https://example.invalid/x.git", "o/x")
+    assert calls == []
+    monkeypatch.delenv("SKILLSIG_NO_FETCH")
+    mine_git._ensure_clone(tmp_path, "https://example.invalid/x.git", "o/x")
+    assert calls == [tmp_path]
