@@ -18,7 +18,7 @@ Your labels are the reference the pipeline is measured against. Consistency matt
 - **Two groups of 15 inside each label**, aimed at the parts most likely to be wrong: registry copies vs. cluster-or-copy-count templated; agent labels added by v2.1 vs. already agent in v2; revised vs. unrevised human; insufficient with vs. without history.
 - **At most one skill per repository and per near-duplicate cluster**, and a body of at least 200 characters. Otherwise ten near-identical skills from one collection would count as ten judgements.
 - **Person B labels 40 of the 120** (10 per label, the same rows as A) so agreement between two people can be measured on the same items.
-- **An optional person C** labels any subset of a fresh copy of A's sheet and saves it as `spot_C_done.xlsx`. C is scored in separate files, against A and B on the skills they share; C's answers never replace A's or B's.
+- **An optional person C** labels any subset of a fresh copy of A's sheet and saves it as `spot_C_done.xlsx`. C is scored in separate files, against A and B on the skills they share; C's answers never replace A's or B's. *(Added 2026-10-27, after a third rater joined once A and B had finished; not part of the original sampling design.)*
 - **Why 30 per label.** With 30 rows, a 95% interval on precision is about ±16 points. That is enough to tell a rule that works (around 80%) from one that doesn't (around 20%), which is the decision the scores support; narrowing it to ±10 points would need roughly 60 to 100 rows per label, depending on the rate. The scores rank rules; they are not population estimates.
 - **Precision, not recall.** Rows are drawn by pipeline label, so the sample answers "when the pipeline says X, is it X?" but not "how many X does it miss?".
 
