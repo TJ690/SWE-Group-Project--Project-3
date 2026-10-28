@@ -1,0 +1,10 @@
+***Hand-labeling pilot and annotation work (Oct 25-28, 2026)
+Team member: Jayden Cathey
+
+**What it was used for**
+- Explaining how hand-labeling works, and how agreement (Cohen's kappa) and a confusion matrix are computed.
+- Drafting the structure of docs/pilot labeling-protocol.md for the text-only pilot, then revising it to match the group's decisions.
+- Computing Cohen's kappa for the pilot from the two labelers' sheets
+- Git branch and merge instructions
+
+Claude did not assign a label to any skills in the pilot ot spot-check sheets. The decisions in the pilot protocol were made by the group. The sampling script was run, and its input inspected before the sheets were shared and checked to confirm the labelers only saw the skill's name, description, and text.
