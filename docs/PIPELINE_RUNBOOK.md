@@ -1,249 +1,632 @@
-# Pipeline runbook: every step, its input, output, data size and run time
+# Pipeline runbook
 
-This is the full run of the `skillsig` pipeline, from downloading GitSkills to scoring the spot-check. Each step lists the command, what it reads, what it writes, how much data it processes, and how long it took on the last full run (a MacBook, 2026-10-25 and 2026-10-26).
-
-All commands run from the repository root with the project environment active (`source .venv/bin/activate`, or prefix with `.venv/bin/`).
-
-## How to run any step
+Run commands from the repository root with Python 3.13. Use the steps in order. Steps 8r and 6g are optional; steps 8p–10p are a separate review branch. The [coding plan](CODING_PLAN.md) explains each step and shows two saved records per available table.
 
 ```bash
-python -m skillsig <stage> [--only <module>] [--dev-sample] [--force]
+source .venv/bin/activate
 ```
 
-| Flag | Effect |
-|---|---|
-| `--only <module>` | Run one module of the stage (most stages need this; see the tables) |
-| `--dev-sample` | Run on the 50,000-skill dev sample instead of the full data (about 2.6% of skills; useful for testing) |
-| `--force` | Rebuild even if the inputs and config are unchanged |
+Run step 0 first if the environment does not exist. Pipeline commands also read `config/default.yaml` by default (`SKILLSIG_CONFIG` or `--config PATH` can change this). All pipeline commands accept `--force`, `--dev-sample` and `--config PATH`. Use `--force` after editing code. A dev run uses the [step 2 sample](#step-2) and shares output paths with full runs; keep the whole chain in the same mode.
 
-Every output gets a `<file>.manifest.json` next to it with its inputs' fingerprints, the config hash, the code commit and the row count. A step is skipped when nothing it depends on changed. **Code changes do not count**: after editing code, use `--force`.
+<a id="step-0"></a>
 
-## The data
-
-| Table | Rows | Size on disk | What it is |
-|---|---|---|---|
-| `artifacts` | 3,797,117 | 6.0 GB | One row per `SKILL.md` file found on GitHub |
-| ↳ distinct skills (`dedup_primary = 1`) | **1,877,981** | | One representative per distinct text (`file_sha`); the unit of analysis |
-| ↳ readable distinct skills | **1,840,872** | | Distinct skills with text, at least 200 body characters, not a redirect stub |
-| ↳ with commit history | 458,137 | | 24.4% of distinct skills |
-| `artifact_siblings` | 7,264,865 | 6.5 GB | Files and folders stored next to each skill |
-| `repos` | 282,200 | 19 MB | Repository metadata |
-| `mining_runs` | 7 | | Collection runs (gives the snapshot date) |
-| Registry clones | 31 repositories | 271 MB | Git history of 31 well-known skill collections |
-
-Most steps run on the distinct skills (1,877,981) or the readable ones (1,840,872).
-
-## Overview
-
-```
- 0  Setup and download ─► raw Parquet (12.5 GB)
- 1  SQL build scripts  ─► generated_data/ (4 tables)
- 2  data               ─► schema check, dev sample
- 3  registry           ─► versions, matches, lineages of 31 registry repos
- 4  features           ─► per-skill signals (structure, commit, repo, type, wording)
- 5  dedup + template   ─► near-duplicate clusters, registry near-matches, specificity, scaffold
- 6  label              ─► v1 → v2 → v2.1 labels, baselines, style and text models
- 7  evaluate           ─► E1–E5 checks, scaffold check
- 8  sample             ─► E6 spot-check sheets (spot_A.xlsx, spot_B.xlsx, trailer_check.csv)
- 9  (people)           ─► annotate, save as *_done.xlsx
-10  score              ─► E6 precision, confusion, agreement
-```
-
----
-
-## Step 0: setup and download
-
-| | |
-|---|---|
-| **Commands** | `make setup` (creates `.venv`, installs the package with dev tools), then `cd src/data && python download_data.py && cd ../..` |
-| **Input** | Hugging Face dataset `mvaccargiu/gitskills` |
-| **Output** | `src/data/gitskills_data/data/{artifacts,artifact_siblings,repos,mining_runs}/*.parquet` (12.5 GB; never committed) |
-| **Time** | Long (network bound); re-running resumes |
-
-## Step 1: SQL build scripts (generated tables)
-
-These build the tables the EDA notebooks and three feature steps read. Run each once from the repository root after `mkdir -p src/data/generated_data`:
+## Step 0: Set up Python and download the dataset
 
 ```bash
+make setup
+source .venv/bin/activate
+(cd src/data && python download_data.py)
+```
+
+**Input:** `pyproject.toml`; `Hugging Face: mvaccargiu/gitskills`.
+
+**Output:** `src/data/gitskills_data/data/artifacts/*.parquet`; `src/data/gitskills_data/data/artifact_siblings/*.parquet`; `src/data/gitskills_data/data/repos/*.parquet`; `src/data/gitskills_data/data/mining_runs/*.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-0).
+
+<a id="step-1a"></a>
+
+## Step 1a: Count content and structure
+
+```bash
+mkdir -p src/data/generated_data
 python -c "import duckdb; duckdb.connect().execute(open('db/content_and_structure.sql').read())"
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/generated_data/skill_features.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-1a).
+
+<a id="step-1b"></a>
+
+## Step 1b: Record agent folders
+
+```bash
+mkdir -p src/data/generated_data
 python -c "import duckdb; duckdb.connect().execute(open('db/agent_ecosystem.sql').read())"
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/generated_data/file_agents.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-1b).
+
+<a id="step-1c"></a>
+
+## Step 1c: Build repository summaries
+
+```bash
+mkdir -p src/data/generated_data
 python -c "import duckdb; duckdb.connect().execute(open('db/repos.sql').read())"
+```
+
+**Input:** [`src/data/gitskills_data/data/repos/*.parquet`](#step-0); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/generated_data/repo_profile.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-1c).
+
+<a id="step-1d"></a>
+
+## Step 1d: Describe bundled files
+
+```bash
+mkdir -p src/data/generated_data
 python -c "import duckdb; duckdb.connect().execute(open('db/siblings_data.sql').read())"
 ```
 
-| Script | Output (in `src/data/generated_data/`) | Size | Read by |
-|---|---|---|---|
-| `content_and_structure.sql` | `skill_features.parquet` | 63 MB | Step 4 `structure` |
-| `agent_ecosystem.sql` | `file_agents.parquet` | 209 MB | Step 6 `baselines` |
-| `repos.sql` | `repo_profile.parquet` | 16 MB | Step 4 `repo_context` |
-| `siblings_data.sql` | `sibling_files.parquet` | 189 MB | EDA notebooks only |
+**Input:** [`src/data/gitskills_data/data/artifact_siblings/*.parquet`](#step-0).
 
-Input for all four: the raw Parquet from step 0.
+**Output:** `src/data/generated_data/sibling_files.parquet`.
 
-## Step 2: data
+[Explanation and saved examples](CODING_PLAN.md#step-1d).
 
-| Command | Input | Output | Rows | Time |
-|---|---|---|---|---|
-| `python -m skillsig data` | Raw Parquet | Schema check (fails on missing columns); `src/data/derived/s0_devsample_ids.parquet`, the stratified dev sample used by `--dev-sample` | 50,000 | 9 s |
+<a id="step-2"></a>
 
-## Step 3: registry (31 skill collections)
+## Step 2: Check the data and make a development sample
 
-`python -m skillsig registry` alone does nothing; run each module with `--only`, in this order. The clones are not re-fetched unless `FETCH=1` is passed to `scripts/run_full.sh` (fetching would change the registry snapshot every label is built on).
+```bash
+python -m skillsig data
+```
 
-| # | Command | Input | Output (`src/data/derived/` unless shown) | Rows | Time |
-|---|---|---|---|---|---|
-| 3a | `python -m skillsig registry --only mine_git` | `config/registry_sources.yaml`; clones in `src/data/registry_repos/` | `s1_versions_raw.parquet` (every SKILL.md version in git history); `s1_commit_trailers.parquet` (AI co-author lines in registry commits) | 16,485; 50,941 | 8 s |
-| 3b | `python -m skillsig registry --only versions` | 3a outputs | `s1_registry_versions.parquet` (one row per distinct version, ordered) | 15,254 | 9 s |
-| 3c | `python -m skillsig registry --only match` | 3b; `artifacts` | `s1_registry_matches.parquet` (dataset skills byte-identical to a registry version); `s1_lineages.parquet` | 6,719; 2,274 | 9 s |
-| 3d | `python -m skillsig registry --only changes` | 3b; clone file contents | `s1_registry_changes.parquet` (substantive vs cosmetic edits between versions) | 12,877 | 4.4 min |
-| 3e | `python -m skillsig registry --only discover_popular` | `artifacts`, `repos`, 3c | `results/s1_popular_candidates.csv` (most widely copied skills outside the registry) | 200 | 7 s |
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/gitskills_data/data/artifact_siblings/*.parquet`](#step-0); [`src/data/gitskills_data/data/repos/*.parquet`](#step-0); [`src/data/gitskills_data/data/mining_runs/*.parquet`](#step-0); [`src/data/generated_data/skill_features.parquet`](#step-1a); [`src/data/generated_data/file_agents.parquet`](#step-1b); [`src/data/generated_data/repo_profile.parquet`](#step-1c); [`src/data/generated_data/sibling_files.parquet`](#step-1d).
 
-## Step 4: features (per-skill signals)
+**Output:** `src/data/derived/s0_devsample_ids.parquet`.
 
-| # | Command | Input | Output (`src/data/derived/` unless shown) | Rows (data processed) | Time |
-|---|---|---|---|---|---|
-| 4a | `python -m skillsig features --only structure` | `generated_data/skill_features.parquet` | `s2_structure.parquet`: length, headings, lists, code blocks, links, front-matter fields | 1,840,872 readable skills | 1 s |
-| 4b | `python -m skillsig features --only commit` | `artifacts` first/last commit columns | `s2_commit.parquet`: AI trailers, bot class, batch size, message class | 1,877,981 distinct skills | 33 s |
-| 4c | `python -m skillsig features --only repo_context` | `generated_data/repo_profile.parquet`, `artifacts`, 3c | `s2_repo.parquet`: repo kind (collection / agent tooling / project), share measures | 282,200 repos | 7 s |
-| 4d | `python -m skillsig features --only skill_type` | `artifacts` name, description, body; 4c | `s2_types.parquet` (keyword skill type); `results/s2_skill_type_by_project.csv` | 1,877,981; 4,136 | 8.3 min |
-| 4e | `python -m skillsig features --only wording` | `artifacts` text | `s2_wording.parquet`: wording features W1–W12, description idiom | 1,840,872 | 13.4 min |
+[Explanation and saved examples](CODING_PLAN.md#step-2).
 
-## Step 5: near-duplicates, registry similarity, specificity, scaffold
+<a id="step-3a"></a>
 
-Order matters: `template_sim` and `specificity` read the clusters and signatures that `dedup` writes.
+## Step 3a: Read the history of the registry collections
 
-| # | Command | Input | Output (`src/data/derived/` unless shown) | Rows (data processed) | Time |
-|---|---|---|---|---|---|
-| 5a | `python -m skillsig dedup` | `artifacts` text of readable skills (**full body** since 2026-10-26; was the first 5,000 characters) | `s2_clusters.parquet`: near-duplicate cluster per skill at MinHash thresholds 0.8 and 0.6; `s2_minhash_shards/` (signatures, 1.3 GB) | 3,681,744 (1,840,872 × 2 thresholds) | 28 min (5,000-character cut); about 40 min (full body) |
-| 5b | `python -m skillsig features --only template_sim` | 3b, 3c, clones, 5a signatures | `s2_template.parquet`: nearest registry version and estimated similarity per skill | 1,840,872 | 3.6–4.3 min |
-| 5c | `python -m skillsig features --only specificity` | `artifacts` text (first 50,000 characters), 5a | `s2_specificity.parquet`: share of a skill's identifiers almost no other skill uses | 1,734,331 | 5 min |
-| 5d | `python -m skillsig features --only scaffold` | `artifacts` text and owners, `artifact_siblings` | `s2_scaffold.parquet`: placeholders, outline families, front-matter keys, folder layout, masked body hash, shared-line fraction, customization, scaffold basis; `results/s2_scaffold_top_outlines.csv` | 1,840,872; 200 | 75 min |
+```bash
+SKILLSIG_NO_FETCH=1 python -m skillsig registry --only mine_git
+```
 
-Before a full `specificity` rebuild, delete its resumable parts: `rm -rf src/data/derived/s2_specificity_identifiers src/data/derived/s2_specificity_buckets_c*`.
+**Input:** `config/registry_sources.yaml`; `src/data/registry_repos/`.
 
-## Step 6: labels and models
+**Output:** `src/data/derived/s1_versions_raw.parquet`; `src/data/derived/s1_commit_trailers.parquet`.
 
-| # | Command | Input | Output (`src/data/derived/` unless shown) | Rows | Time |
-|---|---|---|---|---|---|
-| 6a | `python -m skillsig label --only rules_v1` | `artifacts`, 4b | `s3_labels_v1.parquet`: Sprint 1 label (copy count, trailer, bot, batch) | 1,877,981 | 9 s |
-| 6b | `python -m skillsig label --only rules_v2` | 6a; 4a, 4b, 4c, 4d, 4e; 5a, 5b | `s3_labels_v2.parquet`: label, templated basis, confidence, reasons; `results/s3_v1_v2_crosstab.csv` | 1,877,981; 11 | 18–20 s |
-| 6c | `python -m skillsig label --only rules_v2_1` | 6a, 6b, 4b, `artifacts` | `s3_labels_v2_1.parquet`: **the current label** plus independent flags; `results/s3_v2_v21_crosstab.csv` | 1,877,981; 10 | 17 s |
-| 6d | `python -m skillsig label --only baselines` | 6a, 6b, 4b, `generated_data/file_agents.parquet` | `s3_baseline_labels.parquet` (single-signal baselines B0–B3b); `results/s3_baseline_summary.csv` | 1,877,981; 9 | 11 s |
-| 6e | `python -m skillsig label --only style_model` | 6c, 4a, 4b, 4e, 5a, 5c, `artifacts` text | E4 style model: `s3_style_scores.parquet`; `results/s3_style_model.csv`, `.json`, `s3_style_top_words.csv` | 380,023 scored; 30 | 21–25 min |
-| 6f | `python -m skillsig label --only text_methods` | 6c, 4a, 4b, 4e, 5a, 5c, `artifacts` text | E5 text-only methods: `s3_text_methods_oof.parquet`; `results/s3_text_methods.csv`, `.json`, `_top_words.csv` | 40,000 (20,000 agent + 20,000 human); 21 | 17 min |
-| 6g | `python -m skillsig label --only text_score` | 6f, 6c, features | E5b text lean for no-history skills: `s3_text_scores.parquet` and summaries | **not run yet** | — |
-| 6h | `python -m skillsig label --only evidence` | 6a, 6c, 4b, 5a, 5b, 5d | `s3_evidence.parquet`; `results/s3_evidence_{matrix,signals,legacy_crosstab}.csv`, `s3_evidence_summary.json` | 1,877,981 | command log |
+`SKILLSIG_NO_FETCH=1` keeps existing branch history. Missing clones or file objects may still download.
 
-Step 6h reports reuse and disclosed agent involvement independently; both may coexist.
-It preserves historical labels, their confidence, and independent annotations. This
-report assigns no human-authorship verdict. Its reuse evidence is broader than the
-old templated threshold: sharing and cluster candidates start at two. See
-[definitions](stages/s3_labeling/evidence.md). Run `python -m skillsig export`
-afterward to generate `figures/report/f0_evidence_dimensions.png` with the other figures.
+[Explanation and saved examples](CODING_PLAN.md#step-3a).
 
-## Step 7: evaluations
+<a id="step-3b"></a>
 
-| # | Command | Input | Output (`results/`) | Rows | Time |
-|---|---|---|---|---|---|
-| 7a | `python -m skillsig evaluate --only disclosure_recall` | 3a outputs | E1: `s4_disclosure_recall.csv`, `.json` (share of AI disclosures visible from first/last commit) | 8 | 2 s |
-| 7b | `python -m skillsig evaluate --only template_provenance` | 5b, 6a, 5a, 6c | E2: exact-match recovery (6,481), near-candidate agreement (42,104), mixed row marked exploratory; `s4_template_provenance.csv`, `s4_template_unexplained.csv` | 3; 3 | 2–3 s |
-| 7c | `python -m skillsig evaluate --only edit_robustness` | 5b, `artifacts` text | E3: `s4_edit_robustness.csv`, `figures/12_edit_robustness.png` | 10 | 23–35 s |
-| 7d | `python -m skillsig evaluate --only stability` | 6a, 4b, 5b, 5a, 6c, `artifacts` | E5: `s4_stability.csv`, `.json` (label shares when one threshold moves) | 84 | 53 s |
-| 7e | `python -m skillsig evaluate --only scaffold_check` | 5d, 6c, 5b, 6a, 5a; text of sampled rows | `s4_scaffold_overlap.csv`, `_recall.csv`, `_agent_confound.csv`, `_spot.csv` | 6; 3; 2; 150 | 14 s |
+## Step 3b: Build the distinct-version table
 
-`python -m skillsig evaluate` without `--only` runs 7a–7d, then scores E6 if `spot_A_done.xlsx` exists. It does not run 7e.
+```bash
+python -m skillsig registry --only versions
+```
 
-## Step 8: spot-check sheets (E6)
+**Input:** [`src/data/derived/s1_versions_raw.parquet`](#step-3a); [`src/data/derived/s1_commit_trailers.parquet`](#step-3a); [`src/data/gitskills_data/data/mining_runs/*.parquet`](#step-0); [`src/data/registry_repos/`](#step-3a).
 
-### Separate paired content-reuse review
+**Output:** `src/data/derived/s1_registry_versions.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-3b).
+
+<a id="step-3c"></a>
+
+## Step 3c: Match registry texts and summarize their history
+
+```bash
+python -m skillsig registry --only match
+```
+
+**Input:** [`src/data/derived/s1_registry_versions.parquet`](#step-3b); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/gitskills_data/data/mining_runs/*.parquet`](#step-0); `config/registry_sources.yaml`.
+
+**Output:** `src/data/derived/s1_registry_matches.parquet`; `src/data/derived/s1_lineages.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-3c).
+
+<a id="step-3d"></a>
+
+## Step 3d: Compare consecutive versions
+
+```bash
+python -m skillsig registry --only changes
+```
+
+**Input:** [`src/data/derived/s1_registry_versions.parquet`](#step-3b); [`src/data/registry_repos/`](#step-3a).
+
+**Output:** `src/data/derived/s1_registry_changes.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-3d).
+
+<a id="step-3e"></a>
+
+## Step 3e: Find popular texts outside the registry
+
+```bash
+python -m skillsig registry --only discover_popular
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/gitskills_data/data/repos/*.parquet`](#step-0); [`src/data/derived/s1_registry_matches.parquet`](#step-3c).
+
+**Output:** `results/s1_popular_candidates.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-3e).
+
+<a id="step-4a"></a>
+
+## Step 4a: Load structure features
+
+```bash
+python -m skillsig features --only structure
+```
+
+**Input:** [`src/data/generated_data/skill_features.parquet`](#step-1a).
+
+**Output:** `src/data/derived/s2_structure.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-4a).
+
+<a id="step-4b"></a>
+
+## Step 4b: Measure commit-history signals
+
+```bash
+python -m skillsig features --only commit
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s2_commit.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-4b).
+
+<a id="step-4c"></a>
+
+## Step 4c: Describe repository context
+
+```bash
+python -m skillsig features --only repo_context
+```
+
+**Input:** [`src/data/generated_data/repo_profile.parquet`](#step-1c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/gitskills_data/data/mining_runs/*.parquet`](#step-0); [`src/data/derived/s1_registry_matches.parquet`](#step-3c).
+
+**Output:** `src/data/derived/s2_repo.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-4c).
+
+<a id="step-4d"></a>
+
+## Step 4d: Assign skill topics
+
+```bash
+python -m skillsig features --only skill_type
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/derived/s2_repo.parquet`](#step-4c).
+
+**Output:** `src/data/derived/s2_types.parquet`; `results/s2_skill_type_by_project.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-4d).
+
+<a id="step-4e"></a>
+
+## Step 4e: Measure wording
+
+```bash
+python -m skillsig features --only wording
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s2_wording.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-4e).
+
+<a id="step-5a"></a>
+
+## Step 5a: Group near-duplicate texts
+
+```bash
+python -m skillsig dedup
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s2_clusters.parquet`; `src/data/derived/s2_minhash_shards/`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-5a).
+
+<a id="step-5b"></a>
+
+## Step 5b: Find registry similarity
+
+```bash
+python -m skillsig features --only template_sim
+```
+
+**Input:** [`src/data/derived/s1_registry_versions.parquet`](#step-3b); [`src/data/derived/s1_registry_matches.parquet`](#step-3c); [`src/data/registry_repos/`](#step-3a); [`src/data/derived/s2_minhash_shards/`](#step-5a); `config/registry_sources.yaml`.
+
+**Output:** `src/data/derived/s2_template.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-5b).
+
+<a id="step-5c"></a>
+
+## Step 5c: Measure project-specific identifiers
+
+```bash
+python -m skillsig features --only specificity
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/derived/s2_clusters.parquet`](#step-5a).
+
+**Output:** `src/data/derived/s2_specificity.parquet`.
+
+For a clean rebuild, move existing `s2_specificity_identifiers/` and `s2_specificity_buckets_c*` parts aside before using `--force`; keep them to resume.
+
+[Explanation and saved examples](CODING_PLAN.md#step-5c).
+
+<a id="step-5d"></a>
+
+## Step 5d: Find shared structure and scaffolds
+
+```bash
+python -m skillsig features --only scaffold
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/gitskills_data/data/artifact_siblings/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s2_scaffold.parquet`; `results/s2_scaffold_top_outlines.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-5d).
+
+<a id="step-6a"></a>
+
+## Step 6a: Reproduce the first label rules
+
+```bash
+python -m skillsig label --only rules_v1
+```
+
+**Input:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/derived/s2_commit.parquet`](#step-4b).
+
+**Output:** `src/data/derived/s3_labels_v1.parquet`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6a).
+
+<a id="step-6b"></a>
+
+## Step 6b: Add registry and cluster evidence
+
+```bash
+python -m skillsig label --only rules_v2
+```
+
+**Input:** [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_structure.parquet`](#step-4a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/derived/s2_wording.parquet`](#step-4e); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s3_labels_v2.parquet`; `results/s3_v1_v2_crosstab.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6b).
+
+<a id="step-6c"></a>
+
+## Step 6c: Add disclosure and revision flags
+
+```bash
+python -m skillsig label --only rules_v2_1
+```
+
+**Input:** [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s3_labels_v2.parquet`](#step-6b); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s3_labels_v2_1.parquet`; `results/s3_v2_v21_crosstab.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6c).
+
+<a id="step-6d"></a>
+
+## Step 6d: Build simple comparison rules
+
+```bash
+python -m skillsig label --only baselines
+```
+
+**Input:** [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s3_labels_v2.parquet`](#step-6b); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/generated_data/file_agents.parquet`](#step-1b); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s3_baseline_labels.parquet`; `results/s3_baseline_summary.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6d).
+
+<a id="step-6e"></a>
+
+## Step 6e: Test text style against disclosure
+
+```bash
+python -m skillsig label --only style_model
+```
+
+**Input:** [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_structure.parquet`](#step-4a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_wording.parquet`](#step-4e); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_specificity.parquet`](#step-5c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s3_style_scores.parquet`; `results/s3_style_model.csv`; `results/s3_style_model.json`; `results/s3_style_top_words.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6e).
+
+<a id="step-6f"></a>
+
+## Step 6f: Compare several text methods
+
+```bash
+python -m skillsig label --only text_methods
+```
+
+**Input:** [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_structure.parquet`](#step-4a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_wording.parquet`](#step-4e); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_specificity.parquet`](#step-5c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s3_text_methods_oof.parquet`; `results/s3_text_methods.csv`; `results/s3_text_methods.json`; `results/s3_text_methods_top_words.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6f).
+
+<a id="step-6g"></a>
+
+## Step 6g: Optional: score skills without history
+
+```bash
+python -m skillsig label --only text_score
+```
+
+**Input:** [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_structure.parquet`](#step-4a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_wording.parquet`](#step-4e); [`src/data/derived/s2_specificity.parquet`](#step-5c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `src/data/derived/s3_text_scores.parquet`; `results/s3_text_score_summary.csv`; `results/s3_text_score.json`.
+
+Optional; production output absent here; excluded from the full runner.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6g).
+
+<a id="step-6h"></a>
+
+## Step 6h: Report reuse and disclosure separately
+
+```bash
+python -m skillsig label --only evidence
+```
+
+**Input:** [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s2_scaffold.parquet`](#step-5d).
+
+**Output:** `src/data/derived/s3_evidence.parquet`; `results/s3_evidence_matrix.csv`; `results/s3_evidence_signals.csv`; `results/s3_evidence_legacy_crosstab.csv`; `results/s3_evidence_summary.json`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-6h).
+
+<a id="step-7a"></a>
+
+## Step 7a: Check how many disclosures first and last commits reveal
+
+```bash
+python -m skillsig evaluate --only disclosure_recall
+```
+
+**Input:** [`src/data/derived/s1_versions_raw.parquet`](#step-3a); [`src/data/derived/s1_commit_trailers.parquet`](#step-3a).
+
+**Output:** `results/s4_disclosure_recall.csv`; `results/s4_disclosure_recall.json`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-7a).
+
+<a id="step-7b"></a>
+
+## Step 7b: Check recovery of exact registry texts
+
+```bash
+python -m skillsig evaluate --only template_provenance
+```
+
+**Input:** [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c).
+
+**Output:** `results/s4_template_provenance.csv`; `results/s4_template_unexplained.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-7b).
+
+<a id="step-7c"></a>
+
+## Step 7c: Test similarity after controlled edits
+
+```bash
+python -m skillsig evaluate --only edit_robustness
+```
+
+**Input:** [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `results/s4_edit_robustness.csv`; `figures/12_edit_robustness.png`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-7c).
+
+<a id="step-7d"></a>
+
+## Step 7d: Vary one rule threshold at a time
+
+```bash
+python -m skillsig evaluate --only stability
+```
+
+**Input:** [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `results/s4_stability.csv`; `results/s4_stability.json`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-7d).
+
+<a id="step-7e"></a>
+
+## Step 7e: Check scaffold overlap and prepare examples
+
+```bash
+python -m skillsig evaluate --only scaffold_check
+```
+
+**Input:** [`src/data/derived/s2_scaffold.parquet`](#step-5d); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `results/s4_scaffold_overlap.csv`; `results/s4_scaffold_recall.csv`; `results/s4_scaffold_agent_confound.csv`; `results/s4_scaffold_spot.csv`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-7e).
+
+<a id="step-8"></a>
+
+## Step 8: Draw the blind authorship review sample
+
+```bash
+python -m skillsig sample
+```
+
+**Input:** [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v2.parquet`](#step-6b); [`src/data/derived/s3_baseline_labels.parquet`](#step-6d); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
+
+**Output:** `results/annotation/spot_A.xlsx`; `results/annotation/spot_B.xlsx`; `results/annotation/trailer_check.csv`; `results/annotation/key.parquet`; `results/annotation/trailer_key.parquet`; `results/annotation/codebook.md`; `results/s4_spot_design.json`.
+
+New draw only; existing `spot_A.xlsx` is kept. To keep IDs after label changes, use [8r](#step-8r). Keep `key.parquet` and `trailer_key.parquet` private.
+
+[Explanation and saved examples](CODING_PLAN.md#step-8).
+
+<a id="step-8r"></a>
+
+## Step 8r: Refresh the same sample after label changes
+
+```bash
+python -m skillsig sample --only spot_refresh
+```
+
+**Input:** [`results/annotation/key.parquet`](#step-8); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v2.parquet`](#step-6b); [`src/data/derived/s3_baseline_labels.parquet`](#step-6d); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`results/annotation/spot_A.xlsx`](#step-8); [`results/annotation/spot_B.xlsx`](#step-8).
+
+**Output:** `results/annotation/key.parquet`; `results/annotation/spot_A.xlsx`; `results/annotation/spot_B.xlsx`.
+
+Keeps the same IDs; updates the key and only refreshes blank workbooks. Input key and sheets originate in [8](#step-8).
+
+[Explanation and saved examples](CODING_PLAN.md#step-8r).
+
+<a id="step-9"></a>
+
+## Step 9: People complete the blind review
+
+Manual: follow docs/ANNOTATION_GUIDELINES.md.
+
+**Input:** [`results/annotation/spot_A.xlsx`](#step-8); [`results/annotation/spot_B.xlsx`](#step-8); [`results/annotation/trailer_check.csv`](#step-8); [`results/annotation/codebook.md`](#step-8); `docs/ANNOTATION_GUIDELINES.md`.
+
+**Output:** `results/annotation/spot_A_done.xlsx`; `results/annotation/spot_B_done.xlsx`; `results/annotation/spot_C_done.xlsx`; `results/annotation/trailer_check_done.csv`.
+
+A is required for scoring. B, C and trailer answers are optional. Back up completed files; `results/annotation/` is ignored by Git.
+
+[Explanation and saved examples](CODING_PLAN.md#step-9).
+
+<a id="step-10"></a>
+
+## Step 10: Score the completed blind review
+
+```bash
+python -m skillsig sample --only spot_check
+```
+
+**Input:** [`results/annotation/spot_A_done.xlsx`](#step-9); [`results/annotation/spot_B_done.xlsx`](#step-9); [`results/annotation/spot_C_done.xlsx`](#step-9); [`results/annotation/trailer_check_done.csv`](#step-9); [`results/annotation/key.parquet`](#step-8r).
+
+**Output:** `results/s4_spot_precision.csv`; `results/s4_spot_reason_precision.csv`; `results/s4_spot_confusion.csv`; `results/s4_spot_agreement.json`; `results/s4_spot_rater_confusion.csv`; `results/s4_spot_overlap_precision.csv`; `results/s4_spot_rater_pairs.csv`; `results/s4_spot_rater_pair_confusion.csv`; `results/s4_spot_rater_c_precision.csv`; `results/s4_trailer_precision.json`; `results/annotation/rater_disagreements.csv`; `results/annotation/rater_c_disagreements.csv`.
+
+B outputs require B’s sheet; C outputs require C’s sheet; trailer precision requires the completed trailer CSV. Use the original [step 8 key](#step-8) if no refresh was needed.
+
+[Explanation and saved examples](CODING_PLAN.md#step-10).
+
+<a id="step-8p"></a>
+
+## Step 8p: Separate branch: prepare paired reuse review
 
 ```bash
 python -m skillsig sample --only template_review
 ```
 
-Builds an evidence-aware review package in `results/annotation/template_review/`:
-full paired texts, shared passages, direct body-shingle Jaccard and diffs in
-`pairs.html`; answer sheet `template_pairs.csv`; private `key.parquet` and
-`pair_evidence.json`. The target is 30 subjects per exact/near/cluster/scaffold
-stratum, with subject owner/cluster caps and explicit shortfalls. Registry text is
-read from verified local Git objects only. Existing packages are never overwritten.
-Sampling and text coverage are recorded in `results/s4_template_review_design.json`.
+**Input:** [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_scaffold.parquet`](#step-5d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/derived/s2_scaffold_parts/`](#step-5d); [`src/data/registry_repos/`](#step-3a).
 
-This is separate from the original blind authorship annotations. Reviewers assess
-material reuse and shared scaffold, with uncertainty kept explicit. After a returned
-`template_pairs_done.csv` is saved beside the sheet, run
-`python -m skillsig evaluate --only template_review` for stratified judgment counts
-and intervals. See [the review protocol](report/TEMPLATE_EVALUATION.md). Human
-judgments are required; the tool does not invent a precision result.
+**Output:** `results/annotation/template_review/template_pairs.csv`; `results/annotation/template_review/key.parquet`; `results/annotation/template_review/pair_evidence.json`; `results/annotation/template_review/pairs.html`; `results/s4_template_review_design.json`.
 
-| Command | Input | Output (`results/annotation/`) | Rows | Time |
-|---|---|---|---|---|
-| `python -m skillsig sample` | 6c, 6b, 6d, 4b, 5a, 4c, `artifacts` | `spot_A.xlsx` (person A), `spot_B.xlsx` (person B, a subset), `trailer_check.csv`, `key.parquet` (answer key, never shown to annotators), `trailer_key.parquet`, `codebook.md`; `results/s4_spot_design.json` | 120 (30 per label); 40; 50 | 7–8 s |
-| `python -m skillsig sample --only spot_refresh` | `key.parquet` and the same inputs | Keeps the drawn skills; rewrites the key with current labels, and the sheets with current text if they are still blank | 120 | 8 s |
+Existing paired packages are kept. Keep the key private.
 
-`sample` never draws over existing sheets: move `spot_A.xlsx` aside to redraw. Use `spot_refresh` after relabelling, so annotation already started stays valid.
+[Explanation and saved examples](CODING_PLAN.md#step-8p).
 
-## Step 9: annotation (people)
+<a id="step-9p"></a>
 
-Follow `docs/ANNOTATION_GUIDELINES.md` (also `.docx`).
+## Step 9p: Separate branch: people review paired texts
 
-| Who | Fills | Saves as (`results/annotation/`) |
-|---|---|---|
-| Person A | `spot_A.xlsx`: `your_label`, `your_confidence`, `notes` | `spot_A_done.xlsx` |
-| Person B | `spot_B.xlsx` | `spot_B_done.xlsx` |
-| Person C (optional) | a copy of `spot_A.xlsx`, any subset of rows | `spot_C_done.xlsx` |
-| Anyone | `trailer_check.csv`: `is_ai_disclosure` (yes / no / unsure) | `trailer_check_done.csv` |
+Manual: review results/annotation/template_review/pairs.html.
 
-## Step 10: scoring (E6)
+**Input:** [`results/annotation/template_review/pairs.html`](#step-8p); [`results/annotation/template_review/template_pairs.csv`](#step-8p); `docs/report/TEMPLATE_EVALUATION.md`.
 
-Both independent sheets are now included (2026-10-27). B's submitted workbook,
-`spot_B_Terry.xlsx`, is preserved and has a byte-identical `spot_B_done.xlsx` copy
-for scorer compatibility. The 40-item overlap has 21 agreements (52.5%; kappa 0.288).
-See [the annotation review](report/ANNOTATION_REVIEW.md). The existing precision and
-pipeline-confusion tables use A's 120 answers; they are not consensus labels.
+**Output:** `results/annotation/template_review/template_pairs_done.csv`.
 
-Additional outputs are `results/s4_spot_rater_confusion.csv` (A × B),
-`results/s4_spot_overlap_precision.csv` (each rater on the same overlap), and the private
-`results/annotation/rater_disagreements.csv` (original answers and notes, no adjudication).
-With `spot_C_done.xlsx` (Jayden, 60 of 120 skills, added 2026-10-27; a byte-identical copy of
-`spot_A_Jayden.xlsx`) the scorer also writes `s4_spot_rater_pairs.csv`,
-`s4_spot_rater_pair_confusion.csv`, `s4_spot_rater_c_precision.csv` and the private
-`rater_c_disagreements.csv`; A's and B's outputs do not change. C agrees with A on 33/60
-(kappa 0.31) and with B on 14/21 (kappa 0.47).
-The scorer rejects duplicate IDs, unassigned rows and unknown nonblank labels.
+[Explanation and saved examples](CODING_PLAN.md#step-9p).
 
-| Command | Input | Output (`results/`) | Rows |
-|---|---|---|---|
-| `python -m skillsig sample --only spot_check` (or `python -m skillsig evaluate`) | `spot_A_done.xlsx` (required); `spot_B_done.xlsx`, `spot_C_done.xlsx` and `trailer_check_done.csv` if present; `key.parquet` | `s4_spot_precision.csv` (precision per label for v2.1, v2 and the baselines, with Wilson intervals); `s4_spot_reason_precision.csv`; `s4_spot_confusion.csv`; `s4_spot_agreement.json` (Cohen's kappa once B is done); `s4_trailer_precision.json` (once the trailer check is done) | 28; 55; 68; 1 |
+<a id="step-10p"></a>
+
+## Step 10p: Separate branch: summarize paired judgments
+
+```bash
+python -m skillsig evaluate --only template_review
+```
+
+**Input:** [`results/annotation/template_review/template_pairs_done.csv`](#step-9p); [`results/annotation/template_review/key.parquet`](#step-8p).
+
+**Output:** `results/s4_template_pair_judgments.csv`.
+
+Requires returned judgments; no scored output is available here yet.
+
+[Explanation and saved examples](CODING_PLAN.md#step-10p).
+
+<a id="step-11"></a>
+
+## Step 11: Draw the report figures
+
+```bash
+python -m skillsig export
+```
+
+**Input:** [`results/s3_evidence_matrix.csv`](#step-6h); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
+
+**Output:** `figures/report/*.png`.
+
+[Explanation and saved examples](CODING_PLAN.md#step-11).
+
+## Run the main chain with one command
+
+After steps 0 and 1a–1d:
+
+```bash
+bash scripts/run_full.sh
+```
+
+**Inputs:** files from [0](#step-0), [1a](#step-1a), [1b](#step-1b), [1c](#step-1c), [1d](#step-1d), registry config and local clones from [3a](#step-3a); completed annotations from [9](#step-9), if present.
+
+**Outputs:** the main-chain files listed in steps 2–8 and 10–11; `logs/run_full_<timestamp>.log`. Uses `--force`. If `spot_A_done.xlsx` exists, keeps sample IDs, refreshes the key and scores; otherwise draws sheets, moving earlier uncompleted sheets aside. Excludes optional 6g and paired review 8p–10p. Does not run step 9 for people.
+
+```bash
+DRY_RUN=1 bash scripts/run_full.sh
+```
+
+**Input:** runner script. **Output:** printed command list and log; no stage execution.
+
+Use `FETCH=1 bash scripts/run_full.sh` only when updating the registry snapshot is intended. The runner records regression-test failures as warnings and continues; inspect the log before using results.
 
 ## Checks
 
-| Command | What it checks | Time |
-|---|---|---|
-| `make test` (`python -m pytest -q`) | 397 unit tests on small fixtures; no dataset needed | about 20 s |
-| `python -m pytest -q -m data tests/regression` | Known counts on the full data (v1 labels, registry coverage) | short |
-| `make smoke` (`python -m skillsig all --dev-sample`) | Meant to run every stage on the dev sample, but **stops at `registry`**: that stage has no default module, and `all` stops at the first stage that is not implemented. Run the steps one by one with `--dev-sample` instead. | |
+| Run | Input | Output |
+| --- | --- | --- |
+| `python -m pytest -q` | Code and small test fixtures | Unit-test pass/fail |
+| `python -m pytest -q -m data tests/regression` | Full dataset and generated tables from the main chain | Known-count regression pass/fail |
 
-## Total run time
-
-About **2.5 to 3 hours** for steps 2–8 on the full data: roughly 88 minutes for the run of 2026-10-25, plus `text_methods` (17 min), the scaffold step (75 min) and the longer full-body `dedup`. Steps 0 and 1 are one-off.
-
-## One-shot runner
-
-`scripts/run_full.sh` (or double-click `run_full.command` on a Mac) runs steps 2–8 and 10 with `--force`, then draws the report figures, and logs to `logs/run_full_<timestamp>.log`. `DRY_RUN=1` prints the steps only; `FETCH=1` also re-fetches the registry clones.
-
-- **Annotation is safe.** Before annotation it draws fresh sheets, moving an unannotated `spot_A.xlsx` aside first. Once `spot_A_done.xlsx` exists it never redraws: it runs `spot_refresh` (same sample, new answer key) and then scores with `spot_check`.
-- **Not included:** step 1 (SQL build scripts, run once by hand), 6g `text_score` (not run yet) and the separate paired content-reuse review.
-
-## Where to look for what
-
-| Folder | Contents | In git? |
-|---|---|---|
-| `src/data/gitskills_data/` | Raw dataset | No |
-| `src/data/generated_data/` | SQL-built tables (step 1) | No |
-| `src/data/derived/` | Every intermediate table (steps 2–6) | No |
-| `results/` | Result tables and their manifests (steps 3e–10) | Yes |
-| `results/annotation/` | Sheets, keys, codebook, finished annotations | **No** (git-ignored): back up finished `*_done.xlsx` files yourself |
-| `figures/` | Figures | Yes |
-| `results/base_before_text/`, `results/base_before_fullbody/` | Frozen comparison points and their write-ups | Yes |
-| `logs/` | Full-run logs | No |
+`make all`, `make smoke` and `python -m skillsig all` stop at the registry stage because it has no default runner. Run the listed modules or the full script. `analyze` and `rq2` are not implemented.
