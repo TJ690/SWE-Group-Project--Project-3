@@ -30,7 +30,8 @@ Here is what limits our study. Our labels are clues about who wrote a skill, not
    authorship performance is established. Precision and coverage depend on the
    assumed class prior and have not been validated in the no-history population.
 10. Similar agreement estimates for full and trailer-only rules do not establish
-    equivalence or show whether a trailer describes writing, installation or maintenance.
+    equivalence or show whether a trailer describes writing, installation, or maintenance.
     The predicted subsets differ, and true workflow roles have not been independently verified.
 11. Threshold sensitivity currently measures aggregate shares. Opposing item-level
     changes can cancel; individual stability and threshold interactions are unmeasured.
+12. A 12-skill pilot, labeled from skill text alone and without written rules, had an agreement of 5 of 12 (41.7%, kappa 0.18). It tested the labeling approach and cannot be compared with the spot check, which used different rules, evidence, and samples.
