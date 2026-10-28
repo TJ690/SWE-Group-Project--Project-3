@@ -230,7 +230,7 @@ Defined in `src/notebooks/EDA_authorship.ipynb`. `EDA_content` and `EDA_repos` r
 | AI trailer | `first_commit_message` has a `Co-authored-by:` line naming Claude, Anthropic, Cursor, Copilot, Codex, OpenAI, or Gemini. |
 | Coding-agent bot | First commit authored by a bot account that is a coding agent. CI, release, and distribution bots (for example `github-actions[bot]`) are not an authorship signal. |
 | Batch | Representative skills (`dedup_primary = 1`) that share a repository and `first_commit_at`. |
-| Bulk install | Batch of 6 or more skills. Trailer and bot author then describe the install, not the writing. |
+| Bulk install | Batch of 6 or more skills added at the same time. Installation, import, generation or mixed work are possible; a trailer or bot author may then describe that event rather than the writing. |
 | Copy count | Number of files sharing the same `file_sha`. |
 
 ### Sprint 1 authorship label (first matching rule wins)

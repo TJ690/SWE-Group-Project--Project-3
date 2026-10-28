@@ -68,7 +68,7 @@ Dev mode scores only sampled skills, but identifier frequencies still come from 
 
 ## Rebuild history
 
-The table was first built on 2026-10-25, before `s2_clusters` was rebuilt on full bodies, so its rarity counts used the old clusters. It was rebuilt on 2026-10-27 on the current clusters, and 3.5 and 3.6 were rerun. 171,399 skills got a different score (mean change 0.006; median 0.314 → 0.318). The text-model AUCs moved by less than 0.001, and the ensemble's coverage at 90% precision went from 1.0% to 0.9% of positives.
+The table was first built on 2026-10-25, before `s2_clusters` was rebuilt on full bodies, so its rarity counts used the old clusters. It was rebuilt on 2026-10-27 on the current clusters, and 3.5 and 3.6 were rerun. 171,399 skills got a different score (mean change 0.006; median 0.314 → 0.318). The text-model AUCs moved by less than 0.001, and the ensemble's coverage at a nominal 90% proxy precision went from 1.0% to 0.9% of positives.
 
 ## Limits
 

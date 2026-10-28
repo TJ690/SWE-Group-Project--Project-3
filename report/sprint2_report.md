@@ -55,12 +55,12 @@ Each signal is measured on its own before any label is decided.
 | Signal | What it shows | How we measure it |
 |---|---|---|
 | Exact copies | Reuse | Number of files and owners that share the same text |
-| Registry match | Copied from a known source | Exact or near (similarity 0.8+) match to a registry version |
+| Registry match | Shared content with a registry version (exact); similarity candidates (near). Copying direction not established | Exact or near (similarity 0.8+) match to a registry version |
 | Near-duplicate cluster | A family of similar texts | MinHash (128 numbers, 5-word pieces) grouped at similarity 0.8 |
 | Scaffold leftovers | Built from a template generator | Unfilled `TODO` placeholders and empty example folders |
 | AI co-author line or agent bot | Disclosed agent involvement | First and last commit messages and author accounts |
-| Bulk batch | Install, not writing | Number of skills added to a repository at the same time |
-| Revision | Maintained by a person | 3 or more commits over 7 or more days |
+| Bulk batch | Skills added together (install, import, generation or mixed work) | Number of skills added to a repository at the same time |
+| Revision | Repeated changes over time; does not identify who made them | 3 or more commits over 7 or more days |
 | Repository context | Background only | Agent folder, repository age and size |
 | Wording and specificity | Weak clue | Readability, tone, excess-vocabulary words, rare identifiers |
 
@@ -190,7 +190,7 @@ The baselines on the same sample:
 
 What this shows:
 
-- **Agent labels hold up.** C also agreed with 20 of 21. But the full rules do not beat the simple trailer baseline (83% against 82%), so we cannot claim they are better.
+- **Agent labels hold up.** C also agreed with 20 of 21. Against the simple trailer baseline the estimates are similar (25/30 against 23/28, on different subsets of the sample); the evaluation establishes neither superiority nor equivalence.
 - **Likely human is not validated.** A labelled 11 of the 30 likely-human skills as agent-assisted.
 - **Templated looks wrong to readers, but the sheet cannot judge it.** The blind sheet shows one file, not its copies or its source. A reader cannot see that 500 other files share the text. A separate paired review, which shows both texts side by side, has been built but not yet completed.
 
@@ -206,7 +206,7 @@ Readers mostly agree on agent-assisted skills. They split on likely human and in
 
 ### 6.6 Text alone gives only a moderate signal
 
-We trained text models on 20,000 disclosed-agent and 20,000 likely-human skills. Folds keep each repository owner and near-duplicate family on one side, so the models cannot memorise them.
+We trained text models on 20,000 disclosed-agent and 20,000 likely-human skills. Folds keep each repository owner and detected near-duplicate family on one side, which reduces leakage through them, though it does not remove every route.
 
 | Method | AUC |
 |---|---:|
@@ -215,7 +215,7 @@ We trained text models on 20,000 disclosed-agent and 20,000 likely-human skills.
 | Feature model (logistic regression) | 0.60 |
 | Ensemble (feature model + word and character TF-IDF) | **0.71** |
 
-An AUC of 0.5 is guessing. 0.71 shows some signal, so "no separable signal" is not supported. But at 90% precision the best model decides only 0.9% of agent skills and 7.1% of human skills, so it cannot label most skills.
+An AUC of 0.5 is guessing. 0.71 shows some signal, so "no separable signal" is not supported. But at a nominal 90% precision against these proxy labels, under a 50/50 class prior, the best model decides only 0.9% of disclosure-positive and 7.1% of likely-human proxies, so it cannot label most skills. Performance on true authorship remains unestablished.
 
 ![Text-only methods reach AUC 0.71](../figures/report/f4_text_methods_auc.png)
 

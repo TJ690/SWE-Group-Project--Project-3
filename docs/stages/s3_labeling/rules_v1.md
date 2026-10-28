@@ -26,7 +26,7 @@ Applies the Sprint 1 rules exactly as they were. The first rule that matches win
 ## Design decisions
 
 - **Templated first:** if 10 files share the text, a trailer on *this* copy's commit only says who committed the copy, not who wrote the text.
-- **Agent only for small batches:** a trailer on a 40-skill install commit means an agent ran the install, not that it wrote 40 skills.
+- **Agent only for small batches:** a trailer on a commit that adds 40 skills records a simultaneous addition (often an install or import), not evidence that the agent wrote 40 skills.
 - **Human is strict:** git has no positive "a person wrote this" marker, so every available signal must point the same way.
 - **An exact port:** reproducing the Sprint 1 numbers proves the new pipeline is correct before any rule changes, and gives v2 a fixed reference. That's also why v1 has no confidence.
 

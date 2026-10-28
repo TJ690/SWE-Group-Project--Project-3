@@ -35,7 +35,7 @@ Most of the change comes from two places. Near-duplicate clusters and registry m
 - **Likely-human labels do not.** A agreed with 6 of 30. On the shared 40 skills, A agreed with 2 of 10 and B with 6 of 10. The label is not validated.
 - **Readers disagree with each other.** A and B agreed on 21 of 40 skills (Cohen's kappa 0.29). A and C agreed on 33 of 60 (kappa 0.31). See the [annotation review](../../report/ANNOTATION_REVIEW.md).
 - **Copy rules recover known registry copies.** Copy count or cluster membership finds 87.2% of 6,481 exact registry copies. Copy count alone finds 56.5%.
-- **Text alone separates the groups only moderately.** The best text model reaches AUC 0.71, compared with 0.52 for a phrase list. At 90% precision it decides fewer than 10% of skills.
+- **Text alone separates the groups only moderately.** The best text model reaches AUC 0.71, compared with 0.52 for a phrase list. At a nominal 90% precision against proxy labels (50/50 prior) it decides fewer than 10% of skills.
 - **Cutoffs matter a little.** The largest change in any label share is +3.3 percentage points, when the cluster similarity drops to 0.6.
 - **Reuse and agent disclosure overlap.** 57,027 of the 157,774 skills with a disclosed agent (36.1%) also show reuse. The report now shows reuse and disclosure as two separate views instead of forcing one label.
 

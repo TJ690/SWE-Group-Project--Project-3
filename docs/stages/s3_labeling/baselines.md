@@ -31,7 +31,7 @@ The module also provides the **grouped cross-validation split** used by 3.5 and 
 
 - **Why baselines?** A complex rule set is only worth it if it beats one-line rules on the same annotated skills.
 - **Why is the agent folder a baseline, not a rule?** It shows where a skill is installed, not who wrote it. It labels 24% of skills agent-assisted, far more than any disclosure, which is the point of measuring it.
-- **Why group folds by owner and cluster?** One owner's skills, or near-copies of one text, share wording. Splitting them across training and test lets a model memorise them and look better than it is.
+- **Why group folds by owner and cluster?** One owner's skills, or near-copies of one text, share wording. Splitting them across training and test lets a model memorise them and look better than it is. Grouping reduces this through the owners and near-copies it can see; it does not rule out every leak.
 - Agreement between a baseline and the rules is not evidence either is right; only the annotated sample can say that.
 
 ## Tests

@@ -22,7 +22,7 @@ Give skills **without** commit history a text-based lean, using the method chose
 ## Design decisions
 
 - **A "lean", not a label:** precision is estimated with equal class sizes and noisy humans, so it is a tendency with a measured error rate, kept apart from the commit-based label.
-- **Depends on 3.6:** with the current results (a few percent decided at 90% precision), most skills without history would stay `text_uncertain`.
+- **Depends on 3.6:** with the current results (a few percent decided at a nominal 90% precision against proxy labels), most skills without history would stay `text_uncertain`.
 
 ## Tests
 
