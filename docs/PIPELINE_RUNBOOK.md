@@ -1,6 +1,6 @@
 # Pipeline runbook
 
-Run commands from the repository root with Python 3.13. Use the steps in order. Step 8r is optional; steps 8p–10p are a separate review branch. The [coding plan](CODING_PLAN.md) explains each step and shows two saved records per available table.
+Run commands from the repository root with Python 3.13. Use the steps in order. Step 8r is optional. The [coding plan](CODING_PLAN.md) explains each step and shows two saved records per available table.
 
 ```bash
 source .venv/bin/activate
@@ -492,9 +492,9 @@ python -m skillsig sample --only spot_refresh
 
 **Input:** [`results/annotation/key.parquet`](#step-8); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v2.parquet`](#step-6b); [`src/data/derived/s3_baseline_labels.parquet`](#step-6d); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`results/annotation/spot_A.xlsx`](#step-8); [`results/annotation/spot_B.xlsx`](#step-8).
 
-**Output:** `results/annotation/key.parquet`; `results/annotation/spot_A.xlsx`; `results/annotation/spot_B.xlsx`.
+**Output:** `results/annotation/key.parquet`; conditionally `results/annotation/spot_A.xlsx`, `results/annotation/spot_B.xlsx` and `results/annotation/codebook.md`.
 
-Keeps the same IDs; updates the key and only refreshes blank workbooks. Input key and sheets originate in [8](#step-8).
+Keeps the same IDs. If either A/B workbook has responses, updates only the key; otherwise rewrites both workbooks and the codebook. Input key and sheets originate in [8](#step-8).
 
 [Explanation and saved examples](CODING_PLAN.md#step-8r).
 
@@ -528,64 +528,6 @@ B outputs require B’s sheet; C outputs require C’s sheet; trailer precision 
 
 [Explanation and saved examples](CODING_PLAN.md#step-10).
 
-<a id="step-8p"></a>
-
-## Step 8p: Separate branch: prepare paired reuse review
-
-```bash
-python -m skillsig sample --only template_review
-```
-
-**Input:** [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_scaffold.parquet`](#step-5d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/derived/s2_scaffold_parts/`](#step-5d); [`src/data/registry_repos/`](#step-3a).
-
-**Output:** `results/annotation/template_review/template_pairs.csv`; `results/annotation/template_review/key.parquet`; `results/annotation/template_review/pair_evidence.json`; `results/annotation/template_review/pairs.html`; `results/s4_template_review_design.json`.
-
-Existing paired packages are kept. Keep the key private.
-
-[Explanation and saved examples](CODING_PLAN.md#step-8p).
-
-<a id="step-9p"></a>
-
-## Step 9p: Separate branch: people review paired texts
-
-Manual: review results/annotation/template_review/pairs.html.
-
-**Input:** [`results/annotation/template_review/pairs.html`](#step-8p); [`results/annotation/template_review/template_pairs.csv`](#step-8p); `docs/report/TEMPLATE_EVALUATION.md`.
-
-**Output:** `results/annotation/template_review/template_pairs_done.csv`.
-
-[Explanation and saved examples](CODING_PLAN.md#step-9p).
-
-<a id="step-10p"></a>
-
-## Step 10p: Separate branch: summarize paired judgments
-
-```bash
-python -m skillsig evaluate --only template_review
-```
-
-**Input:** [`results/annotation/template_review/template_pairs_done.csv`](#step-9p); [`results/annotation/template_review/key.parquet`](#step-8p).
-
-**Output:** `results/s4_template_pair_judgments.csv`.
-
-Requires returned judgments; no scored output is available here yet.
-
-[Explanation and saved examples](CODING_PLAN.md#step-10p).
-
-<a id="step-11"></a>
-
-## Step 11: Draw the report figures
-
-```bash
-python -m skillsig export
-```
-
-**Input:** [`results/s3_evidence_matrix.csv`](#step-6g); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
-
-**Output:** `figures/report/*.png`.
-
-[Explanation and saved examples](CODING_PLAN.md#step-11).
-
 ## Run the main chain with one command
 
 After steps 0 and 1a–1d:
@@ -596,7 +538,7 @@ bash scripts/run_full.sh
 
 **Inputs:** files from [0](#step-0), [1a](#step-1a), [1b](#step-1b), [1c](#step-1c), [1d](#step-1d), registry config and local clones from [3a](#step-3a); completed annotations from [9](#step-9), if present.
 
-**Outputs:** the main-chain files listed in steps 2–8 and 10–11; `logs/run_full_<timestamp>.log`. Uses `--force`. If `spot_A_done.xlsx` exists, keeps sample IDs, refreshes the key and scores; otherwise draws sheets, moving earlier uncompleted sheets aside. Excludes paired review 8p–10p. Does not run step 9 for people.
+**Outputs:** the main-chain files listed in steps 2–8 and 10; `logs/run_full_<timestamp>.log`. Uses `--force`. If `spot_A_done.xlsx` exists, keeps sample IDs, refreshes the key and scores; otherwise draws sheets, moving earlier uncompleted sheets aside. Does not run step 9 for people.
 
 ```bash
 DRY_RUN=1 bash scripts/run_full.sh
@@ -613,4 +555,4 @@ Use `FETCH=1 bash scripts/run_full.sh` only when updating the registry snapshot 
 | `python -m pytest -q` | Code and small test fixtures | Unit-test pass/fail |
 | `python -m pytest -q -m data tests/regression` | Full dataset and generated tables from the main chain | Known-count regression pass/fail |
 
-`make all`, `make smoke` and `python -m skillsig all` stop at the registry stage because it has no default runner. Run the listed modules or the full script. `analyze` and `rq2` are not implemented.
+`make all`, `make smoke` and `python -m skillsig all` stop at the registry stage because it has no default runner. Run the listed modules or the full script.

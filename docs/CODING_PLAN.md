@@ -6,7 +6,7 @@ This document describes the pipeline flow, the algorithms used in each step, the
 
 The analysis examines text, reuse patterns and commit records in `SKILL.md` instruction files to identify evidence about how skills were produced. We can observe identical text and recorded AI disclosures. We usually cannot verify who wrote the original text.
 
-The flow is: **download → prepare tables → check data → read registry history → measure features → apply rules and test text methods → evaluate → human review → report**. The paired reuse review is a separate branch after the features and labels exist.
+The flow is: **download → prepare tables → check data → read registry history → measure features → apply rules and test text methods → evaluate → human review → scoring**.
 
 ## Pipeline flow
 
@@ -33,12 +33,7 @@ Step 0: Raw dataset
                +--> Step 8 -> Step 9 -> Step 10
                |    Draw      Human     Score
                |    sample    review    answers
-               |
-               +--> Step 8p -> Step 9p -> Step 10p
-                    Paired      Human      Summarize
-                    texts       review     judgments
 
-Saved feature and result tables -> Step 11: Report figures
 ```
 
 The diagram groups the stages. The input links in each step show its exact file dependencies. Step 8r refreshes an existing sample after label changes.
@@ -108,10 +103,6 @@ DuckDB reads Parquet directly and runs SQL joins and counts on this computer. Ea
 - [Step 8r: Refresh the same sample after label changes](#step-8r)
 - [Step 9: People complete the blind review](#step-9)
 - [Step 10: Score the completed blind review](#step-10)
-- [Step 8p: Separate branch: prepare paired reuse review](#step-8p)
-- [Step 9p: Separate branch: people review paired texts](#step-9p)
-- [Step 10p: Separate branch: summarize paired judgments](#step-10p)
-- [Step 11: Draw the report figures](#step-11)
 
 <a id="step-0"></a>
 
@@ -1225,6 +1216,25 @@ The same step also saves resumable identifier and bucket parts under `src/data/d
 
 Find shared scaffolds: repeated document structures or boilerplate that remain after names and wording change. [Steps 5a](#step-5a) and [5b](#step-5b) mainly compare text; this step also examines headings, YAML keys, placeholders and bundled-file layouts.
 
+**What is a scaffold?**
+
+A scaffold is a starting structure used to create a document. It provides sections, placeholders or standard wording that someone fills in. For example:
+
+```text
+# <skill-name>
+
+## Purpose
+[TODO: Describe what this skill does]
+
+## Instructions
+1. ...
+
+## Examples
+...
+```
+
+The same scaffold could produce a testing skill and a deployment skill with different content. An exact copy repeats the same content; a scaffold can produce different content with a similar structure. Shared headings alone do not establish copying or AI authorship, because common sections can be chosen independently.
+
 **Data flow**
 
 ```text
@@ -1289,7 +1299,6 @@ Text-copy methods miss common structures filled with different wording. Several 
 
 - [Step 6g](#step-6g) records a non-null scaffold basis as a reuse flag, separately from AI disclosure.
 - [Step 7e](#step-7e) checks overlap with existing reuse signals and examines additional scaffold candidates.
-- [Step 8p](#step-8p) uses scaffold signals and saved line hashes to select paired texts for reuse evaluation.
 
 The historical v2.1 label rules do not use scaffold signals to assign labels.
 
@@ -1315,7 +1324,7 @@ The historical v2.1 label rules do not use scaffold signals to assign labels.
 | 1:&lt;name&gt; | 1 | 7091 | 21916 |
 | 1:&lt;name&gt; skill | 1 | 874 | 1895 |
 
-The same step keeps intermediate signals and line hashes in `src/data/derived/s2_scaffold_parts/`. The paired review in [step 8p](#step-8p) can read these parts.
+The same step keeps intermediate signals and line hashes in `src/data/derived/s2_scaffold_parts/`.
 
 <a id="step-6a"></a>
 
@@ -2133,17 +2142,64 @@ No observed reuse does not prove originality; no observed disclosure does not es
 
 **Outputs:** `results/s4_disclosure_recall.csv`; `results/s4_disclosure_recall.json`.
 
+**Purpose**
+
+Measure how many recorded AI disclosures are missed when only a skill's first and last commit messages are available. A disclosure appearing only in a middle commit is invisible to that restricted view.
+
+**Data flow**
+
+```text
+Version records + trailer flags (step 3a)
+                       |
+                       v
+         Join by repository and commit ID
+                       |
+                       v
+         Group by repository + skill path
+                       |
+                       v
+         Compare any disclosure with
+         first/last disclosure
+                       |
+                       v
+         Recall, missed counts and intervals
+```
+
 **Processing and algorithm**
 
-For each registry skill, check whether any commit has an AI trailer. Compare that with looking only at the first and last commits. Recall equals visible disclosures divided by all observed disclosures. Report skills with at least three commits separately.
+Join the [step 3a](#step-3a) version and trailer records by repository and commit ID. Remove duplicate path/commit records, group by repository and skill path, and order by commit date with commit ID as a tie-breaker. For each path, check whether any recorded commit has a recognized AI trailer and whether its first or last commit has one.
+
+```text
+First commit       Middle commit        Last commit
+No disclosure      AI trailer           No disclosure
+                         |
+                         v
+                Middle-only disclosure
+                missed by endpoint inspection
+```
+
+Calculate `recall = visible_first_or_last / any_ai`. The denominator counts skill paths with at least one disclosure, not individual trailers. A path with five disclosed commits still counts once. Count `middle_only` when a disclosure exists but neither endpoint contains one.
+
+Report all paths, paths with at least three commits, and configured registry groups. Calculate Wilson 95% intervals for the recall proportion. Registry-group names come from `config/registry_sources.yaml`.
 
 **Why this approach**
 
-The dataset usually exposes first and last commits only. Full registry histories let us estimate what this limited view misses. Skills with one or two commits cannot hide a middle disclosure.
+Comparing the restricted endpoint view with the fuller recorded registry history directly measures missing disclosure evidence. Joining, ordering and counting are sufficient; no trained model is needed. Skills with one or two recorded commits cannot hide a middle disclosure, so the three-or-more-commit subset shows the limitation more clearly.
+
+**Saved results**
+
+| Scope | Paths with any disclosure | Visible in first/last | Missed | Recall |
+| --- | ---: | ---: | ---: | ---: |
+| All registry skill paths | 1,033 | 948 | 85 | 91.8% |
+| Paths with at least three commits | 506 | 421 | 85 | 83.2% |
+
+Endpoint inspection misses 8.2% of disclosure-positive paths overall and 16.8% in the three-or-more-commit subset. These percentages use disclosure-positive paths as the denominator, not all skills.
 
 **Output meaning and limits**
 
-This checks disclosure coverage within the chosen registries. It does not measure all AI use or establish coverage in every dataset repository.
+The CSV contains overall, three-or-more-commit and registry-group results. `skills` counts paths in a scope; `any_ai` counts paths with any recognized trailer; `visible_first_or_last` counts paths with endpoint disclosure; `middle_only` counts missed paths. `ci_low` and `ci_high` give the recall interval. The JSON stores the overall summary and interpretation note.
+
+This evaluates evidence coverage without changing labels or recovering missing disclosures for every dataset skill. It uses history captured by step 3a and selected registries rather than a random sample of all repositories. Recognized co-author trailers do not cover undisclosed AI use or every form of involvement.
 
 **Saved output examples**
 
@@ -2171,17 +2227,69 @@ This checks disclosure coverage within the chosen registries. It does not measur
 
 **Outputs:** `results/s4_template_provenance.csv`; `results/s4_template_unexplained.csv`.
 
+**Purpose**
+
+Check how well generic copy-count and cluster rules recover texts matching selected registry versions. This asks whether those rules would identify the texts without relying on the registry-match rule itself.
+
+**Data flow**
+
+```text
+Registry matches (5b) + copy counts (6a)
+Clusters (5a) + origin flags from v2.1 (6c)
+                       |
+                       v
+          Separate exact and near matches
+          Exclude known origin representatives
+                       |
+                       v
+          Check copy rule, cluster rule, or either
+                       |
+                       v
+          Recovery and agreement tables
+```
+
 **Processing and algorithm**
 
-Take exact registry matches after excluding known origin representatives. Count how many also meet the copy-count rule, cluster rule or either rule. Report near-match candidates separately. Also count templated labels without a registry match.
+Join the inputs by `file_sha`. Create reference sets from [step 5b](#step-5b): exact hash matches and near matches meeting the configured similarity cut-off. Exclude known registry-origin representatives using [step 6c](#step-6c) reason codes. Keep the sets separate because exact hashes establish content identity, while near matches remain similarity-selected candidates.
+
+| Rule | Condition |
+| --- | --- |
+| Copy rule | At least ten exact file occurrences from [step 6a](#step-6a) |
+| Cluster rule | At least ten distinct texts in the [step 5a](#step-5a) cluster at setting 0.8 |
+| Either | At least one rule qualifies; count each record once |
+
+For each set, calculate `rule hits / reference-set records`. Save counts, proportions and Wilson 95% intervals. The exact set measures recovery of identical registry texts. The near set measures agreement on candidates, because near matching and clustering share the MinHash mechanism. A combined `exact_or_near` row is retained as an exploratory summary rather than independent validation.
+
+**Saved recovery and agreement results**
+
+| Reference set | Records | Copy rule | Cluster rule | Either |
+| --- | ---: | ---: | ---: | ---: |
+| Exact registry matches | 6,481 | 56.5% | 66.6% | 87.2% |
+| Near-match candidates | 42,104 | 3.0% | 87.2% | 87.3% |
+
+Either rule recovers 5,649 of the 6,481 exact matches. The remaining 832 reach neither ten-occurrence nor ten-member threshold. Combining rules recovers more than either alone because they identify partly different cases.
+
+**Registry coverage among rule detections**
+
+The second calculation reverses the question: among all texts flagged by a generic rule, how many have an exact or near registry match? Unlike the reference sets above, this calculation does not exclude origin representatives.
+
+| Rule | Flagged texts | Registry matched | Share |
+| --- | ---: | ---: | ---: |
+| Copy rule | 35,768 | 4,919 | 13.8% |
+| Cluster rule | 277,852 | 41,048 | 14.8% |
+| Either | 297,346 | 42,426 | 14.3% |
+
+A low registry-match share does not make the remaining detections errors. They may reuse material from sources outside the selected registries.
 
 **Why this approach**
 
-Equal hashes provide a content-identity reference separate from approximate clustering. Keeping near matches separate avoids calling agreement between related similarity methods independent validation.
+Exact hashes provide a content-identity reference separate from approximate clustering. Testing copy and cluster rules separately shows their contribution and overlap. Separating near candidates avoids treating agreement between related similarity methods as independent validation. The reverse calculation shows how much of the generic detections the registry list covers.
 
 **Output meaning and limits**
 
-Exact recovery is recall on this reference set, not precision or overall accuracy. Near-match rows show conditional agreement. An unexplained text may come from a source outside the registry list.
+`s4_template_provenance.csv` contains exact recovery, near-candidate agreement, counts, intervals and interpretation fields. `s4_template_unexplained.csv` contains `rule`, total flagged count `n`, `registry_matched`, and `share_registry`. Despite its filename, the latter records coverage rather than confirmed errors.
+
+This step evaluates saved evidence without changing labels. Positive-only exact references cannot establish overall precision or false-positive rates. Near-candidate agreement is not independent recall. Equal hashes establish identical content rather than copying direction or authorship. Wilson intervals describe count uncertainty but do not account for selected registries or related contents.
 
 **Saved output examples**
 
@@ -2209,17 +2317,61 @@ Exact recovery is recall on this reference set, not precision or overall accurac
 
 **Outputs:** `results/s4_edit_robustness.csv`; `figures/12_edit_robustness.png`.
 
+**Purpose**
+
+Test how much editing a text can tolerate before estimated similarity to its original falls below the near-match cut-off of 0.8.
+
+**Data flow**
+
+```text
+Select 500 registry-version texts
+                 |
+                 v
+Make edited copies at five levels
+                 |
+         +-------+-------+
+         |               |
+         v               v
+Replace lines        Delete lines
+         |               |
+         +-------+-------+
+                 |
+                 v
+Compare edited text with its original
+                 |
+                 v
+Count estimated similarities at least 0.8
+```
+
 **Processing and algorithm**
 
-Select 500 registry-matched texts with the fixed seed. At five levels, replace or delete 5%, 10%, 20%, 40% or 60% of nonblank body lines. Compare edited text with its original using the same MinHash settings as [step 5a](#step-5a). Count scores at or above 0.8.
+Use registry-version hashes from [step 5b](#step-5b) to find corresponding texts in the [step 0](#step-0) dataset. With a fixed seed, select 500 originals having at least ten nonblank body lines. Collect donor lines from other dataset texts outside the selected registry-version hash list.
+
+For each original, randomly replace or delete 5%, 10%, 20%, 40% or 60% of nonblank body lines. Replacement draws lines from the donor pool. Preserve the YAML header and start each edit level from the original, giving 5,000 comparisons in the saved run.
+
+Generate MinHash signatures using the settings from [step 5a](#step-5a). Calculate `estimated Jaccard = matching signature positions / 128`; count a comparison as detected when the score reaches 0.8. This directly compares known pairs rather than rerunning LSH retrieval.
+
+**Saved results**
+
+| Body lines changed | Replacement above cut-off | Deletion above cut-off |
+| --- | ---: | ---: |
+| 5% | 77.6% | 96.4% |
+| 10% | 16.4% | 55.0% |
+| 20% | 0.4% | 3.2% |
+| 40% | 0% | 0% |
+| 60% | 0% | 0% |
+
+At 10% replacement, 82 of 500 pairs remain above the cut-off. Replacement removes original shingles and adds different ones; deletion removes content and can create new shingles where remaining text joins.
 
 **Why this approach**
 
-Controlled edits make the amount of change known. Testing replacement and deletion shows how the detector responds to two different kinds of edits.
+Controlled edits make the amount of change known and give a practical interpretation of the similarity cut-off. Two edit modes show that the type of change matters as well as its size.
 
 **Output meaning and limits**
 
-The detection rate applies to these synthetic edits. Real edits can behave differently. This step tests resilience of the similarity measure, not authorship.
+The CSV stores edit mode, level, comparison count, mean similarity, detected count, detection rate and Wilson intervals. The chart plots detection rates by edit level. Source files and existing labels remain unchanged.
+
+Random line edits differ from real customization, and equal line percentages can represent different amounts of text. This tests the pairwise similarity measure rather than complete registry-search recall or authorship.
 
 **Saved output examples**
 
@@ -2244,17 +2396,74 @@ This is a chart, so it has no database records.
 
 **Outputs:** `results/s4_stability.csv`; `results/s4_stability.json`.
 
+**Purpose**
+
+Measure how much label and confidence shares depend on chosen thresholds. This sensitivity analysis checks whether changing a boundary, such as ten copies to eight or twelve, substantially changes the results.
+
+**Data flow**
+
+```text
+Fixed sample of 200,000 skills
+                |
+                v
+Recalculate v2.1 with default settings
+                |
+                v
+Compare with saved labels
+                |
+                v
+Change one threshold; keep others fixed
+                |
+                v
+Recalculate label and confidence shares
+                |
+                v
+Measure change from the default
+```
+
 **Processing and algorithm**
 
-Draw a seeded 200,000-skill sample. Recompute the rules with the default settings to check reproduction. Then vary one copy, batch, similarity or revision threshold while holding the others fixed. Save label and confidence shares and their change in percentage points.
+Select 200,000 skills from [step 6c](#step-6c) using a fixed seed. Join copy counts, commit features, registry matches, cluster sizes and representative file details from the linked input steps. Use the same sample for every comparison.
+
+Call the actual v2 and v2.1 rule functions with default settings and compare recalculated labels with the saved labels. The saved run has 100% label agreement. This reproduction check establishes that the experiment starts from the existing decisions.
+
+Change one threshold at a time while holding the others fixed:
+
+| Threshold | Default | Alternatives tested |
+| --- | ---: | --- |
+| Exact-copy and cluster-size minimum | 10 | 8, 12 |
+| Registry near-match similarity | 0.8 | 0.7, 0.9 |
+| Bulk-batch boundary | 6 | 4, 8 |
+| Commits required for revision evidence | 3 | 2, 4 |
+| Days required for revision evidence | 7 | 3, 14 |
+| Cluster LSH setting | 0.8 | 0.6 |
+
+The copy minimum controls both exact-copy and cluster-size rules. The cluster-setting comparison reads the existing 0.6 clusters from [step 5a](#step-5a), rather than rebuilding them.
+
+Calculate each label's share of the sample and selected confidence shares within labels: medium-confidence `likely_human`, low-confidence `agent_assisted`, and high-confidence `highly_templated`. Confidence shares capture changes that do not move the main label. Save `delta_pp = 100 × (tested share - default share)`.
+
+**Saved results**
+
+| Setting | `highly_templated` share | Change from default |
+| --- | ---: | ---: |
+| Default | 16.257% | 0 |
+| Minimum eight occurrences/members | 17.398% | +1.141 percentage points |
+| Minimum twelve occurrences/members | 15.509% | −0.748 percentage points |
+| Use 0.6 clusters | 19.560% | +3.303 percentage points |
+
+The broader clusters produce the largest label-share change among the tested settings. Percentage-point change is direct subtraction, rather than relative percentage growth.
 
 **Why this approach**
 
-Sensitivity analysis shows which chosen boundaries affect the reported shares. One-at-a-time changes make each comparison easier to understand.
+A fixed sample keeps comparisons consistent and reduces computation. Reusing the real rule functions avoids evaluating a separate approximation of the label logic. One-at-a-time changes make each threshold's effect easier to interpret, while confidence shares expose changes hidden by unchanged labels.
 
 **Output meaning and limits**
 
-Similar overall shares can hide opposite changes in individual skills. Lowering the near-match rule to 0.7 cannot add candidates already marked `none` at 0.8 in [step 5b](#step-5b). That setting does not test a full 0.7 similarity search.
+`s4_stability.csv` stores `parameter`, tested `value`, label or confidence category, `share` and `delta_pp`. Ordinary label shares use the whole sample; entries such as `likely_human:medium` use only that label's records as their denominator. The JSON stores default shares, maximum changes, the largest label-share change and reproduction agreement.
+
+Lowering the near-match rule to 0.7 cannot recover candidates already marked `none` at 0.8 in [step 5b](#step-5b). That setting does not test a complete 0.7 similarity search; only the stricter 0.9 setting meaningfully tests the cut-off on the saved near candidates.
+
+This measures aggregate sensitivity rather than accuracy or individual decision stability. Opposite changes can cancel out in overall shares. The experiment does not test interactions between thresholds, and the default reproduction check alone does not establish robustness to changed settings.
 
 **Saved output examples**
 
@@ -2334,19 +2543,66 @@ The spot CSV has blank review fields until people fill them. Generated pairs and
 
 **Outputs:** `results/annotation/spot_A.xlsx`; `results/annotation/spot_B.xlsx`; `results/annotation/trailer_check.csv`; `results/annotation/key.parquet`; `results/annotation/trailer_key.parquet`; `results/annotation/codebook.md`; `results/s4_spot_design.json`.
 
+**Purpose**
+
+Create a fixed sample for independent human judgments, with enough examples of each predicted label to compare v2.1, v2 and the baselines in [step 10](#step-10).
+
+**Data flow**
+
+```text
+Labels + baseline predictions + features + raw text
+                         |
+                         v
+          Split candidates into eight strata
+                         |
+                         v
+          Seeded selection with repository/cluster caps
+                         |
+                         v
+            A: 120 subjects -> B: 40 shared subjects
+                         |
+             +-----------+------------+
+             |                        |
+             v                        v
+      Blind workbooks          Separate scoring key
+
+Recognized trailer cases -> 50-row trailer sheet + trailer key
+```
+
 **Processing and algorithm**
 
-Draw 30 skills from each of four v2.1 label groups, with limits on repeated repositories and clusters. Person A gets 120 skills. Person B gets a 40-skill subset. Create a separate 50-row trailer review. Write pipeline labels and sampling groups to separate scoring keys; exclude them from the blind workbooks. Excel text is limited to 32,000 characters.
+Use **stratified sampling** with a fixed seed. Select readable subjects with at least 200 body characters. Target 30 skills per v2.1 label, split across two strata of 15:
+
+| Label | Sampling strata |
+| --- | --- |
+| `highly_templated` | Registry basis versus cluster/copy-count basis |
+| `agent_assisted` | Selected bulk/last-only v2.1 adjustments versus other agent labels |
+| `likely_human` | Revised versus not revised |
+| `insufficient_evidence` | History available versus unavailable |
+
+Limit selection to one subject per repository and near-duplicate cluster. When a stratum cannot meet its quota, try its sibling stratum and record the shortage or top-up. Assign stable `sample_id` values. Person A receives the 120 subjects; B receives a subset targeting ten per label, giving 40 shared items for agreement measurement.
+
+Join raw text, repository context and commit information from the linked inputs. Write visible evidence and blank answer fields into the workbooks. Store pipeline labels, reasons, baselines, strata and B membership separately in `key.parquet`. Body excerpts are capped at 32,000 characters. Draw a separate 50-row trailer-check sheet and matching key.
 
 **Why this approach**
 
-Sampling by predicted label gives enough cases to inspect each label. Limiting related texts avoids counting many copies as independent judgments. Hiding model answers reduces pressure to agree with them.
+Sampling by predicted label gives rare labels enough cases for per-label checks. Subgroups cover different decision paths. Repository and cluster caps reduce repeated evidence. Separating pipeline answers from the workbooks reduces influence on independent judgments, while shared A/B subjects allow direct agreement calculations.
+
+**Where it is used later**
+
+[Step 9](#step-9) produces completed answer files. [Step 10](#step-10) matches those answers to the scoring key by `sample_id`. If labels change, [step 8r](#step-8r) refreshes the existing sample rather than selecting different subjects.
 
 **Output meaning and limits**
 
-The sample checks agreement or precision by predicted label. It cannot directly estimate recall or population label shares. The workbooks contain review fields; separate scoring keys contain the pipeline labels and sampling groups.
+| Output | Contents |
+| --- | --- |
+| `spot_A.xlsx`, `spot_B.xlsx` | Evidence, sample IDs and blank label/confidence/notes fields |
+| `key.parquet` | Subject identities, pipeline predictions, reasons, sampling groups and B membership |
+| `trailer_check.csv`, `trailer_key.parquet` | Trailer judgments to complete and the corresponding detected-tool references |
+| `codebook.md` | Label definitions and answer-field instructions |
+| `s4_spot_design.json` | Seed, realized sample sizes, strata and quota adjustments |
 
-An existing `spot_A.xlsx` prevents a new draw. For the same sample with updated model answers, use [step 8r](#step-8r). The annotation folder is ignored by Git; keep copies of completed files.
+A sample balanced by predicted label supports agreement or indicative precision per label, not direct recall or population label shares. Truncated text and hidden comparison evidence can limit judgments. Existing `spot_A.xlsx` or `spot_A.csv` prevents a new draw, including with `--force`. Annotation files are ignored by Git and need separate backup.
 
 **Saved output examples**
 
@@ -2404,19 +2660,52 @@ This is a written guide, so it has no database records.
 
 **Inputs and source steps:** [`results/annotation/key.parquet`](#step-8); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v2.parquet`](#step-6b); [`src/data/derived/s3_baseline_labels.parquet`](#step-6d); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`results/annotation/spot_A.xlsx`](#step-8); [`results/annotation/spot_B.xlsx`](#step-8).
 
-**Outputs:** `results/annotation/key.parquet`; `results/annotation/spot_A.xlsx`; `results/annotation/spot_B.xlsx`.
+**Outputs:** `results/annotation/key.parquet`; conditionally `results/annotation/spot_A.xlsx`, `results/annotation/spot_B.xlsx` and `results/annotation/codebook.md`.
+
+**Purpose**
+
+Update pipeline predictions for the same sampled subjects after rule changes. Keep existing human answers usable without drawing a different sample.
+
+**Data flow**
+
+```text
+Saved scoring key (step 8) + current labels and evidence
+                            |
+                            v
+          Keep sample IDs, text IDs, strata and B membership
+                            |
+                            v
+                 Rebuild current scoring key
+                            |
+                            v
+             Any answers in either A or B workbook?
+                       /               \
+                     Yes               No
+                      |                 |
+                      v                 v
+              Update key only     Rewrite blank A/B sheets
+                                  and codebook as well
+```
 
 **Processing and algorithm**
 
-Load the saved sample IDs and look up the current model labels. Rewrite the key for those same IDs. Refresh workbook content only when its response fields are still blank. Preserve completed answers.
+Read `key.parquet` from [step 8](#step-8) and look up the latest labels, baselines, text and metadata for its `file_sha` values. Preserve `sample_id`, selected text IDs, strata and B's membership. Rebuild the scoring key with current predictions and label-comparison metadata.
+
+Check `your_label`, `your_confidence` and `notes` in both workbooks. If either existing workbook contains any nonblank response, update only the key and leave both workbooks untouched. Otherwise rewrite A and B with current evidence and regenerate `codebook.md`. This is a workbook-level check, not a row-by-row merge. Completed `*_done.xlsx` submissions are not rewritten.
 
 **Why this approach**
 
-Keeping the same IDs allows existing human answers to be compared with changed rules. Drawing a new sample would break that comparison.
+Changing predictions does not require changing the reviewed texts. Stable IDs let [step 10](#step-10) compare existing answers against current rules. Preserving original sample groups avoids silently treating a refreshed sample as newly balanced under changed labels.
+
+**Where it is used later**
+
+[Step 10](#step-10) reads the refreshed key when scoring completed answers. Run this step after relabelling an existing sample; a fresh sample still originates in [step 8](#step-8).
 
 **Output meaning and limits**
 
-The scoring key may change while the reviewed subjects stay fixed. This is an alternative to drawing a new sample, not a required fresh draw.
+`key.parquet` is refreshed for the same subjects. A/B workbooks and `codebook.md` are conditional outputs, rewritten only when neither workbook contains responses. The trailer sheet and trailer key are not refreshed by this command.
+
+After labels change, the sample may no longer have 30 subjects per current label. Its original selection remains fixed, so scoring must use the actual denominators. If workbooks already contain responses, their displayed evidence also remains as originally shown.
 
 **Saved output examples**
 
@@ -2451,19 +2740,56 @@ The scoring key may change while the reviewed subjects stay fixed. This is an al
 
 **Outputs:** `results/annotation/spot_A_done.xlsx`; `results/annotation/spot_B_done.xlsx`; `results/annotation/spot_C_done.xlsx`; `results/annotation/trailer_check_done.csv`.
 
-**Processing and algorithm**
+**Purpose**
 
-Each person independently reads the assigned text and fills `your_label`, `your_confidence` and notes. A third person may review a subset in a copy of A’s sheet. Trailer reviewers answer yes, no or unsure. Save completed files with the exact names shown in the outputs.
+Produce independent human judgments of the visible evidence for comparison with pipeline predictions. This is a manual procedure, with no model training or automatic authorship decision.
+
+**Data flow**
+
+```text
+A/B workbooks + codebook (step 8)
+                |
+                v
+     Independent judgments of visible evidence
+                |
+                v
+     Label + confidence + notes
+                |
+                v
+     Completed *_done.xlsx files
+                |
+                v
+     Match with scoring key in step 10
+
+Trailer sheet -> yes / no / unsure -> trailer_check_done.csv
+```
+
+**Processing procedure**
+
+Use the label definitions in [`ANNOTATION_GUIDELINES.md`](ANNOTATION_GUIDELINES.md). Each person records one of the four labels, confidence from 1 to 5, and explanatory notes. Confidence describes certainty in the person's judgment; it is different from the pipeline's high/medium/low categories.
+
+A and B independently label their assigned subjects. Optional C labels a subset in a separate copy of A's workbook. Preserve subject IDs and record only answer fields, so the scorer can join by `sample_id` even when row order differs. Trailer judgments use `is_ai_disclosure = yes`, `no` or `unsure`.
+
+| Input from step 8 | Completed output | Role |
+| --- | --- | --- |
+| `spot_A.xlsx` | `spot_A_done.xlsx` | Main reference answers; required for scoring |
+| `spot_B.xlsx` | `spot_B_done.xlsx` | Independent answers on A/B shared subjects |
+| Copy of `spot_A.xlsx` | `spot_C_done.xlsx` | Optional third person's answers on a subset |
+| `trailer_check.csv` | `trailer_check_done.csv` | Separate judgments of detected disclosure lines |
 
 **Why this approach**
 
-Independent judgments reveal whether people can apply the definitions consistently. Allowing uncertainty is better than forcing a claim that the visible evidence cannot support.
+Independent answers expose disagreement in the definitions or visible evidence. Shared subjects allow agreement to be calculated on identical items. Keeping uncertainty and notes avoids forcing unsupported conclusions. Separate C results preserve the original A/B comparisons rather than replacing them with a majority vote.
+
+**Where it is used later**
+
+[Step 10](#step-10) compares the completed labels with pipeline and baseline predictions, calculates agreement between people on common subjects, and scores returned trailer judgments. The scoring key originates in [step 8](#step-8), optionally refreshed in [step 8r](#step-8r).
 
 **Output meaning and limits**
 
-These records are people’s judgments, not verified authorship. The current files have A, B and C answers; the completed trailer sheet is absent. Blank or unassigned answers do not count as completed judgments.
+Completed answers are judgments of the shown evidence, not verified authorship. Blank labels are not completed judgments. Body excerpts and incomplete histories can limit decisions. The stored A, B and C submissions exist; the completed trailer file is absent in this checkout.
 
-B, C and the trailer review are optional inputs to scoring; A is required. Preserve original submissions as well as scorer-compatible file names.
+Preserve original submissions and use the exact completed filenames for scorer compatibility. Any later consensus belongs in a separate record rather than replacing the independent answers. Annotation outputs are ignored by Git and require separate backup.
 
 **Saved output examples**
 
@@ -2618,156 +2944,3 @@ _Output is not present in this checkout. No sample records are available._
 | --- | --- | --- |
 | S001 | A | C |
 | S002 | A | C |
-
-<a id="step-8p"></a>
-
-## Step 8p: Separate branch: prepare paired reuse review
-
-**Run:** see [runbook step 8p](PIPELINE_RUNBOOK.md#step-8p). **Code:** [`src/skillsig/s4_validation/template_review.py`](../src/skillsig/s4_validation/template_review.py).
-
-**Inputs and source steps:** [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_scaffold.parquet`](#step-5d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/derived/s2_scaffold_parts/`](#step-5d); [`src/data/registry_repos/`](#step-3a).
-
-**Outputs:** `results/annotation/template_review/template_pairs.csv`; `results/annotation/template_review/key.parquet`; `results/annotation/template_review/pair_evidence.json`; `results/annotation/template_review/pairs.html`; `results/s4_template_review_design.json`.
-
-**Processing and algorithm**
-
-Aim for 30 subjects in each exact-registry, near-registry, cluster and scaffold group, while limiting repeated owners and clusters. Find a partner text for each subject. Show full paired texts, differences and shared passages without the historical label. Compute full-body shingle Jaccard directly for each pair: intersection size divided by union size. Record missing partners and sampling shortfalls.
-
-**Why this approach**
-
-People cannot judge copying well from one isolated text. Paired evidence makes the review fit the reuse question. Direct Jaccard is affordable for a small review set and checks the actual pair rather than another signature estimate.
-
-**Output meaning and limits**
-
-The package is a review design, not finished validation. A partner may be missing. Missing evidence must remain visible. This branch is separate from the blind authorship review and does not replace it.
-
-Existing review packages are not overwritten. The answer sheet records `material_reuse` and `shared_scaffold` as yes, no or uncertain; the scoring key is stored separately.
-
-**Saved output examples**
-
-`results/annotation/template_review/template_pairs.csv`
-
-| `pair_id` | `pair_available` | `material_reuse` | `shared_scaffold` | `notes` |
-| --- | --- | --- | --- | --- |
-| P001 | true | NULL | NULL | NULL |
-| P002 | false | NULL | NULL | NULL |
-
-`results/annotation/template_review/key.parquet`
-
-| `file_sha` | `templated_basis` | `legacy_label` | `registry_origin` | `copies` | `owner` |
-| --- | --- | --- | --- | --- | --- |
-| 24e7543de7737499fbcda022e4baae0c9e81abd7 | registry_exact | highly_templated | false | 45 | akhil-lokesh |
-| 0b18a6ea851bfec56b24ebb29d03cb380c758f41 | NULL | agent_assisted | false | 1 | metedata |
-
-`results/annotation/template_review/pair_evidence.json`
-
-| `pair_id` | `left_sha` | `right_sha` | `left_text` | `right_text` |
-| --- | --- | --- | --- | --- |
-| P001 | 24e7543de7737499fbcda022e4baae0c9e81abd7 | 24e7543de7737499fbcda022e4baae0c9e81abd7 | --- name: autonomous-loops description: "Patterns and architectures for autonomous Claude Code lo… | --- name: autonomous-loops description: "Patterns and architectures for autonomous Claude Code lo… |
-| P002 | 0b18a6ea851bfec56b24ebb29d03cb380c758f41 | NULL | --- name: crit-typography description: Use when evaluating font selection, type scale, typographi… | NULL |
-
-`results/annotation/template_review/pairs.html`
-
-This is a review page, so it has no database records.
-
-`results/s4_template_review_design.json`
-
-| `field` | `saved_value` |
-| --- | --- |
-| note | Separate evidence-aware review; original blind annotations unchanged. |
-| pairs | 120 |
-
-<a id="step-9p"></a>
-
-## Step 9p: Separate branch: people review paired texts
-
-**Run:** see [runbook step 9p](PIPELINE_RUNBOOK.md#step-9p). **Code:** [`docs/report/TEMPLATE_EVALUATION.md`](../docs/report/TEMPLATE_EVALUATION.md).
-
-**Inputs and source steps:** [`results/annotation/template_review/pairs.html`](#step-8p); [`results/annotation/template_review/template_pairs.csv`](#step-8p); `docs/report/TEMPLATE_EVALUATION.md`.
-
-**Outputs:** `results/annotation/template_review/template_pairs_done.csv`.
-
-**Processing and algorithm**
-
-Read both texts and the shown evidence. Fill the reuse and scaffold judgments, keeping uncertainty where the evidence is insufficient. Save the completed CSV beside the original sheet.
-
-**Why this approach**
-
-The task asks about visible material reuse and shared structure, which is better aligned with these signals than guessing original authorship.
-
-**Output meaning and limits**
-
-The completed answer file is absent in this checkout. Judgment counts and precision results are unavailable until the completed answer file is returned.
-
-**Saved output examples**
-
-`results/annotation/template_review/template_pairs_done.csv`
-
-_Output is not present in this checkout. No sample records are available._
-
-<a id="step-10p"></a>
-
-## Step 10p: Separate branch: summarize paired judgments
-
-**Run:** see [runbook step 10p](PIPELINE_RUNBOOK.md#step-10p). **Code:** [`src/skillsig/s4_validation/template_review.py`](../src/skillsig/s4_validation/template_review.py).
-
-**Inputs and source steps:** [`results/annotation/template_review/template_pairs_done.csv`](#step-9p); [`results/annotation/template_review/key.parquet`](#step-8p).
-
-**Outputs:** `results/s4_template_pair_judgments.csv`.
-
-**Processing and algorithm**
-
-Validate submitted pair IDs and answer values. Group judgments by sampling stratum and review question. Count yes, no and uncertain answers and report intervals for the supported proportions.
-
-**Why this approach**
-
-Separate strata show whether exact, near, cluster and scaffold candidates behave differently. Keeping uncertainty visible avoids silently turning unclear cases into negative answers.
-
-**Output meaning and limits**
-
-This command needs actual returned judgments. Its output is absent here. Sampling limits and missing text can restrict what the result supports.
-
-**Saved output examples**
-
-`results/s4_template_pair_judgments.csv`
-
-_Output is not present in this checkout. No sample records are available._
-
-<a id="step-11"></a>
-
-## Step 11: Draw the report figures
-
-**Run:** see [runbook step 11](PIPELINE_RUNBOOK.md#step-11). **Code:** [`src/skillsig/s6_report/figures.py`](../src/skillsig/s6_report/figures.py).
-
-**Inputs and source steps:** [`results/s3_evidence_matrix.csv`](#step-6g); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
-
-**Outputs:** `figures/report/*.png`.
-
-**Processing and algorithm**
-
-Read completed result tables and draw the configured 17 report figures. Some charts group existing rows, such as repository kinds or skill types. The ROC chart varies a score cut-off and plots true-positive against false-positive rates for the proxy groups. The LSH curve uses configured signature settings. Skip charts whose required inputs are absent.
-
-**Why this approach**
-
-Drawing charts from saved tables keeps reports tied to pipeline results. Grouped counts show distributions, while curves show how model results change across score cut-offs.
-
-**Output meaning and limits**
-
-This step produces pictures, not new record tables. Examples below show actual input rows and generated file names. The edit-robustness chart is generated earlier in [step 7c](#step-7c). A successful partial export does not mean every chart was produced.
-
-**Saved output examples**
-
-`figures/report/*.png`
-
-Generated file examples: `figures/report/a_label_versions.png`, `figures/report/b_devsample_groups.png`. Charts contain no database rows. Two source rows from the [step 6g evidence matrix](#step-6g):
-
-| `reuse_signal` | `agent_signal` | `n` | `share_all` | `share_within_agent_signal` |
-| --- | --- | --- | --- | --- |
-| exact_content_shared | disclosed | 35655 | 0.018986 | 0.22599 |
-| exact_content_shared | history_unavailable | 268472 | 0.14296 | 0.18909 |
-
-## Current implementation limits
-
-The current code does not contain `s5_analysis`. The CLI names `analyze` and `rq2`, but both return `not implemented`. Registry change tables exist; the proposed adoption, propagation and maintenance-model stages are not a completed pipeline. The proposed table exporter and HTML explorer are also absent; `export` currently draws figures.
-
-The paired reuse review has a generated package, but no returned answer file or scored judgments. These are different states and should not be described as finished results.
