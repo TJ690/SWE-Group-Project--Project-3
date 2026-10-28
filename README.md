@@ -154,8 +154,27 @@ python -m skillsig export
 
 `--dev-sample` runs on a 50,000-skill sample for quick checks. A step whose inputs and config are unchanged is skipped; code changes are not tracked, so add `--force` after editing code. The tests run with `python -m pytest -q`, and the full-data regression checks with `python -m pytest -q -m data tests/regression`.
 
+### With Claude Code or Codex
+Each stage also has an agent skill in `.claude/skills/` (Codex reads the same folders through `.agents/skills/`). Name a step id or module and `dev` or `full`; the skill checks the inputs, runs the step and reports the outputs. If the mode is left out, it asks. In Claude Code type the slash command; in Codex ask in plain words ("run the commit features on the dev sample").
+
+| Skill | Steps | Example |
+|---|---|---|
+| `/skillsig-prepare` | 0, 1a–1d | `/skillsig-prepare 1a` |
+| `/skillsig-intake` | 2 | `/skillsig-intake` |
+| `/skillsig-registry` | 3a–3e | `/skillsig-registry match full` |
+| `/skillsig-features` | 4a–4e, 5b–5d | `/skillsig-features 4b dev` |
+| `/skillsig-dedup` | 5a | `/skillsig-dedup full force` |
+| `/skillsig-label` | 6a–6h | `/skillsig-label rules_v2_1 full` |
+| `/skillsig-evaluate` | 7a–7e, 10p | `/skillsig-evaluate all full` |
+| `/skillsig-spotcheck` | 8, 8r, 9, 10, 8p, 9p | `/skillsig-spotcheck 10 full` |
+| `/skillsig-export` | 11 | `/skillsig-export full` |
+| `/pipeline` | all | `/pipeline plan`, `/pipeline full`, `/pipeline dev`, `/pipeline status` |
+
+The shared rules the skills follow (dev/full, `--force`, protected annotation files) are in [AGENTS.md](AGENTS.md). `python scripts/output_status.py <outputs>` shows whether outputs exist and which mode built them.
+
 | Guide | Contents |
 |---|---|
+| [SKILLS_RUNBOOK.md](SKILLS_RUNBOOK.md) | How to run the pipeline through the agent skills, with recipes for common tasks |
 | [docs/PIPELINE_RUNBOOK.md](docs/PIPELINE_RUNBOOK.md) | Every step in order, with what to check after each |
 | [docs/EXECUTION_STEPS.md](docs/EXECUTION_STEPS.md) | Each step's command, inputs, outputs and data size |
 | [docs/stages/](docs/stages/README.md) | Design notes for each stage |
@@ -201,8 +220,10 @@ Derived data lives in `src/data/generated_data/` and is ignored by git. Report c
 ## GitHub Project
 Our backlog and sprint tasks are tracked on the [GitHub project board](https://github.com/users/TJ690/projects/2).
 
-## Sprint 1 Report
+## Sprint Reports
 The [Sprint 1 report](report/sprint1_report.md) summarizes the dataset exploration, initial findings, and label rules developed during Sprint 1.
+
+The [Sprint 2 report](report/sprint2_report.md) covers the background, method, implementation, and preliminary results of the `skillsig` pipeline, including the hand-label agreement checks.
 
 ## Work Progress and Retrospectives
 See [work progress and retrospectives](docs/sprints/README.md) for completed work, lessons learned, and planned next steps.
