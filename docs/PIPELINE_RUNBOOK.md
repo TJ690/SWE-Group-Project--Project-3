@@ -1,6 +1,6 @@
 # Pipeline runbook
 
-Run commands from the repository root with Python 3.13. Use the steps in order. Steps 8r and 6g are optional; steps 8p–10p are a separate review branch. The [coding plan](CODING_PLAN.md) explains each step and shows two saved records per available table.
+Run commands from the repository root with Python 3.13. Use the steps in order. Step 8r is optional; steps 8p–10p are a separate review branch. The [coding plan](CODING_PLAN.md) explains each step and shows two saved records per available table.
 
 ```bash
 source .venv/bin/activate
@@ -384,23 +384,7 @@ python -m skillsig label --only text_methods
 
 <a id="step-6g"></a>
 
-## Step 6g: Optional: score skills without history
-
-```bash
-python -m skillsig label --only text_score
-```
-
-**Input:** [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_structure.parquet`](#step-4a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_wording.parquet`](#step-4e); [`src/data/derived/s2_specificity.parquet`](#step-5c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
-
-**Output:** `src/data/derived/s3_text_scores.parquet`; `results/s3_text_score_summary.csv`; `results/s3_text_score.json`.
-
-Optional; production output absent here; excluded from the full runner.
-
-[Explanation and saved examples](CODING_PLAN.md#step-6g).
-
-<a id="step-6h"></a>
-
-## Step 6h: Report reuse and disclosure separately
+## Step 6g: Report reuse and disclosure separately
 
 ```bash
 python -m skillsig label --only evidence
@@ -410,7 +394,7 @@ python -m skillsig label --only evidence
 
 **Output:** `src/data/derived/s3_evidence.parquet`; `results/s3_evidence_matrix.csv`; `results/s3_evidence_signals.csv`; `results/s3_evidence_legacy_crosstab.csv`; `results/s3_evidence_summary.json`.
 
-[Explanation and saved examples](CODING_PLAN.md#step-6h).
+[Explanation and saved examples](CODING_PLAN.md#step-6g).
 
 <a id="step-7a"></a>
 
@@ -596,7 +580,7 @@ Requires returned judgments; no scored output is available here yet.
 python -m skillsig export
 ```
 
-**Input:** [`results/s3_evidence_matrix.csv`](#step-6h); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
+**Input:** [`results/s3_evidence_matrix.csv`](#step-6g); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
 
 **Output:** `figures/report/*.png`.
 
@@ -612,7 +596,7 @@ bash scripts/run_full.sh
 
 **Inputs:** files from [0](#step-0), [1a](#step-1a), [1b](#step-1b), [1c](#step-1c), [1d](#step-1d), registry config and local clones from [3a](#step-3a); completed annotations from [9](#step-9), if present.
 
-**Outputs:** the main-chain files listed in steps 2–8 and 10–11; `logs/run_full_<timestamp>.log`. Uses `--force`. If `spot_A_done.xlsx` exists, keeps sample IDs, refreshes the key and scores; otherwise draws sheets, moving earlier uncompleted sheets aside. Excludes optional 6g and paired review 8p–10p. Does not run step 9 for people.
+**Outputs:** the main-chain files listed in steps 2–8 and 10–11; `logs/run_full_<timestamp>.log`. Uses `--force`. If `spot_A_done.xlsx` exists, keeps sample IDs, refreshes the key and scores; otherwise draws sheets, moving earlier uncompleted sheets aside. Excludes paired review 8p–10p. Does not run step 9 for people.
 
 ```bash
 DRY_RUN=1 bash scripts/run_full.sh

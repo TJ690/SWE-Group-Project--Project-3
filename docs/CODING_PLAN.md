@@ -26,7 +26,7 @@ Step 0: Raw dataset
     +--> Steps 5a-5d: Clusters, registry similarity, specificity, scaffold
                |
                v
-         Steps 6a-6h: Label rules, text models, evidence tables
+         Steps 6a-6g: Label rules, text models, evidence tables
                |
                +--> Steps 7a-7e: Automated evaluations
                |
@@ -41,7 +41,7 @@ Step 0: Raw dataset
 Saved feature and result tables -> Step 11: Report figures
 ```
 
-The diagram groups the stages. The input links in each step show its exact file dependencies. Step 8r refreshes an existing sample after label changes. Step 6g is an optional experiment; it is excluded from the main runner.
+The diagram groups the stages. The input links in each step show its exact file dependencies. Step 8r refreshes an existing sample after label changes.
 
 ## Key terms
 
@@ -98,8 +98,7 @@ DuckDB reads Parquet directly and runs SQL joins and counts on this computer. Ea
 - [Step 6d: Build simple comparison rules](#step-6d)
 - [Step 6e: Test text style against disclosure](#step-6e)
 - [Step 6f: Compare several text methods](#step-6f)
-- [Step 6g: Optional: score skills without history](#step-6g)
-- [Step 6h: Report reuse and disclosure separately](#step-6h)
+- [Step 6g: Report reuse and disclosure separately](#step-6g)
 - [Step 7a: Check how many disclosures first and last commits reveal](#step-7a)
 - [Step 7b: Check recovery of exact registry texts](#step-7b)
 - [Step 7c: Test similarity after controlled edits](#step-7c)
@@ -936,7 +935,6 @@ Later steps join wording rows to other feature tables using `file_sha`. Each sel
 
 - [Step 6e](#step-6e) combines wording, structure and specificity in logistic regression. It learns feature weights to distinguish skills with observed AI disclosure from unlabelled skills. Grouped held-out evaluation checks whether those patterns carry over to other owners and text families. The `text_without_new` comparison removes sentence variation, prose-sentence count, em-dash rate and specificity features to measure their combined contribution.
 - [Step 6f](#step-6f) uses the wording values in feature-based logistic regression and gradient boosting. It compares their held-out scores with length, phrase and TF-IDF methods. This tests whether measured writing patterns add useful information compared with simpler rules or learned word patterns.
-- [Step 6g](#step-6g), the optional no-history experiment, reads the same wording columns when applying the selected ensemble to skills without commit history. Its feature-based member uses these values alongside the text-based members.
 
 The models select the numeric wording columns listed in `WORDING` in `style_model.py`. `desc_idiom` and `w_phrase_hits` remain in the saved table but are outside that feature list. The historical v2.1 rules do not use wording values to choose labels; these features support the separate text experiments.
 
@@ -1006,7 +1004,7 @@ Comparing every pair of about 1.8 million texts would require about 1.7 trillion
 - [Step 5b](#step-5b) reuses signatures to find similar registry versions.
 - [Step 5c](#step-5c) counts identifier rarity across clusters rather than treating related texts as independent occurrences.
 - [Step 6b](#step-6b) uses a cluster of at least ten distinct texts at setting 0.8 as one templated-label signal.
-- [Step 6h](#step-6h) records clusters with at least two members as a separate reuse signal.
+- [Step 6g](#step-6g) records clusters with at least two members as a separate reuse signal.
 - [Step 6e](#step-6e) and [step 6f](#step-6f) group related texts together during model evaluation, reducing overlap between training and held-out data.
 - [Step 7d](#step-7d) compares label results using the broader 0.6 clusters.
 
@@ -1095,7 +1093,7 @@ Exact hashes miss edited copies. MinHash and LSH make approximate matching pract
 **Where it is used later**
 
 - [Step 6b](#step-6b) uses exact and near registry matches as templated-label signals. Known registry-origin representatives are excluded from these two rules.
-- [Step 6h](#step-6h) records registry-match evidence separately from disclosed agent involvement.
+- [Step 6g](#step-6g) records registry-match evidence separately from disclosed agent involvement.
 - [Step 7b](#step-7b) checks recovery of exact matches and agreement on near-match candidates.
 - [Step 7d](#step-7d) examines the effect of changing the near-match cut-off. Lowering it cannot add candidates already marked `none` here.
 
@@ -1184,7 +1182,6 @@ Identifier rarity separates concrete technical detail from general advice. Count
 
 - [Step 6e](#step-6e) combines specificity with wording and structure in the style-model experiment.
 - [Step 6f](#step-6f) includes it in feature-based logistic regression and gradient boosting.
-- [Step 6g](#step-6g) uses it in the optional no-history scoring experiment.
 
 These models join the table by `file_sha` and use the score, identifier count and a flag showing whether the score is available. The historical v2.1 label rules do not use specificity to choose labels.
 
@@ -1290,7 +1287,7 @@ Text-copy methods miss common structures filled with different wording. Several 
 
 **Where it is used later**
 
-- [Step 6h](#step-6h) records a non-null scaffold basis as a reuse flag, separately from AI disclosure.
+- [Step 6g](#step-6g) records a non-null scaffold basis as a reuse flag, separately from AI disclosure.
 - [Step 7e](#step-7e) checks overlap with existing reuse signals and examines additional scaffold candidates.
 - [Step 8p](#step-8p) uses scaffold signals and saved line hashes to select paired texts for reuse evaluation.
 
@@ -1330,20 +1327,81 @@ The same step keeps intermediate signals and line hashes in `src/data/derived/s2
 
 **Outputs:** `src/data/derived/s3_labels_v1.parquet`.
 
+**Purpose**
+
+Assign the original rule-based label to each distinct skill text. This provides a fixed baseline for comparing later rule versions.
+
+**Data flow**
+
+```text
+Raw artifacts (step 0)
+          |
+          v
+Count copies and prepare original commit signals
+          |
+          v
+At least 10 exact occurrences? ---- yes -> highly_templated
+          | no
+          v
+Agent rule qualifies? ------------ yes -> agent_assisted
+          | no
+          v
+Human rule qualifies? ------------ yes -> likely_human
+          | no
+          v
+insufficient_evidence
+
+Save file_sha, label, copies and reasons
+```
+
 **Processing and algorithm**
 
-Apply the first rule that matches:
+Count all dataset file occurrences of each `file_sha`. Use the representative row's available history, author class and first/last commit disclosures. Batch size counts representative skills in the same repository sharing a first-commit timestamp.
 
-1. At least ten byte-identical file copies: `highly_templated`.
-2. Available history, fewer than six skills in the first-commit batch, no non-coding bot, and a coding-agent bot or first-commit AI trailer: `agent_assisted`.
-3. Available history, one skill in the batch, user author, no first/last AI trailer and one copy: `likely_human`.
-4. Otherwise: `insufficient_evidence`, with reason codes.
+The command requires the [step 4b](#step-4b) commit table to exist, but recalculates the original detection signals from raw artifacts to preserve baseline behavior. Apply these rules in order; the first match wins:
+
+| Order | Label | Conditions |
+| --- | --- | --- |
+| 1 | `highly_templated` | At least ten byte-identical file occurrences |
+| 2 | `agent_assisted` | Available history, batch below six, no non-coding bot, and either a coding-agent bot or first-commit AI trailer |
+| 3 | `likely_human` | Available history, batch exactly one, user author, no first/last AI trailer, and exactly one file occurrence |
+| 4 | `insufficient_evidence` | None of the earlier rules qualifies |
+
+Save reason codes for each decision. For example, `["batch_size=5", "no_agent_signal"]` explains why a skill meets neither the agent-evidence rule nor the single-file batch condition of the human rule.
+
+**Decision examples**
+
+These examples illustrate the conditions rather than verified authorship.
+
+| Evidence | Result |
+| --- | --- |
+| 15 copies, no history | `highly_templated` |
+| One copy, available history, batch two, first-commit AI trailer | `agent_assisted` |
+| One copy, available history, batch one, user author, no AI trailers | `likely_human` |
+| One copy, no history | `insufficient_evidence` |
 
 **Why this approach**
 
-Keeping the old rules gives a fixed comparison with Sprint 1 and a regression check before later rules change behavior. First-match order makes decisions traceable.
+Keeping the original rule set provides a fixed baseline and a regression check before later rules change behavior. First-match order makes decisions traceable.
+
+The copy rule takes priority because a disclosure on a repeated text may describe installation rather than original writing. The small-batch condition serves a similar purpose: a single disclosed installation can add many existing skills at once. Thresholds of ten occurrences and six skills per batch come from the configuration.
+
+**Where it is used later**
+
+- [Step 6b](#step-6b) starts from v1 and adds registry and cluster evidence.
+- [Step 6c](#step-6c) retains the original label for comparison.
+- [Step 6d](#step-6d) uses the copy counts in simple comparison rules.
+- [Step 6g](#step-6g) uses the copy counts to record exact-content sharing.
+- [Step 7b](#step-7b) and [step 7d](#step-7d) use v1 labels and counts in recovery and threshold checks.
 
 **Output meaning and limits**
+
+| Field | Meaning |
+| --- | --- |
+| `file_sha` | Distinct text identifier |
+| `label` | First qualifying label |
+| `copies` | All exact file occurrences across the dataset, including source files |
+| `reasons` | Conditions explaining the decision |
 
 These are historical rule names. Ten copies show reuse; they do not prove a template was used. The `likely_human` rule depends partly on missing disclosure, which does not establish human authorship.
 
@@ -1366,17 +1424,84 @@ These are historical rule names. Ten copies show reuse; they do not prove a temp
 
 **Outputs:** `src/data/derived/s3_labels_v2.parquet`; `results/s3_v1_v2_crosstab.csv`.
 
+**Purpose**
+
+Create v2 labels by adding registry and near-duplicate evidence to the original rules. A skill with one exact occurrence may still be a lightly edited registry version or part of a large family of similar texts.
+
+**Data flow**
+
+```text
+Original copy counts + commit signals
+Registry matches (5b) + clusters (5a)
+                    |
+                    v
+         Check templated evidence
+                    |
+           +--------+--------+
+           |                 |
+       Qualifies         No qualifying
+           |             templated signal
+           v                 |
+   highly_templated          v
+                     Apply original agent,
+                     human and insufficient rules
+           |                 |
+           +--------+--------+
+                    |
+                    v
+       Add basis, confidence and reasons
+                    |
+                    v
+       v2 labels + v1/v2 comparison counts
+```
+
 **Processing and algorithm**
 
-Choose a templated basis in this order: exact registry match, near registry match, cluster of at least ten, or at least ten exact copies. Skip the two registry rules for a representative stored in its matched origin repository. Other skills keep their v1 label. Add rule-based confidence and reasons; cases near cut-offs receive lower confidence.
+Check these templated signals in order. The first qualifying signal becomes `templated_basis`; all qualifying signals remain in `reasons`.
+
+| Priority | Basis | Condition |
+| --- | --- | --- |
+| 1 | `registry_exact` | Exact registry match from [step 5b](#step-5b) |
+| 2 | `registry_near` | Registry near-match from step 5b, normally with estimated similarity at least 0.8 |
+| 3 | `cluster` | At least ten distinct texts in the [step 5a](#step-5a) cluster at setting 0.8 |
+| 4 | `copy_count` | At least ten byte-identical file occurrences from [step 6a](#step-6a) |
+
+For example, one exact occurrence with a registry near-match score of `0.94` qualifies as `highly_templated` with basis `registry_near`.
+
+Skip the two registry rules when the representative file is stored in its matched origin repository. Cluster and copy-count rules can still qualify. Without qualifying templated evidence, recalculate the original agent, human and insufficient-evidence conditions using [step 4b](#step-4b) commit features. Retain the saved v1 label for comparison rather than always copying it into v2.
+
+**Confidence rules**
+
+| Label | Confidence assignment |
+| --- | --- |
+| `highly_templated` | High for an exact registry match or at least two qualifying bases; otherwise low near a boundary and medium farther away |
+| `agent_assisted` | High with both coding-agent-bot and first-trailer evidence; medium with one; low near the batch boundary or with sparse history |
+| `likely_human` | Medium with usable history; low with sparse history |
+| `insufficient_evidence` | Low under the default configuration |
+
+For a single templated basis, fixed boundary bands are similarity `0.7–0.9` and cluster size or copy count `8–12`. A lone near-match score of `0.82` receives low confidence; `0.94` receives medium. Agent confidence is lowered for batch sizes `4–8`. Sparse history means history is unavailable or its recorded commit count is zero. These confidence bands are fixed in code rather than moving with configured decision thresholds.
 
 **Why this approach**
 
 Exact-copy counts miss edited copies and families of similar texts. Adding the basis shows which evidence changed the decision.
 
+**Where it is used later**
+
+- [Step 6c](#step-6c) starts from v2, adjusts decisions and confidence, and adds independent flags.
+- [Step 6d](#step-6d) uses v2's most common label for the majority baseline.
+
 **Output meaning and limits**
 
-Confidence is a rule category, not a calibrated probability. Structure, repository, type and wording files are required and fingerprinted by this step, but their values do not decide the label.
+| Field | Meaning |
+| --- | --- |
+| `file_sha` | Distinct text ID |
+| `label` | v2 decision |
+| `templated_basis` | First qualifying templated signal; missing if none qualifies |
+| `confidence` | High, medium or low |
+| `reasons` | Evidence and conditions behind the decision |
+| `v1_label` | Saved original label for comparison |
+
+The comparison CSV counts transitions between saved v1 and v2 labels. Confidence is a rule category, not a calibrated probability. Structure, repository, type and wording files are required and fingerprinted by this step, but their values do not decide the label. Registry similarity and connected clusters indicate possible reuse rather than proving copying direction or authorship. The near rule also accepts a row already marked `near` with a missing score, although normal step 5b output supplies that score.
 
 **Saved output examples**
 
@@ -1404,17 +1529,71 @@ Confidence is a rule category, not a calibrated probability. Structure, reposito
 
 **Outputs:** `src/data/derived/s3_labels_v2_1.parquet`; `results/s3_v2_v21_crosstab.csv`.
 
+**Purpose**
+
+Create v2.1 labels by adjusting v2 decisions and keeping reuse, disclosure and revision evidence in separate flags. This addresses missed disclosures and weak confidence based on limited history.
+
+**Data flow**
+
+```text
+v2 labels (6b) + commit features (4b)
+Copy counts (6a) + file details (step 0)
+                     |
+                     v
+       Identify disclosure and revision evidence
+                     |
+                     v
+       Apply label and confidence adjustments
+                     |
+                     v
+       Save evidence and filter flags
+                     |
+                     v
+       v2.1 labels + v2/v2.1 comparison counts
+```
+
 **Processing and algorithm**
 
-Start with v2. Where it said insufficient evidence but disclosure is present and the author is not a non-coding bot, assign low-confidence `agent_assisted`. Keep `likely_human` at medium confidence only with at least three commits over seven days; otherwise lower it. If a templated skill also has disclosure, keep its label and reduce confidence. Save disclosure, reuse, revision and filter flags separately.
+1. **Detect disclosed involvement.** Require available history and an AI trailer in the first or last commit, or a coding-agent bot author. Include both the original and extended trailer detectors from [step 4b](#step-4b). If v2 assigned `insufficient_evidence`, disclosure is present, and the author is not a non-coding bot, change the label to `agent_assisted` with low confidence. Reasons such as `trailer_in_bulk`, `trailer_last_only` and `trailer_ext_only` explain the adjustment.
+2. **Adjust human confidence.** Set `revised = true` when history is available, there are at least three commits, and first-to-last commit span is at least seven days. An existing `likely_human` label receives medium confidence when revised, otherwise low. Its label stays unchanged.
+3. **Mark overlapping evidence.** If templated evidence and disclosure are both present, keep the label, set `conflict = true`, and lower confidence one level: high to medium, medium to low, or low remaining low.
+4. **Save independent flags.** Retain the previous v1 and v2 labels alongside the adjusted result. Add the evidence and filter fields below.
+
+**Evidence flags**
+
+| Field | Meaning |
+| --- | --- |
+| `flag_templated` | A templated basis or v2 templated label is present |
+| `flag_disclosed_agent` | Available history contains recognized trailer or coding-agent-bot evidence |
+| `revised` | Meets the commit-count and time-span thresholds |
+| `conflict` | Both templated and disclosure flags are true |
+| `human_signal_count` | Count of five conditions: revised, batch size one, one exact occurrence, user author, and history without observed disclosure |
+
+`human_signal_count` is a condition count from zero to five, not an authorship probability. Filter flags mark records without removing them:
+
+| Field | Condition |
+| --- | --- |
+| `filter_short` | Body length is missing or below 200 characters |
+| `filter_case_variant` | Available filename differs from exactly `SKILL.md` |
+| `filter_pre_format` | Available first-commit date is before the code's format boundary, `2025-10-01` |
 
 **Why this approach**
 
-The changes expose cases missed by first-commit-only or small-batch rules. Separate flags let later reports show more than one kind of evidence at once.
+A first-commit-only or small-batch rule can miss disclosed involvement in later commits or bulk installations. Recording it with low confidence preserves the evidence without equating installation with original writing. Revision thresholds distinguish limited history from repeated maintenance. Separate flags preserve overlapping evidence instead of hiding it behind one label.
+
+For example, a disclosed bulk batch left insufficient by v2 becomes low-confidence `agent_assisted`. A high-confidence templated skill with disclosure keeps its label, receives medium confidence, and has both evidence flags plus `conflict` set to true.
+
+**Where it is used later**
+
+- [Step 6e](#step-6e) and [step 6f](#step-6f) use the labels and flags to select evidence groups for text-model experiments.
+- [Step 6g](#step-6g) uses the disclosure flag and historical labels when reporting reuse and involvement separately.
+- [Step 7d](#step-7d) compares stored v2.1 labels with recomputed results under changed thresholds.
 
 **Output meaning and limits**
 
-Repeated revision shows maintenance, not proof of human writing. The old conflict penalty is part of this historical label system. [Step 6h](#step-6h) reports reuse and disclosure separately without treating them as a contradiction.
+`s3_labels_v2_1.parquet` stores the adjusted label, basis, confidence, reasons, prior labels and flags. The comparison CSV counts v2-to-v2.1 transitions by resulting confidence. Earlier v1 and v2 files remain unchanged.
+
+Repeated revision shows maintenance, not proof of human writing. Disclosure can concern installation or synchronization rather than original authorship. Confidence levels are rule categories rather than calibrated probabilities. The conflict penalty belongs to this historical label system; [step 6g](#step-6g) reports reuse and disclosure separately without treating their coexistence as a contradiction.
 
 **Saved output examples**
 
@@ -1442,17 +1621,68 @@ Repeated revision shows maintenance, not proof of human writing. The old conflic
 
 **Outputs:** `src/data/derived/s3_baseline_labels.parquet`; `results/s3_baseline_summary.csv`.
 
+**Purpose**
+
+Create five simple comparison methods, called baselines, to test whether the combined v2 and v2.1 rules add value over individual signals. Each baseline produces its own label; the five results remain separate.
+
+**Data flow**
+
+```text
+Copy counts + v2 labels + commit signals + agent folders
+                            |
+                            v
+               Apply five independent baselines
+                            |
+                            v
+               One label column per baseline
+                            |
+                            v
+                  Count labels and shares
+```
+
 **Processing and algorithm**
 
-Build five baselines: always choose the most common v2 label; call ten-copy texts templated; call tool-folder files agent-assisted; call first-trailer files agent-assisted; repeat the trailer rule after excluding bulk batches. Other cases get insufficient evidence.
+Join the inputs by `file_sha`, using the representative file's repository and path to look up its agent folder from [step 1b](#step-1b). Apply these rules independently:
+
+| Baseline | Rule | What it tests |
+| --- | --- | --- |
+| `B0_majority` | Give every skill the most common v2 label | Whether a method improves on always choosing the dominant category |
+| `B1_copy_count` | At least ten exact occurrences → `highly_templated` | The usefulness of exact-copy counts alone |
+| `B2_agent_folder` | Representative file is in a recognized tool-specific folder → `agent_assisted` | Whether installation location is a useful shortcut |
+| `B3_trailer` | First commit has a recognized AI trailer → `agent_assisted` | Disclosure alone compared with combined rules |
+| `B3b_trailer_no_bulk` | First-commit trailer and known batch size below six → `agent_assisted` | The effect of excluding bulk additions |
+
+For B1–B3b, nonqualifying records receive `insufficient_evidence`. B0 currently assigns `insufficient_evidence` to every skill because it is the most common v2 label. If majority counts tie, the code chooses the alphabetically first label.
+
+**Decision example**
+
+For a skill with two exact occurrences, a recognized `.claude/skills/` folder, a first-commit AI trailer and batch size 20:
+
+| Baseline | Result |
+| --- | --- |
+| B0 | `insufficient_evidence` |
+| B1 | `insufficient_evidence` |
+| B2 | `agent_assisted` |
+| B3 | `agent_assisted` |
+| B3b | `insufficient_evidence` |
+
+B3b excludes the large batch, making its result different from B3. This example illustrates the rules rather than verified authorship.
 
 **Why this approach**
 
-A baseline is a simple method used for comparison. It checks whether the larger rule system adds value over one-signal shortcuts.
+Simple baselines make each signal's contribution easier to examine. Comparing combined rules with copy counts, folder location and disclosure separately shows whether their extra conditions improve results. A tool folder describes where a skill is installed, so its usefulness is tested rather than assumed.
+
+**Where it is used later**
+
+[Step 10](#step-10) compares baseline predictions with the same completed judgments used to assess v2 and v2.1. The saved baseline columns enter the scoring key through [step 8](#step-8), or its refresh in [step 8r](#step-8r).
+
+The same module also provides `group_keys()` and `group_split()` to [step 6e](#step-6e) and [step 6f](#step-6f). These functions connect skills sharing an owner or near-duplicate cluster, find connected components, and use five-fold `GroupKFold` splitting to keep each connected group entirely in training or held-out data. This reduces overlap between related training and test texts. The model steps calculate these groups when calling the functions; they are separate from the five saved baseline predictions.
 
 **Output meaning and limits**
 
-Agreement between two rules does not prove either is correct. The agent-folder baseline deliberately tests a weak shortcut. The later review compares all methods on the same sampled skills.
+`s3_baseline_labels.parquet` contains one row per distinct text: `file_sha` and one label column per baseline. `s3_baseline_summary.csv` contains `baseline`, `label`, `n` and `share`. Shares describe prediction frequency, not correctness.
+
+Agreement between rules does not prove either is correct. Comparison with a human judgment measures agreement with that reviewer rather than verified authorship. The grouped model split reduces owner and near-copy overlap but does not remove every possible source of similarity.
 
 **Saved output examples**
 
@@ -1506,21 +1736,94 @@ Features + disclosure flags + owner/cluster groups
              Per-skill scores + AUC tables
 ```
 
+**Purpose**
+
+Test whether text features distinguish skills with observed AI disclosure from skills without an observed disclosure. This step trains models and evaluates their scores; it keeps the rule-based labels unchanged.
+
+**Training data**
+
+Select readable skills with available commit history and no templated flag. Join features by `file_sha`. The saved run uses:
+
+| Group | Target `s` | Skills |
+| --- | ---: | ---: |
+| Observed AI disclosure from [step 6c](#step-6c) | 1 | 140,365 |
+| History available without observed disclosure | 0 | 239,658 |
+| Total | | 380,023 |
+
+The second group is **unlabelled**, not confirmed human-written. Disclosure is an indirect training target rather than verified authorship.
+
 **Processing and algorithm**
 
-Use non-templated skills with history. Disclosed skills form the positive group; other skills are unlabelled, because missing disclosure does not mean human writing. Fit **logistic regression**, which learns a weighted sum of features and turns it into a score between zero and one.
+1. **Prepare features.** Combine structure from [step 4a](#step-4a), wording from [step 4e](#step-4e), and specificity from [step 5c](#step-5c). Apply `log(1 + count)` to large count features. Fill missing values and retain `has_specificity` to distinguish a missing score from a measured zero. Calculate `months_since_format` from the first-commit date for the date variants.
+2. **Create five grouped folds.** Use the grouping functions described in [step 6d](#step-6d). Skills connected by owner or near-duplicate cluster remain together. Each round trains on four folds and scores the fifth: roughly 80% training and 20% held out, with exact sizes varying because groups stay intact.
+3. **Select marker words from training records.** Compare word presence in disclosed and unlabelled texts using smoothed log-odds with an informative prior. This stabilizes rare-word estimates. Select strongly overrepresented words while excluding tool names, then calculate their distinct-word rate per 1,000 tokens as `marker_rate`.
+4. **Fit each model variant.** Learn feature scaling from the training rows with `StandardScaler`, then train logistic regression to predict `s`. Logistic regression learns feature weights and an intercept, converting their weighted sum to a score between zero and one.
+5. **Score the held-out rows.** Use the same column list and training-fitted scaler for evaluation. Repeat until every row has a raw score from a model that did not train on its owner/cluster group.
 
-Use five-fold cross-validation: train on four parts and score the held-out part, repeating until each row has a score from a model that did not train on it. Group skills connected by owner or cluster into the same part. Choose marker words inside training parts only and remove tool names. Compare text-only, date-only and combined versions.
+**Model variants and input selection**
 
-For each fold, calculate `c`, the mean disclosure score among its held-out disclosed skills. The code saves `style_score = min(1, g_text_only / c)`. This positive-unlabelled correction tries to account for undisclosed involvement. It assumes disclosure is selected in a suitable way; that assumption has not been established here. A saved value of 1 is therefore not proof of agent authorship.
+All five variants use logistic regression. They receive different columns from the same prepared table, with the same training rows and target within each fold.
+
+| Variant | Selected input columns |
+| --- | --- |
+| `text_only` | Structure, wording, specificity and learned marker rate |
+| `date_only` | `months_since_format` only |
+| `text_plus_date` | All text features plus `months_since_format` |
+| `text_without_new` | Text features excluding sentence variation, prose-sentence count, em-dash rate and all specificity features |
+| `text_no_markers` | Text features excluding `marker_rate` and uppercase-emphasis rate |
+
+`MODELS` maps each variant name to a feature-column list. The code loops through that mapping and passes selected columns as `X` and disclosure as `y`:
+
+```python
+for name, features in MODELS.items():
+    model = fit_fold(train, features, seed)
+
+# Inside fit_fold():
+model.fit(
+    train[list(features)].to_numpy(),  # X: selected numeric columns
+    train["s"].to_numpy(),             # y: observed disclosure
+)
+```
+
+Each call creates a fresh pipeline:
+
+```python
+StandardScaler()
+LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
+```
+
+`C` controls regularization, which limits large weights; `max_iter` limits optimization iterations. Five variants across five folds produce 25 model fits. The step saves evaluation outputs rather than one final production classifier trained on all records.
+
+**Evaluation and score adjustment**
+
+Calculate AUC from held-out raw scores. AUC measures ranking: 0.5 is chance-level ranking and 1 is perfect ranking of the selected groups. Resample whole owner/cluster groups 1,000 times to estimate uncertainty intervals. The saved pooled results are:
+
+| Variant | AUC |
+| --- | ---: |
+| `text_only` | 0.602 |
+| `date_only` | 0.482 |
+| `text_plus_date` | 0.605 |
+| `text_without_new` | 0.600 |
+| `text_no_markers` | 0.588 |
+
+For each fold, also calculate `c`, the mean raw disclosure score among its held-out disclosed skills. Save `style_score = min(1, g_text_only / c)`. This positive-unlabelled correction attempts to account for undisclosed involvement. It assumes disclosure behaves like random selection among agent-assisted skills, which has not been established. The adjustment uses held-out positive targets to estimate `c`; it is separate from fitting the raw prediction model.
 
 **Why this approach**
 
-Logistic regression is a simple, readable reference model. Grouped splits reduce memorization of an owner or near-copy family. Selecting words only from training data prevents the held-out answers from influencing training.
+Logistic regression provides a simple reference model with learned feature weights. Scaling handles different feature ranges; regularization limits extreme weights. Grouped folds reduce memorization of owners and near-copy families. Training-only marker selection keeps held-out records out of word selection. Date-only and reduced-feature variants test whether timing or particular feature sets explain the separation.
+
+**Where it is used later**
+
+[Step 6f](#step-6f) reuses feature definitions, preparation and grouped-split functions to compare a broader set of text methods. It trains its own models rather than using these saved style scores as its training target.
 
 **Output meaning and limits**
 
-`s` marks observed disclosure. `style_score` is an experimental score, not an authorship probability. AUC measures ranking: 0.5 is chance ranking and 1 is perfect ranking of these selected groups. Disclosure is a proxy, meaning an indirect target rather than a verified answer.
+- `s3_style_scores.parquet` stores each skill's fold, observed target `s`, raw text/date scores and adjusted `style_score`.
+- `s3_style_model.csv` stores per-fold and pooled metrics, group sizes and uncertainty intervals.
+- `s3_style_model.json` stores summary metrics, settings and diagnostic estimates.
+- `s3_style_top_words.csv` stores marker-word statistics; the training folds use their own separately selected marker lists.
+
+The saved text-only AUC of about 0.60 indicates limited separation of disclosed and unlabelled texts, not 60% authorship accuracy. Missing disclosures and differences in tool, topic or workflow can influence results. `style_score` is an experimental score, not an authorship probability; even 1 does not establish AI authorship. The saved prevalence estimate is marked unreliable.
 
 **Saved output examples**
 
@@ -1562,21 +1865,98 @@ Logistic regression is a simple, readable reference model. Grouped splits reduce
 
 **Outputs:** `src/data/derived/s3_text_methods_oof.parquet`; `results/s3_text_methods.csv`; `results/s3_text_methods.json`; `results/s3_text_methods_top_words.csv`.
 
-**Processing and algorithm**
+**Purpose**
 
-Draw 20,000 disclosed agent-assisted and 20,000 historical `likely_human` skills. Remove headers and tool names and read up to 6,000 characters. Use the same owner/cluster grouping for five-fold evaluation.
+Compare text-based methods for separating two selected evidence groups and measure how much of each group can be covered at high precision. Unlike [step 6e](#step-6e), which compares disclosed and unlabelled skills, this step uses historical `likely_human` labels as the negative proxy.
 
-Compare length alone, a fixed phrase rule, logistic regression on measured features, gradient boosting on features, word TF-IDF, character TF-IDF, and an ensemble. **Gradient boosting** adds small decision trees that correct earlier errors. **TF-IDF** gives more weight to patterns frequent in one document but uncommon across documents; logistic regression then learns which patterns separate the groups. The **ensemble** averages the boosting and two TF-IDF scores.
+**Training data and inputs**
 
-Report ranking and the share reaching 80% or 90% precision against the proxy labels. Also report selected restricted groups and length-based checks.
+Use a fixed-seed selection of non-templated skills with wording features and eligible v2.1 labels from [step 6c](#step-6c). The saved run contains:
+
+| Group | Target `y` | Records |
+| --- | ---: | ---: |
+| `agent_assisted` with observed disclosure | 1 | 20,000 |
+| `likely_human` without observed disclosure | 0 | 20,000 |
+| Total | | 40,000 |
+
+These are proxy labels rather than verified authorship. Join numeric structure, wording and specificity features from [steps 4a](#step-4a), [4e](#step-4e) and [5c](#step-5c). For direct text methods, remove the YAML header and tool names, then keep the first 6,000 body characters. Previously calculated numeric features retain their own extraction limits. Commit metadata defines groups and evaluation subsets rather than predictive inputs.
+
+**Data flow**
+
+```text
+Selected v2.1 groups: 20,000 positive + 20,000 negative
+                            |
+                            v
+          Five folds grouped by owner and cluster
+                            |
+              +-------------+--------------+
+              |                            |
+              v                            v
+     Numeric feature columns       Cleaned text prefix
+              |                            |
+              v                            v
+     Feature LR and boosting       Phrase rule + TF-IDF
+              |                            |
+              +-------------+--------------+
+                            |
+                            v
+          Held-out scores for all methods
+          + length-only comparison
+                            |
+                            v
+          Rank-average ensemble and evaluate
+```
+
+**Methods and algorithms**
+
+| Method | Input and calculation |
+| --- | --- |
+| `length_only` | Use body word count as a ranking score; no fitted model |
+| `ai_phrase_rule` | Fixed score combining selected phrases, punctuation and writing patterns; no fitted model |
+| `features_lr` | Standardized structure, wording and specificity features with logistic regression; exclude step 6e's learned marker rate |
+| `features_gbm` | Histogram gradient boosting on the numeric features plus fixed-rule scores; up to 300 boosting iterations at learning rate 0.05 |
+| `tfidf_words` | Word and two-word TF-IDF patterns, capped at 200,000 features, followed by logistic regression |
+| `tfidf_chars` | Within-word character sequences of length three to five, capped at 300,000 features, followed by logistic regression |
+| `ensemble` | Convert held-out boosting, word-TF-IDF and character-TF-IDF scores to percentile ranks, then average the three ranks |
+
+**TF-IDF** weights patterns by their frequency within a document and rarity across training documents. Its vocabulary and weights are fitted on training texts only, then applied unchanged to held-out texts. Both TF-IDF classifiers use logistic regression with `C=2.0` and `max_iter=3000`. The numeric logistic-regression model uses `StandardScaler`, `C=1.0` and `max_iter=2000`.
+
+**Gradient boosting** builds successive decision trees to improve earlier predictions. It captures combinations of measured features. The fixed phrase score compares a predefined collection of presumed AI-associated patterns with contractions, first-person expressions and other patterns; the experiment tests whether that assumption provides useful separation.
+
+**Training and evaluation**
+
+Use five grouped folds through the functions described in [step 6d](#step-6d). Train on four folds and score the fifth, keeping connected owners and near-duplicate clusters together. Repeat until every record has held-out predictions. Each trained method uses the same folds; length and phrase scores are calculated directly. Ensemble ranks are calculated across the resulting held-out score columns.
+
+Evaluate all sampled records, a subset excluding bulk-positive cases (`matched`), and a subset requiring revision evidence for negative cases (`strong_human`). Also average AUC within four text-length bands. These restrictions examine selected alternative explanations; their names do not establish verified authorship.
+
+Report AUC and the largest class coverage reaching 80% or 90% precision against the proxies, reweighted to equal class sizes. Score cut-offs are examined on the held-out predictions, so coverage is exploratory rather than independently validated deployment precision.
+
+**Saved comparison results**
+
+| Method | AUC on all sampled records |
+| --- | ---: |
+| Length only | 0.534 |
+| Fixed phrase rule | 0.518 |
+| Feature logistic regression | 0.605 |
+| Gradient boosting | 0.647 |
+| Word TF-IDF | 0.692 |
+| Character TF-IDF | 0.696 |
+| Ensemble | 0.711 |
+
+At the 90% proxy-precision target, the ensemble covers about 0.9% of positive-group records and 7.1% of negative-group records. These are separate class-coverage measures under a 50/50 class balance, not shares of the full dataset.
 
 **Why this approach**
 
-Length and phrase rules test simple explanations first. Feature models can combine measured patterns. TF-IDF can learn wording patterns outside the fixed feature list. Comparing all methods under the same split makes the comparison fairer.
+Length and phrase rules test simple explanations first. Numeric models test measured writing properties, while TF-IDF learns patterns beyond the fixed feature list. Grouped evaluation makes the comparison more consistent and reduces near-copy overlap. Rank averaging combines methods whose raw score scales differ. High-precision coverage tests whether a useful number of cases can be selected, rather than relying on ranking performance alone.
 
 **Output meaning and limits**
 
-`oof` means out-of-fold: each score comes from a model trained on other groups. `y = 1` is the disclosure-positive proxy, not verified AI authorship. Precision targets assume equal class sizes here; they do not establish performance on skills without history.
+- `s3_text_methods_oof.parquet` stores each sampled skill's proxy target, fold and method scores. `oof` means out-of-fold.
+- `s3_text_methods.csv` stores AUC, length-band AUC and class coverage per method and evaluation subset.
+- `s3_text_methods.json` stores sample sizes, settings and best-method summary.
+- `s3_text_methods_top_words.csv` stores influential patterns from a separate word-model fit on the full sample for inspection; this fit does not produce the held-out evaluation scores.
+
+Missing disclosure does not establish human authorship. Results describe separation of selected proxy groups, and can reflect differences in topic, tool or workflow. AUC is ranking performance rather than percentage accuracy; the ensemble's 0.711 AUC does not establish true-authorship accuracy or reliable transfer to skills without history.
 
 **Saved output examples**
 
@@ -1610,51 +1990,17 @@ Length and phrase rules test simple explanations first. Feature models can combi
 
 <a id="step-6g"></a>
 
-## Step 6g: Optional: score skills without history
+## Step 6g: Report reuse and disclosure separately
 
-**Run:** see [runbook step 6g](PIPELINE_RUNBOOK.md#step-6g). **Code:** [`src/skillsig/s3_labeling/text_score.py`](../src/skillsig/s3_labeling/text_score.py).
-
-**Inputs and source steps:** [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_structure.parquet`](#step-4a); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_wording.parquet`](#step-4e); [`src/data/derived/s2_specificity.parquet`](#step-5c); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0).
-
-**Outputs:** `src/data/derived/s3_text_scores.parquet`; `results/s3_text_score_summary.csv`; `results/s3_text_score.json`.
-
-**Processing and algorithm**
-
-Use held-out scores from step 6f to choose cut-offs for a 90% proxy precision target. Train the selected ensemble on the history groups, then score non-templated texts without history. Save an agent lean, human lean or uncertainty. An explicit AI disclosure inside the text overrides the style lean. Save `label_with_text` separately; do not rewrite v2.1.
-
-**Why this approach**
-
-This explores whether a model trained where history exists can provide a useful signal where history is missing. Separate outputs keep that experiment apart from the saved rule labels.
-
-**Output meaning and limits**
-
-The target population differs from the training population. Proxy precision does not validate transfer to no-history texts. The production output files are absent in this checkout, so no real sample rows can be shown.
-
-Optional; not included in `scripts/run_full.sh`. The separate `results/text_nohistory_pilot/` experiment is not the output of this command.
-
-**Saved output examples**
-
-`src/data/derived/s3_text_scores.parquet`
-
-_Output is not present in this checkout. No sample records are available._
-
-`results/s3_text_score_summary.csv`
-
-_Output is not present in this checkout. No sample records are available._
-
-`results/s3_text_score.json`
-
-_Output is not present in this checkout. No sample records are available._
-
-<a id="step-6h"></a>
-
-## Step 6h: Report reuse and disclosure separately
-
-**Run:** see [runbook step 6h](PIPELINE_RUNBOOK.md#step-6h). **Code:** [`src/skillsig/s3_labeling/evidence.py`](../src/skillsig/s3_labeling/evidence.py).
+**Run:** see [runbook step 6g](PIPELINE_RUNBOOK.md#step-6g). **Code:** [`src/skillsig/s3_labeling/evidence.py`](../src/skillsig/s3_labeling/evidence.py).
 
 **Inputs and source steps:** [`src/data/derived/s3_labels_v1.parquet`](#step-6a); [`src/data/derived/s3_labels_v2_1.parquet`](#step-6c); [`src/data/derived/s2_commit.parquet`](#step-4b); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s2_template.parquet`](#step-5b); [`src/data/derived/s2_scaffold.parquet`](#step-5d).
 
 **Outputs:** `src/data/derived/s3_evidence.parquet`; `results/s3_evidence_matrix.csv`; `results/s3_evidence_signals.csv`; `results/s3_evidence_legacy_crosstab.csv`; `results/s3_evidence_summary.json`.
+
+**Purpose**
+
+Describe reuse and disclosed agent involvement as separate dimensions. A skill can contain reused text and also have an AI-disclosed commit, such as when an agent installs an existing skill. Both observations can be true.
 
 **Data flow**
 
@@ -1674,15 +2020,71 @@ A skill can have both reuse evidence and disclosed agent involvement.
 
 **Processing and algorithm**
 
-Keep five overlapping reuse flags: exact content shared by at least two files, registry exact match, registry near-match, cluster with at least two members, and a scaffold signal. Make a display category from these flags. Separately report disclosed involvement, history with no observed disclosure, or unavailable history. Keep the older labels for comparison and count all reuse-by-disclosure combinations.
+Join the earlier outputs by `file_sha`, check required key uniqueness and copy/commit coverage, then calculate five overlapping reuse flags:
+
+| Flag | Condition and source |
+| --- | --- |
+| `flag_exact_content_shared` | At least two exact file occurrences from [step 6a](#step-6a) |
+| `flag_registry_exact` | Exact registry match from [step 5b](#step-5b), excluding a known origin representative |
+| `flag_registry_near` | Registry near-match meeting the configured similarity cut-off, excluding a known origin representative; a missing score does not qualify |
+| `flag_near_duplicate_cluster` | At least two members in the [step 5a](#step-5a) cluster at the main LSH setting |
+| `flag_scaffold` | A non-null scaffold basis from [step 5d](#step-5d) |
+
+Sharing starts at two files or cluster members, rather than the ten used by historical templated rules. This records broader observed evidence, not additional validated templated labels.
+
+**Reuse display category**
+
+For compact summaries, select the first qualifying category. Preserve every underlying flag even when a higher-priority display category is selected.
+
+| Priority | `reuse_signal` | Meaning |
+| --- | --- | --- |
+| 1 | `exact_content_shared` | Exact sharing or a qualifying exact registry match |
+| 2 | `near_duplicate_signal` | A qualifying registry near-match or cluster |
+| 3 | `scaffold_signal` | Scaffold evidence without a higher-priority category |
+| 4 | `no_reuse_signal_observed` | Template or scaffold text coverage exists, but no qualifying reuse signal was found |
+| 5 | `reuse_not_assessed` | No template/scaffold coverage and no exact-sharing evidence |
+
+**Agent-involvement category**
+
+Calculate the second dimension independently of the reuse category:
+
+| `agent_signal` | Meaning |
+| --- | --- |
+| `disclosed` | The [step 6c](#step-6c) disclosure flag is true |
+| `no_disclosure_observed` | History is available, but no recognized disclosure was observed |
+| `history_unavailable` | Commit history was not collected |
+
+Retain first/last disclosure flags, coding-agent-bot status and bulk-batch context from [step 4b](#step-4b). A bulk batch does not remove an observed disclosure. Check that the saved disclosure flag agrees with available history and the trailer/bot inputs; stop if they disagree.
+
+**Evidence example**
+
+For a skill with 20 exact occurrences and a first-commit AI trailer:
+
+```text
+reuse_signal         = exact_content_shared
+agent_signal         = disclosed
+reuse_and_disclosure = true
+```
+
+This layer applies no conflict penalty. Unlike the historical treatment in [step 6c](#step-6c), the two observations can coexist without reducing confidence or choosing between them.
 
 **Why this approach**
 
-Reuse and disclosed agent involvement can both be present. Two reporting dimensions show that directly and avoid forcing unlike evidence into one authorship label.
+Reuse describes relationships between texts; disclosure describes involvement in a commit. Separate dimensions preserve that distinction. They also distinguish unavailable history from available history without a recognized disclosure. Keeping individual flags supports checks beyond the single display category.
 
 **Output meaning and limits**
 
-The lower two-copy threshold describes observed sharing, not additional validated templated labels. Flags overlap and must not be summed. No disclosure is not proof of human writing. These dimensions need their own evaluation; the old annotation scores do not validate them.
+| Output | Contents |
+| --- | --- |
+| `s3_evidence.parquet` | One row per distinct text, with both dimensions, individual flags, context and historical labels |
+| `s3_evidence_matrix.csv` | All 15 combinations of five reuse and three agent categories, with counts and shares |
+| `s3_evidence_signals.csv` | Counts of individual overlapping reuse flags by agent category |
+| `s3_evidence_legacy_crosstab.csv` | Historical label × reuse category × agent category counts |
+| `s3_evidence_summary.json` | Population totals, overlap counts and interpretation notes |
+
+In the matrix, `share_all` divides the combination count by all skills. `share_within_agent_signal` divides it by all skills in that agent category. Individual flag counts overlap and must not be added together.
+
+No observed reuse does not prove originality; no observed disclosure does not establish human authorship. Disclosure may concern installation or maintenance rather than writing. Cluster and scaffold signals remain candidates. Previous labels are preserved, and this layer assigns no new human-authorship verdict. Earlier annotation scores do not directly validate these separate dimensions.
 
 **Saved output examples**
 
@@ -2337,7 +2739,7 @@ _Output is not present in this checkout. No sample records are available._
 
 **Run:** see [runbook step 11](PIPELINE_RUNBOOK.md#step-11). **Code:** [`src/skillsig/s6_report/figures.py`](../src/skillsig/s6_report/figures.py).
 
-**Inputs and source steps:** [`results/s3_evidence_matrix.csv`](#step-6h); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
+**Inputs and source steps:** [`results/s3_evidence_matrix.csv`](#step-6g); [`results/s4_template_provenance.csv`](#step-7b); [`results/s4_scaffold_overlap.csv`](#step-7e); [`results/s4_spot_precision.csv`](#step-10); [`results/s4_disclosure_recall.csv`](#step-7a); [`results/s3_v1_v2_crosstab.csv`](#step-6b); [`results/s3_v2_v21_crosstab.csv`](#step-6c); [`results/s3_text_methods.csv`](#step-6f); [`results/s4_stability.csv`](#step-7d); [`src/data/derived/s2_clusters.parquet`](#step-5a); [`src/data/derived/s3_text_methods_oof.parquet`](#step-6f); [`src/data/derived/s0_devsample_ids.parquet`](#step-2); [`src/data/derived/s2_repo.parquet`](#step-4c); [`src/data/derived/s2_types.parquet`](#step-4d); [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); `config/default.yaml`.
 
 **Outputs:** `figures/report/*.png`.
 
@@ -2357,7 +2759,7 @@ This step produces pictures, not new record tables. Examples below show actual i
 
 `figures/report/*.png`
 
-Generated file examples: `figures/report/a_label_versions.png`, `figures/report/b_devsample_groups.png`. Charts contain no database rows. Two source rows from the [step 6h evidence matrix](#step-6h):
+Generated file examples: `figures/report/a_label_versions.png`, `figures/report/b_devsample_groups.png`. Charts contain no database rows. Two source rows from the [step 6g evidence matrix](#step-6g):
 
 | `reuse_signal` | `agent_signal` | `n` | `share_all` | `share_within_agent_signal` |
 | --- | --- | --- | --- | --- |
@@ -2368,4 +2770,4 @@ Generated file examples: `figures/report/a_label_versions.png`, `figures/report/
 
 The current code does not contain `s5_analysis`. The CLI names `analyze` and `rq2`, but both return `not implemented`. Registry change tables exist; the proposed adoption, propagation and maintenance-model stages are not a completed pipeline. The proposed table exporter and HTML explorer are also absent; `export` currently draws figures.
 
-The no-history text score in [step 6g](#step-6g) has code but no production output here. The paired reuse review has a generated package, but no returned answer file or scored judgments. These are different states and should not be described as finished results.
+The paired reuse review has a generated package, but no returned answer file or scored judgments. These are different states and should not be described as finished results.
