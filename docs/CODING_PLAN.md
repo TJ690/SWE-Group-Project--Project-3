@@ -461,17 +461,52 @@ Development and full runs share output paths. Keep a complete chain in one mode 
 
 **Outputs:** `src/data/derived/s1_versions_raw.parquet`; `src/data/derived/s1_commit_trailers.parquet`.
 
+**Purpose**
+
+Collect earlier skill versions and commit disclosures from selected registry repositories. The raw dataset is a snapshot; Git history shows changes that happened before and after that snapshot.
+
+**Data flow**
+
+```text
+registry_sources.yaml
+          |
+          v
+Select repositories marked "mined"
+          |
+          v
+Open local clones; download missing clones
+          |
+          +-------------------------+
+          |                         |
+          v                         v
+Read SKILL.md changes       Read commit co-author lines
+          |                         |
+          v                         v
+s1_versions_raw.parquet     s1_commit_trailers.parquet
+```
+
 **Processing and algorithm**
 
-Read Git logs for the configured skill collections. Record each commit that adds or changes a `SKILL.md`, including its file-content hash (blob). Separately inspect co-author lines and record any named AI tools. The trailer table includes commits without an AI trailer too.
+1. Load sources marked `mined` from the configuration; exclude `candidate` sources. Configured mirrors reuse their source repository's mined records.
+2. Open local clones, downloading missing ones with `--filter=blob:none --no-checkout`. These options defer file-content downloads and avoid creating working copies.
+3. Parse Git logs for additions and changes to `SKILL.md`. Save repository, commit ID, date, path, skill name, content hash (`blob`) and change status. Exclude deletion records because they have no resulting file version.
+4. Separately parse `Co-authored-by` trailers for recognized AI tools. Save one row per commit, including commits with no detected AI trailer.
+
+A **commit hash** identifies a repository change; a **blob hash** identifies one file's exact content. One commit can change several skills, and several commits can contain the same file content.
 
 **Why this approach**
 
-Git history supplies versions that the dataset snapshot cannot show. A clone with no working checkout saves space. Reading local history keeps the collection process repeatable.
+Git directly provides version hashes, dates and commit records, so no trained model is needed. Local clones make extraction repeatable, while deferred file downloads reduce initial storage. Separate version and disclosure tables keep file changes distinct from repository-wide commit evidence.
+
+**Where it is used later**
+
+- [Step 3b](#step-3b) groups repeated records into distinct versions and adds introduction-time disclosure information.
+- [Step 3c](#step-3c) uses the step 3b versions to match registry content hashes to dataset files.
+- [Step 7a](#step-7a) uses both outputs to compare disclosures across recorded skill history with those visible in first and last commits.
 
 **Output meaning and limits**
 
-A version row is a file change, not yet a distinct text. A trailer row describes a commit. AI involvement in that commit may concern writing, installation or maintenance.
+A version row is a recorded file change, not yet a distinct text. Status `A` means added and `M` means modified. A trailer row describes a commit: an empty `ai_tools` list means no recognized disclosure was found, not confirmed human authorship. A disclosure may concern writing, installation or maintenance. This step does not assign authorship labels or confirm original sources.
 
 The command keeps existing clones from fetching new branch history. Missing clones are still downloaded. Later steps can download missing file objects by exact hash; this flag does not make the whole pipeline offline.
 
@@ -501,17 +536,62 @@ The command keeps existing clones from fetching new branch history. Missing clon
 
 **Outputs:** `src/data/derived/s1_registry_versions.parquet`.
 
+**Purpose**
+
+Turn raw change records into one row per distinct version of each registry skill. A commit is a change event; a version here is distinct file content. For example, a history of A → B → A has three changes but only two distinct versions.
+
+**Data flow**
+
+```text
+Raw versions + commit trailers (step 3a)
+                    |
+                    v
+    Group by repository + skill + blob
+                    |
+                    v
+    First/last dates + commit counts
+                    |
+                    v
+    Assign lineage ID and version order
+                    |
+                    v
+    Add disclosure and snapshot flags
+                    |
+                    v
+    Read file size and description opening
+                    |
+                    v
+       s1_registry_versions.parquet
+```
+
 **Processing and algorithm**
 
-Group rows by repository, skill name and blob. Keep first and last dates and count the commits. Order versions by date. Give each skill a `lineage_id` in the form `repository::skill`. Read text size and description opening from the clone. Mark versions first seen after the dataset snapshot.
+1. Remove incomplete records and join trailer flags using repository and commit ID.
+2. Group by `(repo, skill, blob)`. Keep the earliest recorded commit, first and last recorded dates, and count of distinct commits for each content version.
+3. Order distinct versions by first recorded date, using commit and blob hashes to break ties. Assign `version_seq` values of 1, 2, 3… and a `lineage_id` such as `anthropics/skills::pdf`.
+4. Add the fields below. Read file size and description text from the registry clones.
+
+| Field | Meaning |
+| --- | --- |
+| `ai_trailer_at_introduction` | A recorded commit on the version's first day had a recognized AI trailer |
+| `post_snapshot` | The version first appeared after the latest collection date in `mining_runs` from [step 0](#step-0) |
+| `size_bytes` | File-content size |
+| `desc_idiom` | Description-opening category, such as “Use when…” or a capability summary |
+| `renamed_group` | Shared identifier for identical content under multiple skill names in one repository |
 
 **Why this approach**
 
-Several commits can contain the same text, so counting commits would overcount versions. Keeping later versions with a flag preserves history without hiding the time limit.
+Grouping by content hash avoids counting repeated content as new versions. Dates and sequence numbers support version comparisons. Flagging later versions instead of deleting them preserves history while keeping the dataset's time boundary visible.
+
+**Where it is used later**
+
+- [Step 3c](#step-3c) matches version hashes to dataset files and builds lineage summaries.
+- [Step 3d](#step-3d) compares consecutive distinct versions to measure changes.
+- [Step 5b](#step-5b) uses registry versions as reference texts for similarity matching.
 
 **Output meaning and limits**
 
-`version_seq` is the order of distinct texts. `post_snapshot = true` means the version was first seen after the dataset collection date. A lineage groups versions of a skill; it is not a confirmed chain of authors.
+`version_seq` follows first appearances of distinct contents, not every transition. In A → B → A, the return to A is combined with its earlier occurrence. A lineage groups a skill's recorded versions, not confirmed authors. `renamed_group` shows shared content rather than proving a rename. An introduction-day trailer records commit involvement, not original authorship.
 
 **Saved output examples**
 
@@ -553,13 +633,49 @@ Registry versions (step 3b)       Dataset files (step 0)
 
 Join registry blob hashes to dataset `file_sha` values. Count files, repositories and owners with each text. If several listed registries contain it, assign the earliest recorded registry as the origin candidate. Build a history summary for each lineage, including versions and copies outside its source repository.
 
+**What the counts mean**
+
+The two outputs use different units. `s1_registry_matches.parquet` has one row per matched content hash. `s1_lineages.parquet` has one row per registry skill, combining its retained versions. The column name is `versions_seen`, not `version_seen`.
+
+| Field | Calculation and meaning | What it helps measure |
+| --- | --- | --- |
+| `files` | Count every dataset file location holding one exact content hash, including occurrences in the source repository. | How widely one version's exact text appears. Several paths in one repository count separately. |
+| `owners` in matches | Count distinct accounts holding that exact text. The owner is the part before `/` in `owner/repository`. | Breadth across accounts: 100 files under one account differ from 100 files across 100 accounts. It counts accounts, not individual authors. |
+| `versions` | Count distinct content hashes retained for a lineage from [step 3b](#step-3b). Normally exclude versions introduced after the snapshot; if a lineage has no earlier versions, retain its later versions. | How many different texts were recorded for a skill, rather than how many commits occurred. |
+| `versions_seen` | Count retained versions whose exact hash appears anywhere in the dataset, including the source repository. | Dataset coverage of the recorded versions. A version can be seen without any external copies. |
+| `copies` | For each retained version, subtract its occurrences inside the lineage's source repository from `files`, then sum across versions. | Exact file occurrences outside that source repository. This counts files, not distinct owners or repositories. |
+| `owners` in lineages | Take the union of accounts holding any retained, matched version, then count each account once. Include the source account if its files appear in the dataset. | Reach across accounts for the skill as a whole, without counting the same account again for each version. |
+| `span_days` | Days between the earliest `first_date` and latest `last_date` among retained version records. | The observed time span of recorded changes. It is not the skill's age, update frequency or time since its last change. |
+
+**Count example**
+
+The following is an illustrative calculation, not a saved database sample. Suppose a lineage has three retained versions:
+
+| Version | Files in source repository | Files elsewhere | Seen in dataset? |
+| --- | ---: | ---: | --- |
+| A | 1 | 3 | Yes |
+| B | 1 | 1 | Yes |
+| C | 0 | 0 | No |
+
+Version A has `files = 4`. Across the lineage, `versions = 3`, `versions_seen = 2`, and `copies = (4 - 1) + (2 - 1) = 4`. If the same outside account holds A and B, it counts only once in the lineage's `owners`. If the earliest and latest retained change dates are 30 days apart, `span_days = 30`.
+
 **Why this approach**
 
 Hash matching finds byte-identical text without comparing long documents. It is a strong check of content identity. Dates provide a clear rule for choosing among the listed sources.
 
+**Where it is used later**
+
+- [Step 3e](#step-3e) uses matched hashes to exclude already-covered texts from popular-source discovery. It calculates popularity counts separately from the raw dataset.
+- [Step 4c](#step-4c) uses matched hashes and origin repositories to calculate repository-level origin and copied-in shares.
+- [Step 5b](#step-5b) uses matched hashes to recognize exact registry matches and assign their origin lineage before considering approximate similarity.
+
+The lineage counts (`versions`, `versions_seen`, `copies`, `owners`, `span_days`) summarize version coverage, external occurrences and change history. No implemented downstream stage currently reads `s1_lineages.parquet` directly; these fields are not inputs to the current authorship rules. Likewise, the later consumers of the match table mainly use hash and origin fields rather than its saved `files` and `owners` totals.
+
 **Output meaning and limits**
 
-Equal hashes support equal content, not the direction of copying or original authorship. The earliest listed registry may not be the real first publisher. Copy totals can overlap across lineages, so do not add them together.
+Equal hashes support equal content, not the direction of copying or original authorship. The earliest listed registry may not be the real first publisher. Copy totals can overlap across lineages sharing the same content, so do not add them together. These matches count exact content only; edited copies need similarity analysis.
+
+Here, `copies` excludes the source repository. The `copies` field calculated separately in [step 6a](#step-6a) counts all dataset occurrences of a text, so the two fields are not interchangeable. `span_days` can be positive even with one distinct version if that same content was recorded again later. The snapshot filter checks version introduction dates; it does not cap every retained `last_date` at the snapshot.
 
 **Saved output examples**
 
@@ -780,17 +896,53 @@ A topic is not an authorship label. Several topics may match; some skills remain
 
 **Outputs:** `src/data/derived/s2_wording.parquet`.
 
+**Purpose**
+
+Convert writing patterns into numeric features for the text-model experiments in [step 6e](#step-6e) and [step 6f](#step-6f).
+
 **Processing and algorithm**
 
-Measure instruction verbs, second-person words, command density, readability, vocabulary variety, emphasis words and repeated phrases. Measure sentence-length variation and em-dashes on prose after removing code and tables. Vocabulary variety uses a moving 500-word window, so it is less affected by total text length. Also classify the description opening. `w_imperative_ratio` is the share of nonempty lines starting with a listed instruction verb. `w_fk_grade` estimates US school reading grade. `w_mattr500` averages the share of different words within 500-word windows. `w_sentence_cv` divides sentence-length spread by average sentence length; a larger value means less even sentence lengths.
+Select readable, distinct skills from the raw artifacts, remove the YAML header, and process text in batches. `wording.py` calculates the following features with custom Python functions:
+
+| Algorithm | Calculation and output |
+| --- | --- |
+| Pattern matching and counting | Regular expressions and fixed word lists identify instruction verbs, “you/your,” shell-command lines and uppercase emphasis. Save instruction-line shares and rates per 100 words or 1,000 characters. |
+| Flesch–Kincaid readability | `0.39 × words/sentences + 11.8 × syllables/words − 15.59` gives `w_fk_grade`. Syllables are estimated from vowel groups, with a trailing silent-e adjustment. |
+| Moving-average type–token ratio (MATTR) | Slide a 500-word window through the body, track word frequencies in a dictionary, and average `different words / window words` as `w_mattr500`. Shorter texts use one window. |
+| Coefficient of variation | Divide standard deviation by mean length for bullets (`w_uniformity_bullet_cv`) and prose sentences (`w_sentence_cv`). Larger values indicate more varied lengths. Bullet lengths use characters; sentence lengths use word counts. |
+| Shannon entropy | Count headings at each level and calculate `−Σ p × log2(p)` as `w_uniformity_heading_entropy`. Higher values mean heading levels are more evenly represented. |
+| Prose extraction and counting | Remove fenced code, tables, headings and list markers before measuring sentence variation and em-dashes per 1,000 prose words. Also save `w_prose_sentences`. |
+| Character threshold | Set `w_non_english = 1` when more than 20% of body characters are non-ASCII. |
+
+`w_phrase_hits` is currently zero because its configured phrase list is empty. The description-opening category (`desc_idiom`) reuses the pattern rules defined in [step 3b](#step-3b).
+
+**Libraries used**
+
+| Library/module | Role |
+| --- | --- |
+| `re` | Text patterns, token extraction and header removal |
+| `math` | Square roots for variation and base-two logarithms for entropy |
+| DuckDB | Read Parquet, filter readable distinct skills and select development-sample IDs |
+| PyArrow | Define output types and write compressed Parquet batches |
+| `multiprocessing` | Calculate features across CPU worker processes |
 
 **Why this approach**
 
 These measures turn claims about writing style into values that can be tested. Rates, such as words per 100 words, make texts of different lengths easier to compare.
 
+**Where it is used later**
+
+Later steps join wording rows to other feature tables using `file_sha`. Each selected wording value becomes a numeric input column for a model.
+
+- [Step 6e](#step-6e) combines wording, structure and specificity in logistic regression. It learns feature weights to distinguish skills with observed AI disclosure from unlabelled skills. Grouped held-out evaluation checks whether those patterns carry over to other owners and text families. The `text_without_new` comparison removes sentence variation, prose-sentence count, em-dash rate and specificity features to measure their combined contribution.
+- [Step 6f](#step-6f) uses the wording values in feature-based logistic regression and gradient boosting. It compares their held-out scores with length, phrase and TF-IDF methods. This tests whether measured writing patterns add useful information compared with simpler rules or learned word patterns.
+- [Step 6g](#step-6g), the optional no-history experiment, reads the same wording columns when applying the selected ensemble to skills without commit history. Its feature-based member uses these values alongside the text-based members.
+
+The models select the numeric wording columns listed in `WORDING` in `style_model.py`. `desc_idiom` and `w_phrase_hits` remain in the saved table but are outside that feature list. The historical v2.1 rules do not use wording values to choose labels; these features support the separate text experiments.
+
 **Output meaning and limits**
 
-A style value is not proof of AI writing. Several measures assume English. The later text experiments test whether the measures separate the selected evidence groups.
+A style value is not proof of AI writing. Readability and word patterns assume English; the non-ASCII threshold is only a rough language flag. Sentence variation is zero below five prose sentences, and bullet variation is zero below two bullets. The later text experiments test whether these measures separate the selected evidence groups.
 
 **Saved output examples**
 
