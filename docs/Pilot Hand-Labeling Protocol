@@ -1,5 +1,5 @@
 ***1. Purpose***
-This protocol tells labelers how to assign an authorship-signal label to a Git Skills skill by reading its text. The labels are used to check the pipeline's heuristic labels (RQ6: human-authored, agent-assisted, and highly templated skills). The labels are signals. Nobody can verify who or what wrote a skill from its text. Every rule below points to something a labeler can see in its text, and a label records which visible features were present.
+This protocol was written for the 12-skill pilot. The spot check of the pipeline's labels uses docs/ANNOTATION_GUIDELINE.md
 
 ***2. What labelers see and use***
 - Each skill file starts with a header (file_sha, name, description) added by our sampling script, then a ----- SKILL TEXT ----- divider. Only the text after the divider should be judged. The header repeats the skill's front matter, so the duplicated description is an artifact and not a feature of the skill.
