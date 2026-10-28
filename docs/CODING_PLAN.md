@@ -385,19 +385,62 @@ Categories depend on filenames rather than actual behavior. A `.js` file is clas
 
 **Outputs:** `src/data/derived/s0_devsample_ids.parquet`.
 
+**Purpose**
+
+Check that the expected dataset is available, then select 50,000 distinct skills for faster development runs.
+
+**Data flow**
+
+```text
+Raw tables (step 0) + generated tables (steps 1a-1d)
+                         |
+                         v
+                Open eight DuckDB views
+                         |
+                         v
+              Check columns and row counts
+              Stop if a check fails
+                         |
+                         v
+        Group by location, history and copy count
+                         |
+                         v
+       Allocate places and select IDs with fixed seed
+                         |
+                         v
+              s0_devsample_ids.parquet
+```
+
 **Processing and algorithm**
 
-Open the eight tables as DuckDB views, which read files without copying them. Check required column names and, in full mode, the expected row counts. Split distinct skills into groups by location, available history and copy-count band. Give each group a place, then divide the remaining places in proportion to group size. Order skills within a group using their ID and the fixed seed. Save 50,000 IDs.
+1. Open the eight tables as DuckDB views. Views let SQL read the existing Parquet files without copying the dataset.
+2. Check that all views and specified required columns exist. In full mode, also check these exact counts:
+
+| Check | Expected count |
+| --- | ---: |
+| Artifact file rows | 3,797,117 |
+| Representative rows (`dedup_primary = 1`) | 1,877,981 |
+| Repositories | 282,200 |
+| Collection runs | 7 |
+
+3. Use **stratified sampling**: divide distinct skills into groups by location class, available history (`0` or `1`), and exact-copy count (`1`, `2-9`, or `>=10`). Location and history come from the representative row; copy counts use all occurrences.
+4. Give every group at least one place, then allocate the remaining places approximately in proportion to group size. Within each group, order IDs by `hash(file_sha + seed)` and take the allocated number. The configured seed is `20261015`.
 
 **Why this approach**
 
-This is stratified sampling: it keeps small groups present and preserves the main population mix. A fixed seed makes the draw repeatable. The smaller dataset gives faster feedback while developing.
+Data checks catch missing columns and unexpected dataset sizes before expensive processing. Stratified sampling keeps small groups present while preserving the main mix of locations, history and copies. These properties affect which label rules can apply. A fixed seed makes selection repeatable, and the smaller sample speeds up development.
+
+**Where it is used later**
+
+Later steps supporting `--dev-sample` read these IDs to restrict processing. Without the flag, they normally process the full population. Many counts, such as exact-copy counts and commit batch sizes, still use the full population so sampling does not change their meaning. Near-duplicate clusters are formed within the sample in development mode.
 
 **Output meaning and limits**
 
-`stratum` names the sampling group. This sample is for development, not the human review sample. A full pipeline run still uses the full dataset.
+The output stores IDs and group names, not copied skill texts. For example, `skills-dir|history=0|copies=2-9` means a representative in the `skills-dir` location class, unavailable history, and two to nine exact file occurrences across the dataset.
 
-Every later command using `--dev-sample` also reads this output: [step 2](#step-2). Dev and full runs share output paths. Run a complete chain in one mode; rebuild the full chain after a dev run before reporting results.
+The checks cover table availability, specified column names and selected row counts, not every value or data type. Development mode skips the exact row-count checks. An unchanged input/config manifest can skip the step entirely; use `--force` to rerun it.
+
+Development and full runs share output paths. Keep a complete chain in one mode and rebuild the full chain after a development run before using full-data results.
 
 **Saved output examples**
 
