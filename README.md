@@ -37,6 +37,8 @@ The analysis explores the data and applies simple label rules. Wording features 
 
 - `THREATS_TO_VALIDITY.md` - current limits of the study
 
+- `ai-use-log.md` - how the team used AI tools and how the output was checked
+
 ## Setup
 Use Python 3.13. Commands below are run from the repository root.
 
