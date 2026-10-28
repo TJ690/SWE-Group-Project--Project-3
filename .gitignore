@@ -14,7 +14,8 @@ src/data/derived/
 src/data/cache/
 .env
 results/export/*.parquet
-results/annotation/
+results/annotation/*/
+!results/annotation
 
 .cursor/
 # Python bytecode caches, rebuilt on every run.
