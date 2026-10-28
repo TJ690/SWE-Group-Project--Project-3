@@ -1,0 +1,10 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:21:35+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_types.parquet": "sha256:027dcb523ee70edaee52124a8287e5a40e9625b5eee62cc1bb290585891c58d1"
+  },
+  "output": "figures/report/b_skill_types.png",
+  "rows": 14
+}

@@ -1,0 +1,10 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:21:29+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "results/s4_disclosure_recall.csv": "sha256:f6809f64d188a20d25a0b644e2b1e687d5c749511c9dae047c3f15cac5f67dcf"
+  },
+  "output": "figures/report/f2_disclosure_recall.png",
+  "rows": 8
+}

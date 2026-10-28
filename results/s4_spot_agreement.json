@@ -1,0 +1,26 @@
+{
+  "kappa": 0.2877225866916589,
+  "n_a_labelled": 120,
+  "n_agree": 21,
+  "n_b_labelled": 40,
+  "n_disagree": 19,
+  "n_overlap": 40,
+  "n_scored": 120,
+  "note": "agreement on the visible signal, not on true authorship",
+  "overlap_label_counts_a": {
+    "agent_assisted": 20,
+    "insufficient_evidence": 13,
+    "likely_human": 7
+  },
+  "overlap_label_counts_b": {
+    "agent_assisted": 15,
+    "highly_templated": 2,
+    "insufficient_evidence": 12,
+    "likely_human": 11
+  },
+  "partial": false,
+  "raw_agreement": 0.525,
+  "raw_agreement_ci_high": 0.6706477044981831,
+  "raw_agreement_ci_low": 0.37497106853929735,
+  "reference": "independent answers; no adjudication"
+}

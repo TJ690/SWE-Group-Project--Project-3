@@ -1,0 +1,10 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:21:29+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_clusters.parquet": "sha256:2555c6630d9dc0d2db672cff4ae2901534c1383f6e13dbe03b6cab6e9a3b8ca0"
+  },
+  "output": "figures/report/f1_cluster_sizes.png",
+  "rows": 6
+}

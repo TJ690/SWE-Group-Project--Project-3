@@ -1,0 +1,48 @@
+{
+  "n_a": 120,
+  "n_b": 40,
+  "n_trailer": 50,
+  "seed": 20261015,
+  "strata": {
+    "agent_v2": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "agent_v21_new": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "human_not_revised": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "human_revised": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "insufficient_history": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "insufficient_no_history": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "templated_generic": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    },
+    "templated_registry": {
+      "candidates": 400,
+      "drawn": 15,
+      "quota": 15
+    }
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "auc_by_tool": {
+    "claude_positives": {
+      "auc_text_only": 0.6079069103565957,
+      "n_pos": 132975
+    },
+    "other_positives": {
+      "auc_text_only": 0.4902790496529724,
+      "n_pos": 7390
+    }
+  },
+  "auc_ci": {
+    "date_only": [
+      0.469489363993772,
+      0.49904786556440894
+    ],
+    "text_no_markers": [
+      0.5690244965852749,
+      0.6080025698099472
+    ],
+    "text_only": [
+      0.5841182223638065,
+      0.6201686475501703
+    ],
+    "text_plus_date": [
+      0.5863598179690881,
+      0.6248799476452307
+    ],
+    "text_without_new": [
+      0.5836223090936904,
+      0.6183222720767909
+    ]
+  },
+  "auc_pooled": {
+    "date_only": 0.482216949937213,
+    "text_no_markers": 0.5880361044933466,
+    "text_only": 0.6017139855491311,
+    "text_plus_date": 0.605390727982414,
+    "text_without_new": 0.6003995317699895
+  },
+  "features": {
+    "date_only": [
+      "months_since_format"
+    ],
+    "text_no_markers": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "w_sentence_cv",
+      "w_prose_sentences",
+      "w_emdash_per_1kw",
+      "specificity",
+      "has_specificity",
+      "n_identifiers"
+    ],
+    "text_only": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_emphasis_per_k",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "w_sentence_cv",
+      "w_prose_sentences",
+      "w_emdash_per_1kw",
+      "specificity",
+      "has_specificity",
+      "n_identifiers",
+      "marker_rate"
+    ],
+    "text_plus_date": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_emphasis_per_k",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "w_sentence_cv",
+      "w_prose_sentences",
+      "w_emdash_per_1kw",
+      "specificity",
+      "has_specificity",
+      "n_identifiers",
+      "marker_rate",
+      "months_since_format"
+    ],
+    "text_without_new": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_emphasis_per_k",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "marker_rate"
+    ]
+  },
+  "n_pos": 140365,
+  "n_rows": 380023,
+  "note": "AUC measures disclosed-vs-unlabelled proxy discrimination, not verified authorship. Disclosure selection and label noise can bias it in either direction; no guaranteed lower bound on true-authorship AUC is established. PU rescaling assumes random disclosure among agent skills, which is not established.",
+  "prevalence_estimate": {
+    "ci": [
+      0.8579777433250481,
+      0.8678895585426187
+    ],
+    "mean": 0.8637115813527271,
+    "note": "Elkan-Noto rescaling saturates when the classifier is weak; do not report as a finding unless reliable is true",
+    "reliable": false
+  },
+  "recall_at_theta_hi": 0.8,
+  "seed": 20261015,
+  "share_unlabelled_above_theta_hi": 0.6890068347395037,
+  "single_feature_auc": {
+    "has_specificity": {
+      "auc": 0.514871802112118,
+      "higher_in": "disclosed",
+      "mean_disclosed": 0.9602821216115128,
+      "mean_unlabelled": 0.9305385173872769
+    },
+    "n_identifiers": {
+      "auc": 0.5496335242609878,
+      "higher_in": "disclosed",
+      "mean_disclosed": 3.4086550691239568,
+      "mean_unlabelled": 3.1977469676869434
+    },
+    "specificity": {
+      "auc": 0.5379089996046466,
+      "higher_in": "disclosed",
+      "mean_disclosed": 0.35975312503102064,
+      "mean_unlabelled": 0.33200311306867347
+    },
+    "w_emdash_per_1kw": {
+      "auc": 0.570935704916808,
+      "higher_in": "disclosed",
+      "mean_disclosed": 14.84635971243297,
+      "mean_unlabelled": 12.6663241528071
+    },
+    "w_prose_sentences": {
+      "auc": 0.5498966612861292,
+      "higher_in": "disclosed",
+      "mean_disclosed": 60.98452605706551,
+      "mean_unlabelled": 52.20370694906909
+    },
+    "w_sentence_cv": {
+      "auc": 0.5124507055861814,
+      "higher_in": "disclosed",
+      "mean_disclosed": 0.5228851764986508,
+      "mean_unlabelled": 0.514764366600062
+    }
+  },
+  "style_useful": true,
+  "text_plus_date_minus_best_of_date_or_chance": {
+    "ci": [
+      0.08635981796908807,
+      0.12480076659122151
+    ],
+    "mean": 0.105390727982414
+  },
+  "theta_hi": 0.8082704540235169,
+  "theta_lo": 0.6281003114379649
+}

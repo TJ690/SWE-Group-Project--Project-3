@@ -1,0 +1,14 @@
+skill_type,skills,median_score,pct_agent,pct_human
+review_git,3172,0.97,78.8,6.5
+planning_agent_workflow,3978,0.926,74.9,6.6
+business_product,574,0.923,74.0,7.8
+testing_debugging,2712,0.922,73.5,7.9
+office_documents,647,0.921,70.6,6.3
+frontend_design,1713,0.9,70.2,7.8
+data_ml_research,1282,0.895,70.0,7.7
+devops_cloud,1094,0.887,67.9,10.5
+security,1336,0.88,67.2,10.6
+backend_api_languages,1985,0.872,65.4,10.3
+docs_writing_marketing,565,0.871,68.3,7.3
+unclassified,11137,0.868,66.0,10.4
+integrations_tools,653,0.864,64.0,8.1

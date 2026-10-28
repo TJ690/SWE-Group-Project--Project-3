@@ -1,0 +1,242 @@
+{
+  "auc_by_tool": {
+    "claude_positives": {
+      "auc_text_only": 0.6075756378582913,
+      "n_pos": 133071
+    },
+    "other_positives": {
+      "auc_text_only": 0.491493970225225,
+      "n_pos": 7422
+    }
+  },
+  "auc_ci": {
+    "date_only": [
+      0.4658537393017267,
+      0.5035071954435518
+    ],
+    "text_no_markers": [
+      0.5701250913218733,
+      0.6077805446393939
+    ],
+    "text_only": [
+      0.5838968947827702,
+      0.6188183142429854
+    ],
+    "text_plus_date": [
+      0.585876204822297,
+      0.6235021038259277
+    ],
+    "text_without_new": [
+      0.5838816712130704,
+      0.6167160341334188
+    ]
+  },
+  "auc_pooled": {
+    "date_only": 0.48200866112231144,
+    "text_no_markers": 0.5884701391585094,
+    "text_only": 0.6014432459442983,
+    "text_plus_date": 0.6050202825720948,
+    "text_without_new": 0.6004122128493579
+  },
+  "features": {
+    "date_only": [
+      "months_since_format"
+    ],
+    "text_no_markers": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "w_sentence_cv",
+      "w_prose_sentences",
+      "w_emdash_per_1kw",
+      "specificity",
+      "has_specificity",
+      "n_identifiers"
+    ],
+    "text_only": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_emphasis_per_k",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "w_sentence_cv",
+      "w_prose_sentences",
+      "w_emdash_per_1kw",
+      "specificity",
+      "has_specificity",
+      "n_identifiers",
+      "marker_rate"
+    ],
+    "text_plus_date": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_emphasis_per_k",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "w_sentence_cv",
+      "w_prose_sentences",
+      "w_emdash_per_1kw",
+      "specificity",
+      "has_specificity",
+      "n_identifiers",
+      "marker_rate",
+      "months_since_format"
+    ],
+    "text_without_new": [
+      "frontmatter_valid",
+      "body_chars",
+      "desc_chars",
+      "body_words",
+      "headings",
+      "h2",
+      "numbered_items",
+      "bullet_items",
+      "code_blocks",
+      "table_rows",
+      "links",
+      "has_examples_section",
+      "has_when_to_use",
+      "fm_allowed_tools",
+      "fm_license",
+      "fm_version_or_metadata",
+      "non_ascii_ratio",
+      "w_imperative_ratio",
+      "w_you_per_100w",
+      "w_command_density",
+      "w_fk_grade",
+      "w_mattr500",
+      "w_emphasis_per_k",
+      "w_uniformity_bullet_cv",
+      "w_uniformity_heading_entropy",
+      "w_non_english",
+      "marker_rate"
+    ]
+  },
+  "n_pos": 140493,
+  "n_rows": 380757,
+  "note": "AUC of disclosed vs. unlabelled is a lower bound on agent vs. human AUC; c assumes disclosure is random among agent skills, which is false for tools that add no trailer",
+  "prevalence_estimate": {
+    "ci": [
+      0.8583369859480884,
+      0.866472230777962
+    ],
+    "mean": 0.8629599134179688,
+    "note": "Elkan-Noto rescaling saturates when the classifier is weak; do not report as a finding unless reliable is true",
+    "reliable": false
+  },
+  "recall_at_theta_hi": 0.7999971528830618,
+  "seed": 20261015,
+  "share_unlabelled_above_theta_hi": 0.6890919988013186,
+  "single_feature_auc": {
+    "has_specificity": {
+      "auc": 0.5147943039279116,
+      "higher_in": "disclosed",
+      "mean_disclosed": 0.9602898365043098,
+      "mean_unlabelled": 0.9307012286484867
+    },
+    "n_identifiers": {
+      "auc": 0.5493882343302301,
+      "higher_in": "disclosed",
+      "mean_disclosed": 3.4092090819742915,
+      "mean_unlabelled": 3.1993865826325365
+    },
+    "specificity": {
+      "auc": 0.5386053975831424,
+      "higher_in": "disclosed",
+      "mean_disclosed": 0.3586711211938939,
+      "mean_unlabelled": 0.3304089104907886
+    },
+    "w_emdash_per_1kw": {
+      "auc": 0.5708237419937956,
+      "higher_in": "disclosed",
+      "mean_disclosed": 14.84401744027985,
+      "mean_unlabelled": 12.659068529866913
+    },
+    "w_prose_sentences": {
+      "auc": 0.5495416958635566,
+      "higher_in": "disclosed",
+      "mean_disclosed": 61.104346835785414,
+      "mean_unlabelled": 52.358164352545536
+    },
+    "w_sentence_cv": {
+      "auc": 0.5121770551342463,
+      "higher_in": "disclosed",
+      "mean_disclosed": 0.5228840704487188,
+      "mean_unlabelled": 0.5149683519719306
+    }
+  },
+  "style_useful": true,
+  "text_plus_date_minus_best_of_date_or_chance": {
+    "ci": [
+      0.085876204822297,
+      0.12323564296695198
+    ],
+    "mean": 0.10502028257209484
+  },
+  "theta_hi": 0.8063675533906765,
+  "theta_lo": 0.6234858536870234
+}

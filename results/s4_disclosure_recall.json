@@ -1,0 +1,12 @@
+{
+  "any_ai": 1033,
+  "ci_high": 0.9329659755513273,
+  "ci_low": 0.8993694554344664,
+  "middle_only": 85,
+  "note": "registry repos are popular collections, not a random sample",
+  "recall": 0.9177153920619555,
+  "scope": "all",
+  "skills": 3828,
+  "skills_3plus_commits": 1516,
+  "visible_first_or_last": 948
+}

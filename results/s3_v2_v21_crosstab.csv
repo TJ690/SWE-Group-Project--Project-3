@@ -1,0 +1,11 @@
+label_v2,label_v21,confidence_v21,n
+agent_assisted,agent_assisted,high,117
+agent_assisted,agent_assisted,low,13212
+agent_assisted,agent_assisted,medium,64736
+highly_templated,highly_templated,high,50904
+highly_templated,highly_templated,low,29124
+highly_templated,highly_templated,medium,223489
+insufficient_evidence,agent_assisted,low,64602
+insufficient_evidence,insufficient_evidence,low,1370867
+likely_human,likely_human,low,50632
+likely_human,likely_human,medium,10298

@@ -1,0 +1,8 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:21:29+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {},
+  "output": "figures/report/f1_lsh_s_curve.png",
+  "rows": 2
+}

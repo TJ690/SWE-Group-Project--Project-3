@@ -1,0 +1,62 @@
+# config/default.yaml  (loaded by skillsig.config.Config)
+seed: 20261015
+chunk_rows: 50000
+
+paths:
+  raw: src/data/gitskills_data/data
+  generated: src/data/generated_data
+  registry_repos: src/data/registry_repos
+  derived: src/data/derived
+  cache: src/data/cache
+  results: results
+  figures: figures
+
+thresholds:
+  bulk_batch_min: 6          # batch of >= this many skills = bulk install
+  templated_copies_min: 10   # copy count that marks highly_templated (v1 and baseline)
+  templated_jaccard_min: 0.80  # est. Jaccard to a registry version for near match (v2)
+  insufficient_conf_floor: low
+  collection_copy_share_min: 0.5  # shared_share at or above this -> A_collection (repo_context)
+  collection_files_min: 101       # this many SKILL.md files or more -> A_collection (repo_context)
+  human_min_commits: 3            # v2.1: likely_human gets medium only with >= this many commits ...
+  human_min_span_days: 7          # ... spread over >= this many days (otherwise low)
+  min_body_chars: 200             # v2.1: below this, filter_short = true (flag only)
+
+minhash:
+  num_perm: 128
+  shingle_words: 5
+  body_max_chars: 1000000    # above the longest body (355,781 chars): MinHash reads the full body
+  lsh_threshold: 0.80
+  lsh_threshold_low: 0.60    # sensitivity + similarity validation pairs
+
+scaffold:
+  placeholder_min: 1          # generic placeholder hits (outside code fences) -> placeholder basis
+  outline_len_min: 4          # headings needed before an outline can count as a scaffold
+  owners_min: 5               # distinct owners sharing an outline family / fm keys / layout
+  line_owners_min: 5          # a body line is "shared" when this many owners have it
+  line_min_chars: 20          # shorter normalised lines are ignored
+  shared_frac_min: 0.6        # shared_line_frac at or above this -> shared_lines basis
+  outline_stoplist: []        # generic best-practice outlines (keys from s2_scaffold_top_outlines)
+  outline_lsh_threshold: 0.6  # MinHash LSH candidate threshold over heading sets
+  outline_sim_min: 0.8        # 1 - heading-sequence edit distance / longer length
+  outline_bucket_max: 5000    # LSH buckets larger than this are skipped (generic outlines)
+  winnow_k: 5                 # winnowing k-gram width (words)
+  winnow_w: 4                 # winnowing window (k-grams)
+
+rq2:
+  substantive_body_change_pct: 5
+  grace_days: 30
+  grace_days_sensitivity: [0, 30, 90]
+  snapshot_date: auto        # max(mining_runs.finished_at)
+
+sample:
+  per_label: 30              # spot-check skills per v2.1 label (A = 4 x this; B = a third)
+  boundary_oversample: true
+  similarity_pairs: 120
+
+github:
+  user_agent: skillsig-research/0.1
+  per_page: 100
+  max_calls: 2000
+  live_sample_repos: 300
+  checkpoint_every: 25

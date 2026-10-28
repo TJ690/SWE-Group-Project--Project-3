@@ -1,0 +1,11 @@
+{
+  "config_hash": "sha256:4848949d138cbd3af747bfb701ebe4b15a5ece6a5abcad8cc3a04c00308d7fc1",
+  "created_utc": "2026-10-25T19:48:44+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_template.parquet": "sha256:ab47a4fadb62c801a761717cd264279faa2faeea6e55e8a8236ed7cbd29219a3",
+    "src/data/gitskills_data/data/artifacts": "dir_sha256:0435eb382d0cbb563c7833e6c4fa3cad49e5559652bb3bb924565cc7ef4630a8"
+  },
+  "output": "results/s4_edit_robustness.csv",
+  "rows": 10
+}

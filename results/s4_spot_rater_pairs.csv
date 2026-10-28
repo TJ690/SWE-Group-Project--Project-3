@@ -1,0 +1,4 @@
+rater_x,rater_y,n_overlap,n_agree,n_disagree,raw_agreement,raw_agreement_ci_low,raw_agreement_ci_high,kappa,reference
+A,B,40,21,19,0.525,0.37497106853929735,0.6706477044981831,0.2877225866916589,independent answers; no adjudication
+A,C,60,33,27,0.55,0.42491714548981496,0.6690654614623918,0.3082835183603758,independent answers; no adjudication
+B,C,21,14,7,0.6666666666666666,0.45373075657210293,0.8280546356731631,0.4654545454545454,independent answers; no adjudication

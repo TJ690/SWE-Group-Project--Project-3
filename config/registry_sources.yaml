@@ -1,0 +1,37 @@
+# config/registry_sources.yaml  (read by skillsig.s1_registry.sources)
+# tier A = provider official, B = famous community/individual maintainers, G = Google/Gemini + GitHub/Copilot
+# status: mined = already mined in the 2026-10-15 pilot; candidate = not mined yet
+sources:
+  - {repo: anthropics/skills,                        tier: A, group: anthropic,  status: mined}
+  - {repo: openai/skills,                            tier: A, group: openai,     status: mined, note: "deprecated 2026-06-22; successor openai/plugins"}
+  - {repo: openai/plugins,                           tier: A, group: openai,     status: candidate}
+  - {repo: obra/superpowers,                         tier: B, group: community,  status: mined}
+  - {repo: affaan-m/ECC,                             tier: B, group: community,  status: mined}
+  - {repo: mattpocock/skills,                        tier: B, group: community,  status: mined}
+  - {repo: garrytan/gstack,                          tier: B, group: community,  status: mined}
+  - {repo: nextlevelbuilder/ui-ux-pro-max-skill,     tier: B, group: community,  status: mined}
+  - {repo: addyosmani/agent-skills,                  tier: B, group: community,  status: mined}
+  - {repo: kepano/obsidian-skills,                   tier: B, group: community,  status: mined}
+  - {repo: coreyhaines31/marketingskills,            tier: B, group: community,  status: mined}
+  - {repo: wshobson/agents,                          tier: B, group: community,  status: mined}
+  - {repo: phuryn/pm-skills,                         tier: B, group: community,  status: mined}
+  - {repo: blader/humanizer,                         tier: B, group: community,  status: mined}
+  - {repo: vercel-labs/agent-skills,                 tier: B, group: community,  status: mined}
+  - {repo: bmad-code-org/BMAD-METHOD,                tier: B, group: community,  status: mined}
+  - {repo: google/skills,                            tier: G, group: google,     status: mined}
+  - {repo: google-gemini/gemini-cli,                 tier: G, group: gemini,     status: mined}
+  - {repo: google-gemini/gemini-managed-agents-templates, tier: G, group: gemini, status: mined}
+  - {repo: google-labs-code/stitch-skills,           tier: G, group: google,     status: mined}
+  - {repo: googleworkspace/cli,                      tier: G, group: google,     status: mined}
+  - {repo: google/adk-python,                        tier: G, group: google,     status: mined}
+  - {repo: google/adk-samples,                       tier: G, group: google,     status: mined}
+  - {repo: google/agents-cli,                        tier: G, group: google,     status: mined}
+  - {repo: flutter/skills,                           tier: G, group: google,     status: mined}
+  - {repo: flutter/agent-plugins,                    tier: G, group: google,     status: mined, mirror_of: flutter/skills}
+  - {repo: GoogleCloudPlatform/gke-mcp,              tier: G, group: google,     status: mined}
+  - {repo: github/awesome-copilot,                   tier: G, group: github,     status: mined}
+  - {repo: github/spec-kit,                          tier: G, group: github,     status: mined}
+  - {repo: github/gh-aw,                             tier: G, group: github,     status: mined}
+  - {repo: github/copilot-cli-for-beginners,         tier: G, group: github,     status: mined}
+  - {repo: github/actions-migrations-via-copilot,    tier: G, group: github,     status: mined}
+# candidate to add: Microsoft is the largest owner by file count (2,154 files). Run `python -m skillsig registry discover` to list its skill-hosting repos, then add them here.

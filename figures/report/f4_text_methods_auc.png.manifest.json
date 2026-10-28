@@ -1,0 +1,10 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:21:30+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "results/s3_text_methods.csv": "sha256:587c757dec5bb577b8b2d61796533d5e48d819c567d0ff282c38ff6821b2fde5"
+  },
+  "output": "figures/report/f4_text_methods_auc.png",
+  "rows": 21
+}

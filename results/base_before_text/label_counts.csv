@@ -1,0 +1,13 @@
+version,label,n,pct
+v1,insufficient_evidence,1699301,90.49
+v1,agent_assisted,80114,4.27
+v1,likely_human,62798,3.34
+v1,highly_templated,35768,1.9
+v2,insufficient_evidence,1439241,76.64
+v2,highly_templated,299673,15.96
+v2,agent_assisted,78107,4.16
+v2,likely_human,60960,3.25
+v2_1,insufficient_evidence,1374553,73.19
+v2_1,highly_templated,299673,15.96
+v2_1,agent_assisted,142795,7.6
+v2_1,likely_human,60960,3.25

@@ -1,0 +1,11 @@
+{
+  "config_hash": "sha256:4848949d138cbd3af747bfb701ebe4b15a5ece6a5abcad8cc3a04c00308d7fc1",
+  "created_utc": "2026-10-25T18:35:31+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_repo.parquet": "sha256:94f40ec42f1a586199d19f265e94d2f9863eb34959eb3c136735e9b8d07457f0",
+    "src/data/gitskills_data/data/artifacts": "dir_sha256:0435eb382d0cbb563c7833e6c4fa3cad49e5559652bb3bb924565cc7ef4630a8"
+  },
+  "output": "results/s2_skill_type_by_project.csv",
+  "rows": 4136
+}

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Persona: Hiccup</title>
+<style>
+  :root {
+    --ink: #1f2328;
+    --muted: #3d4450;
+    --banner: #3b4552;
+    --banner-ink: #ffffff;
+    --bg: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Calibri, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
+  .card {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 32px 40px 40px;
+    display: grid;
+    grid-template-columns: 420px 1fr;
+    column-gap: 56px;
+  }
+  .banner {
+    grid-column: 1 / -1;
+    width: fit-content;
+    min-width: 360px;
+    background: var(--banner);
+    color: var(--banner-ink);
+    font-size: 30px;
+    font-weight: 700;
+    font-style: italic;
+    padding: 10px 28px;
+    border-radius: 2px;
+    margin-bottom: 20px;
+  }
+  .left svg { width: 100%; height: auto; display: block; border-radius: 2px; }
+  .quote {
+    font-size: 22px;
+    font-weight: 700;
+    font-style: italic;
+    margin: 22px 0 36px;
+    line-height: 1.35;
+  }
+  h2 { font-size: 26px; margin: 0 0 14px; }
+  .bg p { margin: 0 0 10px; font-size: 17px; line-height: 1.5; color: var(--muted); }
+  .bg b, li b { color: var(--ink); }
+  .right h2 { margin-top: 6px; }
+  ul { margin: 0 0 28px; padding-left: 22px; }
+  li { font-size: 17px; line-height: 1.5; margin-bottom: 14px; color: var(--muted); }
+  @media (max-width: 900px) {
+    .card { grid-template-columns: 1fr; padding: 20px 16px; }
+    .banner { min-width: 0; font-size: 24px; }
+    .left { max-width: 480px; }
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="banner">persona: Hiccup</div>
+
+  <div class="left">
+    <svg viewBox="0 0 420 260" role="img" aria-label="Illustration of a developer at a desk reviewing code on a monitor">
+      <rect width="420" height="260" fill="#dfe8f1"/>
+      <rect x="0" y="0" width="420" height="40" fill="#cdd9e6"/>
+      <rect x="300" y="30" width="90" height="70" fill="#f5f8fb" stroke="#b7c5d4"/>
+      <line x1="345" y1="30" x2="345" y2="100" stroke="#b7c5d4"/>
+      <line x1="300" y1="65" x2="390" y2="65" stroke="#b7c5d4"/>
+      <!-- plant -->
+      <rect x="352" y="168" width="30" height="30" fill="#b86b3c"/>
+      <ellipse cx="358" cy="160" rx="10" ry="18" fill="#4f8f4a"/>
+      <ellipse cx="376" cy="156" rx="10" ry="20" fill="#3f7d3b"/>
+      <ellipse cx="367" cy="150" rx="8" ry="20" fill="#5ea357"/>
+      <!-- desk -->
+      <rect x="0" y="198" width="420" height="62" fill="#a9825c"/>
+      <rect x="0" y="198" width="420" height="8" fill="#94704e"/>
+      <!-- monitor -->
+      <rect x="150" y="62" width="180" height="116" rx="6" fill="#2b313a"/>
+      <rect x="158" y="70" width="164" height="100" fill="#1d2229"/>
+      <rect x="168" y="80" width="60" height="6" fill="#7fb4e8"/>
+      <rect x="176" y="92" width="90" height="6" fill="#c6d0da"/>
+      <rect x="176" y="104" width="70" height="6" fill="#e9b872"/>
+      <rect x="176" y="116" width="110" height="6" fill="#c6d0da"/>
+      <rect x="168" y="128" width="50" height="6" fill="#7fb4e8"/>
+      <rect x="176" y="140" width="84" height="6" fill="#9fd29a"/>
+      <rect x="176" y="152" width="64" height="6" fill="#c6d0da"/>
+      <rect x="282" y="78" width="32" height="14" rx="3" fill="#9fd29a"/>
+      <rect x="282" y="98" width="32" height="14" rx="3" fill="#e9b872"/>
+      <rect x="232" y="178" width="16" height="16" fill="#2b313a"/>
+      <rect x="212" y="192" width="56" height="6" rx="2" fill="#2b313a"/>
+      <!-- person (seen from behind-left) -->
+      <path d="M40 260 C40 200 70 178 110 178 C150 178 178 200 178 260 Z" fill="#3c6e91"/>
+      <rect x="98" y="160" width="24" height="22" fill="#c98f6b"/>
+      <circle cx="110" cy="138" r="30" fill="#c98f6b"/>
+      <path d="M80 134 C80 104 140 100 141 134 C136 120 120 114 110 116 C96 116 86 122 80 134 Z" fill="#3a2a20"/>
+      <rect x="86" y="132" width="48" height="12" rx="5" fill="none" stroke="#22262c" stroke-width="3"/>
+      <line x1="110" y1="138" x2="110" y2="138" stroke="#22262c"/>
+      <!-- coffee mug -->
+      <rect x="290" y="204" width="22" height="24" rx="3" fill="#f2f2f2" stroke="#b9b9b9"/>
+      <path d="M312 210 h6 a6 6 0 0 1 0 12 h-6" fill="none" stroke="#b9b9b9" stroke-width="3"/>
+    </svg>
+
+    <p class="quote">“I just want to know who wrote a skill before my team starts using it.”</p>
+
+    <div class="bg">
+      <h2>Background</h2>
+      <p><b>Occupation:</b> Lead application developer</p>
+      <p><b>Technology level:</b> Expert user; reviews code from several developers and uses AI coding agents daily but avoids tools whose output they cannot inspect.</p>
+    </div>
+  </div>
+
+  <div class="right">
+    <h2>Attributes</h2>
+    <ul>
+      <li><b>Security-conscious:</b> Reads every skill script before approving it and watches closely for injection flaws or known vulnerabilities.</li>
+      <li><b>Keeps skills current:</b> Checks that skills match the latest versions of the team’s tech stack before every release.</li>
+      <li><b>Innovation-focused:</b> Dislikes repetitive work; prefers skills that add something new over copies of what the team already has.</li>
+      <li><b>Relies on shared skills:</b> Typically copies skills from official registries or well-known community collections.</li>
+      <li><b>Evidence-driven:</b> Trusts a label only when they can see how confident it is and why it was given.</li>
+    </ul>
+
+    <h2>Goals</h2>
+    <ul>
+      <li><b>Know who wrote it:</b> Find out whether a skill is likely human-authored, agent-assisted, or highly templated before adopting it.</li>
+      <li><b>Use current skills:</b> Ensure every skill the team uses is on its latest version.</li>
+      <li><b>Trust the origin:</b> Adopt skills only from sources they trust to avoid copies of copies.</li>
+      <li><b>See what changed:</b> Quickly review what changed whenever a skill is updated.</li>
+      <li><b>Maximize efficiency:</b> Label all of the team’s skills in minutes without reading each file by hand.</li>
+      <li><b>Match the stack:</b> Ensure skills fit the languages, frameworks, and versions in the team’s codebase.</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

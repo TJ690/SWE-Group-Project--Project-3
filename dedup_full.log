@@ -1,0 +1,68 @@
+2026-10-23 22:24:33,943 INFO skillsig.s2_features.minhash_cluster: minhash shard 0 (50000 signatures)
+2026-10-23 22:25:06,859 INFO skillsig.s2_features.minhash_cluster: minhash shard 1 (50000 signatures)
+2026-10-23 22:25:41,346 INFO skillsig.s2_features.minhash_cluster: minhash shard 2 (50000 signatures)
+2026-10-23 22:26:15,249 INFO skillsig.s2_features.minhash_cluster: minhash shard 3 (50000 signatures)
+2026-10-23 22:26:52,123 INFO skillsig.s2_features.minhash_cluster: minhash shard 4 (50000 signatures)
+2026-10-23 22:27:25,995 INFO skillsig.s2_features.minhash_cluster: minhash shard 5 (50000 signatures)
+2026-10-23 22:28:00,635 INFO skillsig.s2_features.minhash_cluster: minhash shard 6 (50000 signatures)
+2026-10-23 22:28:37,581 INFO skillsig.s2_features.minhash_cluster: minhash shard 7 (50000 signatures)
+2026-10-23 22:29:12,161 INFO skillsig.s2_features.minhash_cluster: minhash shard 8 (50000 signatures)
+2026-10-23 22:29:48,153 INFO skillsig.s2_features.minhash_cluster: minhash shard 9 (50000 signatures)
+2026-10-23 22:30:22,916 INFO skillsig.s2_features.minhash_cluster: minhash shard 10 (50000 signatures)
+2026-10-23 22:30:58,125 INFO skillsig.s2_features.minhash_cluster: minhash shard 11 (50000 signatures)
+2026-10-23 22:31:35,220 INFO skillsig.s2_features.minhash_cluster: minhash shard 12 (50000 signatures)
+2026-10-23 22:32:12,070 INFO skillsig.s2_features.minhash_cluster: minhash shard 13 (50000 signatures)
+2026-10-23 22:32:48,910 INFO skillsig.s2_features.minhash_cluster: minhash shard 14 (50000 signatures)
+2026-10-23 22:33:24,628 INFO skillsig.s2_features.minhash_cluster: minhash shard 15 (50000 signatures)
+2026-10-23 22:34:00,577 INFO skillsig.s2_features.minhash_cluster: minhash shard 16 (50000 signatures)
+2026-10-23 22:34:35,537 INFO skillsig.s2_features.minhash_cluster: minhash shard 17 (50000 signatures)
+2026-10-23 22:35:10,903 INFO skillsig.s2_features.minhash_cluster: minhash shard 18 (50000 signatures)
+2026-10-23 22:35:46,666 INFO skillsig.s2_features.minhash_cluster: minhash shard 19 (50000 signatures)
+2026-10-23 22:36:22,421 INFO skillsig.s2_features.minhash_cluster: minhash shard 20 (50000 signatures)
+2026-10-23 22:36:58,613 INFO skillsig.s2_features.minhash_cluster: minhash shard 21 (50000 signatures)
+2026-10-23 22:37:34,580 INFO skillsig.s2_features.minhash_cluster: minhash shard 22 (50000 signatures)
+2026-10-23 22:38:10,230 INFO skillsig.s2_features.minhash_cluster: minhash shard 23 (50000 signatures)
+2026-10-23 22:38:46,871 INFO skillsig.s2_features.minhash_cluster: minhash shard 24 (50000 signatures)
+2026-10-23 22:39:22,830 INFO skillsig.s2_features.minhash_cluster: minhash shard 25 (50000 signatures)
+2026-10-23 22:39:58,362 INFO skillsig.s2_features.minhash_cluster: minhash shard 26 (50000 signatures)
+2026-10-23 22:40:34,043 INFO skillsig.s2_features.minhash_cluster: minhash shard 27 (50000 signatures)
+2026-10-23 22:41:10,140 INFO skillsig.s2_features.minhash_cluster: minhash shard 28 (50000 signatures)
+2026-10-23 22:41:45,739 INFO skillsig.s2_features.minhash_cluster: minhash shard 29 (50000 signatures)
+2026-10-23 22:42:21,402 INFO skillsig.s2_features.minhash_cluster: minhash shard 30 (50000 signatures)
+2026-10-23 22:42:57,161 INFO skillsig.s2_features.minhash_cluster: minhash shard 31 (50000 signatures)
+2026-10-23 22:43:32,568 INFO skillsig.s2_features.minhash_cluster: minhash shard 32 (50000 signatures)
+2026-10-23 22:44:07,953 INFO skillsig.s2_features.minhash_cluster: minhash shard 33 (50000 signatures)
+2026-10-23 22:44:42,741 INFO skillsig.s2_features.minhash_cluster: minhash shard 34 (50000 signatures)
+2026-10-23 22:45:18,898 INFO skillsig.s2_features.minhash_cluster: minhash shard 35 (50000 signatures)
+2026-10-23 22:45:49,699 INFO skillsig.s2_features.minhash_cluster: minhash shard 36 (40872 signatures)
+2026-10-23 22:45:50,459 INFO skillsig.s2_features.minhash_cluster: minhash clustering 1840872 signatures at threshold 0.6
+2026-10-23 22:45:53,703 INFO skillsig.s2_features.minhash_cluster: minhash band 1/18 at threshold 0.6
+2026-10-23 22:46:07,283 INFO skillsig.s2_features.minhash_cluster: minhash band 2/18 at threshold 0.6
+2026-10-23 22:46:15,141 INFO skillsig.s2_features.minhash_cluster: minhash band 3/18 at threshold 0.6
+2026-10-23 22:46:22,672 INFO skillsig.s2_features.minhash_cluster: minhash band 4/18 at threshold 0.6
+2026-10-23 22:46:30,226 INFO skillsig.s2_features.minhash_cluster: minhash band 5/18 at threshold 0.6
+2026-10-23 22:46:37,682 INFO skillsig.s2_features.minhash_cluster: minhash band 6/18 at threshold 0.6
+2026-10-23 22:46:45,126 INFO skillsig.s2_features.minhash_cluster: minhash band 7/18 at threshold 0.6
+2026-10-23 22:46:53,156 INFO skillsig.s2_features.minhash_cluster: minhash band 8/18 at threshold 0.6
+2026-10-23 22:47:00,711 INFO skillsig.s2_features.minhash_cluster: minhash band 9/18 at threshold 0.6
+2026-10-23 22:47:10,883 INFO skillsig.s2_features.minhash_cluster: minhash band 10/18 at threshold 0.6
+2026-10-23 22:47:20,032 INFO skillsig.s2_features.minhash_cluster: minhash band 11/18 at threshold 0.6
+2026-10-23 22:47:29,410 INFO skillsig.s2_features.minhash_cluster: minhash band 12/18 at threshold 0.6
+2026-10-23 22:47:37,096 INFO skillsig.s2_features.minhash_cluster: minhash band 13/18 at threshold 0.6
+2026-10-23 22:48:00,097 INFO skillsig.s2_features.minhash_cluster: minhash band 14/18 at threshold 0.6
+2026-10-23 22:48:08,005 INFO skillsig.s2_features.minhash_cluster: minhash band 15/18 at threshold 0.6
+2026-10-23 22:48:16,534 INFO skillsig.s2_features.minhash_cluster: minhash band 16/18 at threshold 0.6
+2026-10-23 22:48:23,755 INFO skillsig.s2_features.minhash_cluster: minhash band 17/18 at threshold 0.6
+2026-10-23 22:49:20,186 INFO skillsig.s2_features.minhash_cluster: minhash band 18/18 at threshold 0.6
+2026-10-23 22:49:39,288 INFO skillsig.s2_features.minhash_cluster: minhash clustering 1840872 signatures at threshold 0.8
+2026-10-23 22:49:41,388 INFO skillsig.s2_features.minhash_cluster: minhash band 1/9 at threshold 0.8
+2026-10-23 22:49:47,129 INFO skillsig.s2_features.minhash_cluster: minhash band 2/9 at threshold 0.8
+2026-10-23 22:49:52,700 INFO skillsig.s2_features.minhash_cluster: minhash band 3/9 at threshold 0.8
+2026-10-23 22:49:58,594 INFO skillsig.s2_features.minhash_cluster: minhash band 4/9 at threshold 0.8
+2026-10-23 22:50:04,586 INFO skillsig.s2_features.minhash_cluster: minhash band 5/9 at threshold 0.8
+2026-10-23 22:50:10,603 INFO skillsig.s2_features.minhash_cluster: minhash band 6/9 at threshold 0.8
+2026-10-23 22:50:16,615 INFO skillsig.s2_features.minhash_cluster: minhash band 7/9 at threshold 0.8
+2026-10-23 22:50:22,638 INFO skillsig.s2_features.minhash_cluster: minhash band 8/9 at threshold 0.8
+2026-10-23 22:50:28,557 INFO skillsig.s2_features.minhash_cluster: minhash band 9/9 at threshold 0.8
+2026-10-23 22:50:38,483 INFO skillsig.s2_features.minhash_cluster: wrote /Users/home/workspace/School/Advanced_Software_Engineering/Project/work/SWE-Group-Project--Project-3/src/data/derived/s2_clusters.parquet (3681744 rows)
+2026-10-23 22:50:38,484 INFO skillsig.cli: s2_features done; rows={'s2_clusters': 3681744}

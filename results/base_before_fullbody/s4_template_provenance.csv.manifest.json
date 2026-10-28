@@ -1,0 +1,13 @@
+{
+  "config_hash": "sha256:4848949d138cbd3af747bfb701ebe4b15a5ece6a5abcad8cc3a04c00308d7fc1",
+  "created_utc": "2026-10-25T19:48:26+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_clusters.parquet": "sha256:0636795b5683f277e112addcc418724f9ea107364ef08cd47a23a18de5c68828",
+    "src/data/derived/s2_template.parquet": "sha256:ab47a4fadb62c801a761717cd264279faa2faeea6e55e8a8236ed7cbd29219a3",
+    "src/data/derived/s3_labels_v1.parquet": "sha256:94b47905c58838e4d2f3105e28ec1934fead3ac8163c71dcb53440c53ac8dcf5",
+    "src/data/derived/s3_labels_v2_1.parquet": "sha256:66460514f2bfb1b657e649d28f136df224b830d05459abf28da6f08eec5d2e0c"
+  },
+  "output": "results/s4_template_provenance.csv",
+  "rows": 3
+}

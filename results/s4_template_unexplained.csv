@@ -1,0 +1,4 @@
+rule,n,registry_matched,share_registry,note
+copy_rule,35768,4919,0.1375251621561172,"agreement, not precision: sources outside the 31 mined repos are not known"
+cluster_rule,277852,41048,0.14773332565538488,"agreement, not precision: sources outside the 31 mined repos are not known"
+either,297346,42426,0.14268226241482987,"agreement, not precision: sources outside the 31 mined repos are not known"

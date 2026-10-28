@@ -1,0 +1,16 @@
+signal,agent_signal,n
+flag_exact_content_shared,disclosed,35629
+flag_exact_content_shared,history_unavailable,267960
+flag_exact_content_shared,no_disclosure_observed,84912
+flag_near_duplicate_cluster,disclosed,33765
+flag_near_duplicate_cluster,history_unavailable,474886
+flag_near_duplicate_cluster,no_disclosure_observed,94011
+flag_registry_exact,disclosed,848
+flag_registry_exact,history_unavailable,2966
+flag_registry_exact,no_disclosure_observed,2667
+flag_registry_near,disclosed,2341
+flag_registry_near,history_unavailable,33471
+flag_registry_near,no_disclosure_observed,6292
+flag_scaffold,disclosed,18818
+flag_scaffold,history_unavailable,224845
+flag_scaffold,no_disclosure_observed,48240

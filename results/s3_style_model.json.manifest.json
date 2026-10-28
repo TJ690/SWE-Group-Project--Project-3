@@ -1,0 +1,15 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:04:37+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_clusters.parquet": "sha256:2555c6630d9dc0d2db672cff4ae2901534c1383f6e13dbe03b6cab6e9a3b8ca0",
+    "src/data/derived/s2_commit.parquet": "sha256:7deec9709765cb8e6baeb5ac95b54bd31c7a945858500dc760b98dc0715b8d28",
+    "src/data/derived/s2_specificity.parquet": "sha256:bd9bc3adcaf9fc4f6329f18fdc74eb886779fa7d49b38ac18d871ded7482cf64",
+    "src/data/derived/s2_structure.parquet": "sha256:f2cd5e23bdcd67e9abc7eb4604352f106fb927745f1299aa1c2be861637e1921",
+    "src/data/derived/s2_wording.parquet": "sha256:b08baccb92378e6bafe5601760509d7f40840a53c1ca9f9a82b82c0c871a5b90",
+    "src/data/derived/s3_labels_v2_1.parquet": "sha256:5067294d607fbb3360ae923e6079654747cd99f2b84cc603860a867c258f9382"
+  },
+  "output": "results/s3_style_model.json",
+  "rows": 1
+}

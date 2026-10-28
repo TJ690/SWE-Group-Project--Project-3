@@ -1,0 +1,10 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-27T20:21:35+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_repo.parquet": "sha256:94f40ec42f1a586199d19f265e94d2f9863eb34959eb3c136735e9b8d07457f0"
+  },
+  "output": "figures/report/b_repository_kinds.png",
+  "rows": 3
+}

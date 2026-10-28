@@ -1,0 +1,12 @@
+{
+  "config_hash": "sha256:4848949d138cbd3af747bfb701ebe4b15a5ece6a5abcad8cc3a04c00308d7fc1",
+  "created_utc": "2026-10-25T18:26:36+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s1_registry_matches.parquet": "sha256:5e978a5ae360c3a9c6cc93d1d97edd3350737899fa02a3a6c69a5ac4260d7a97",
+    "src/data/gitskills_data/data/artifacts": "dir_sha256:0435eb382d0cbb563c7833e6c4fa3cad49e5559652bb3bb924565cc7ef4630a8",
+    "src/data/gitskills_data/data/repos": "dir_sha256:108742f22d95b03f3113bfeabdb13fee0faa3b085989fdd2291ecf76cd74503d"
+  },
+  "output": "results/s1_popular_candidates.csv",
+  "rows": 200
+}

@@ -4,17 +4,36 @@
 Can we distinguish likely human-authored, agent-assisted, and highly templated skills by observing structural, linguistic, and commit-metadata patterns in GitSkills artifacts, and how reliable is that signal?
 
 ## Background/Motivation
-As AI coding assistants and agent frameworks become more common, an increasing share of software artifacts, including skills, are being written, co-written, or templated with AI assistance. Understanding whether the different modes of authorship leave observable traces matters for trust and quality assessment in the growing AI-native tooling ecosystem. This project investigates whether such traces exist and how reliably we can detect them using observable repository data.
+We chose this question because skills place a software engineering concern directly in an agent's workflow: how to understand the origin of instructions that software follows. A skill can guide how an agent approaches a task, applies a development practice, or uses a tool. Understanding how those instructions were produced is therefore relevant to the developers who adopt, review, and maintain them.
 
-The question matters for skills in particular. A skill is natural-language instructions that an agent loads and follows, and 36.3% bundle extra files (11.4% ship scripts the agent may run). Half of all collected files (50.5%) are verbatim copies, and most distinct skills sit in small, unstarred repositories created after the format launched in October 2025. Readers and tools therefore have little to go on when deciding whether to trust a skill. Knowing whether a skill was written by a person, drafted by an agent, or copied from a template is one input to that decision, and it is unclear whether the available signals carry it.
+Skills may be written by developers, drafted with agent assistance, or adapted from reusable templates. These processes raise different review questions. A reviewer may want to understand the intent behind a manually written instruction, check whether an agent-assisted draft fits the project, or determine whether a template has been meaningfully customized. Knowing the production context could help focus that review and trace assumptions inherited from another source. Each process can produce useful or flawed instructions, so authorship is context for evaluation rather than a quality judgment.
 
-## Taxonomy
-We classify GitSkills artifacts into three categories:
+The difficulty is that a finished skill does not necessarily reveal how it was created. Similar wording could come from a shared template, common writing conventions, or agent assistance. Human revision can also obscure the distinction between an initial draft and the final artifact. This creates an open question about whether visible characteristics of a skill and its repository history can provide meaningful evidence of its production process, and how much confidence that evidence deserves.
+
+This uncertainty motivated our research question. Establishing whether these distinctions can be made reliably would help developers interpret authorship claims and make more informed decisions about reviewing and reusing skills. Establishing where the distinctions cannot be supported would be equally valuable, because it would clarify the limits of inferring authorship from public software artifacts.
+
+## Historical taxonomy and independent evidence
+The original classification used three categories:
 1. Human-Authored: Written primarily by a person with little to no AI assistance.
 2. Agent-Assisted: Co-produced with an AI tool, with human revision/editing.
 3. Highly Templated: Follows a standard scaffolding with little to no customization.
 
 These categories represent the best available proxy given observable signals (see DATA_DICTIONARY.md and THREATS_TO_VALIDITY.md).
+
+The primary evidence report now separates two dimensions because copied content and
+agent involvement can coexist:
+
+- **Reuse evidence:** exact content sharing, registry near-matches or near-duplicate
+  candidates, scaffold signals, no signal observed, or reuse not assessed. The output
+  retains overlapping flags and does not establish copying direction.
+- **Agent-involvement evidence:** disclosed, no disclosure observed in the available
+  commit view, or history unavailable. Missing disclosure does not establish human
+  authorship; disclosure can concern installation or maintenance.
+
+Historical labels and independent annotations remain available for comparisons. They
+are not rewritten into a new reference set. The independent report assigns no human
+verdict or confidence penalty when reuse and disclosure coexist. See
+[the evidence definitions](docs/stages/s3_labeling/evidence.md).
 
 ## Unit of Analysis
 An individual GitSkill artifact -- one SKILL.md file, removing duplicated copies through content hash.
@@ -30,7 +49,8 @@ Features (independent variables):
 - Repository context: repository size, age, stars, tool-family indicators (the dataset has no contributor count)
 
 ## Outcome (dependent variable)
-- Heuristic authorship-signal label produced by our classification method -- not a 100% verifiable truth.
+- Independent reuse and disclosed-involvement evidence, with coverage and overlap.
+  Historical heuristic labels remain comparison outcomes, not verified authorship.
 
 ## Competing and Simpler Explanations
 The label may track something other than authorship. Each explanation below makes a prediction that the analysis can check, and the full method has to beat the simple baseline to count as evidence of an authorship signal.

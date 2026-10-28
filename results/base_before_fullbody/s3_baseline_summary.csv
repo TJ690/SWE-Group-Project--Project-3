@@ -1,0 +1,10 @@
+baseline,label,n,share
+B0_majority,insufficient_evidence,1877981,1.0
+B1_copy_count,highly_templated,35768,0.019046
+B1_copy_count,insufficient_evidence,1842213,0.980954
+B2_agent_folder,agent_assisted,458305,0.244041
+B2_agent_folder,insufficient_evidence,1419676,0.755959
+B3_trailer,agent_assisted,138462,0.073729
+B3_trailer,insufficient_evidence,1739519,0.926271
+B3b_trailer_no_bulk,agent_assisted,80491,0.04286
+B3b_trailer_no_bulk,insufficient_evidence,1797490,0.95714

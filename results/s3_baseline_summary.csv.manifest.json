@@ -1,0 +1,14 @@
+{
+  "config_hash": "sha256:9c1fdd28dfc474144ba67ce72830daab13139d4f04694d08fbe56623745f6398",
+  "created_utc": "2026-10-26T21:24:28+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s2_commit.parquet": "sha256:7deec9709765cb8e6baeb5ac95b54bd31c7a945858500dc760b98dc0715b8d28",
+    "src/data/derived/s3_labels_v1.parquet": "sha256:94b47905c58838e4d2f3105e28ec1934fead3ac8163c71dcb53440c53ac8dcf5",
+    "src/data/derived/s3_labels_v2.parquet": "sha256:81e73b330dce55e1ba4a6e4bfb49baa6f5f46760b416ef9f01789b1dae76a1f1",
+    "src/data/generated_data/file_agents.parquet": "sha256:c481f14be83f53117211fe5bd69bf4e89168d6a185a796fb43fa130ecfc281ac",
+    "src/data/gitskills_data/data/artifacts": "dir_sha256:0435eb382d0cbb563c7833e6c4fa3cad49e5559652bb3bb924565cc7ef4630a8"
+  },
+  "output": "results/s3_baseline_summary.csv",
+  "rows": 9
+}

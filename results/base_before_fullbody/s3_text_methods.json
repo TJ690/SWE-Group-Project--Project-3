@@ -1,0 +1,22 @@
+{
+  "best_auc_all": 0.71138065625,
+  "best_method_all": "ensemble",
+  "ensemble_of": [
+    "features_gbm",
+    "tfidf_words",
+    "tfidf_chars"
+  ],
+  "in_text_disclosure": {
+    "agent_rows": 345,
+    "human_rows": 154
+  },
+  "n_agent": 20000,
+  "n_human": 20000,
+  "note": "negatives are likely_human (no trailer); tools without trailers make AUC a lower bound. decided_* assume a 50/50 prior.",
+  "seed": 20261015,
+  "target_precision": [
+    0.8,
+    0.9
+  ],
+  "text_chars": 6000
+}

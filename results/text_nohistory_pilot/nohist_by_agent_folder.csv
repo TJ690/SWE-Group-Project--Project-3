@@ -1,0 +1,10 @@
+agent_folder,skills,median_score,pct_agent,pct_human
+No agent folder,24639,0.907,71.1,8.2
+Other dot-folder,919,0.888,67.0,7.8
+Shared (.agents),2321,0.881,68.5,9.0
+GitHub Copilot,901,0.859,66.9,8.2
+opencode,337,0.857,66.2,14.8
+Cursor,431,0.856,64.5,10.2
+Shared (.agent),345,0.851,63.5,10.7
+Codex,398,0.813,55.5,11.3
+Claude Code,433,0.756,47.1,35.1

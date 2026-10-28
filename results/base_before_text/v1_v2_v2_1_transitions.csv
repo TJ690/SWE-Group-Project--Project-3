@@ -1,0 +1,14 @@
+label_v1,label_v2,label_v2_1,n
+insufficient_evidence,insufficient_evidence,insufficient_evidence,1374442
+insufficient_evidence,highly_templated,highly_templated,260165
+agent_assisted,agent_assisted,agent_assisted,78091
+insufficient_evidence,insufficient_evidence,agent_assisted,64662
+likely_human,likely_human,likely_human,60897
+highly_templated,highly_templated,highly_templated,35768
+likely_human,highly_templated,highly_templated,1901
+agent_assisted,highly_templated,highly_templated,1839
+agent_assisted,insufficient_evidence,insufficient_evidence,111
+agent_assisted,likely_human,likely_human,47
+agent_assisted,insufficient_evidence,agent_assisted,26
+insufficient_evidence,agent_assisted,agent_assisted,16
+insufficient_evidence,likely_human,likely_human,16

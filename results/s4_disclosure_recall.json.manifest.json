@@ -1,0 +1,11 @@
+{
+  "config_hash": "sha256:4848949d138cbd3af747bfb701ebe4b15a5ece6a5abcad8cc3a04c00308d7fc1",
+  "created_utc": "2026-10-25T19:48:24+00:00",
+  "git_commit": "ee67f60012c4a19a0ff4afe8f9126bcf5ee0b51e",
+  "inputs": {
+    "src/data/derived/s1_commit_trailers.parquet": "sha256:e6a484f5998eb1eb22cc47f2d79ee54a16d214f826168163a9888cb0d6cdd4dd",
+    "src/data/derived/s1_versions_raw.parquet": "sha256:be6af855357336b85eced7a065f9686984075bdcb653accb75a56d12e7221989"
+  },
+  "output": "results/s4_disclosure_recall.json",
+  "rows": 1
+}

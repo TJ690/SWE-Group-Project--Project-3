@@ -9,11 +9,21 @@ The analysis explores the data and applies simple label rules. Wording features 
 
 ## Team
 
-- Product Owner
+The repository history records contributions from Venkat Repaka
+(`venkatrepaka-umich`), Jayden Cathey (`Jayden-Cathey`), and Terry (`TJ690`).
+Commit counts do not determine Scrum roles or measure the full research contribution.
 
-- Scrum Master
+| Sprint 2 role | Assignment |
+|---|---|
+| Product Owner | Jayden Cathey (`Jayden-Cathey`) |
+| Scrum Master | Venkat Repaka (`venkatrepaka-umich`) |
+| Developer / Researcher | Venkat Repaka (`venkatrepaka-umich`) |
+| Researcher | Terry (`TJ690`) |
 
-- Developers/Researchers
+The [Sprint 2 progress report](docs/sprints/sprint2/progress.md) records completed
+work, and the [retrospective](docs/sprints/sprint2/retrospective.md) records changes
+to the plan. AI-assisted work and its verification are disclosed in the
+[AI-use log](ai-use-log.md).
 
 ## Repository Structure
 
@@ -36,6 +46,8 @@ The analysis explores the data and applies simple label rules. Wording features 
 - `DATA_DICTIONARY.md` - data fields used in the analysis
 
 - `THREATS_TO_VALIDITY.md` - current limits of the study
+
+- `ai-use-log.md` - how the team used AI tools and how the output was checked
 
 ## Setup
 Use Python 3.13. Commands below are run from the repository root.
@@ -61,10 +73,19 @@ Use Python 3.13. Commands below are run from the repository root.
    ```
    The shell prompt shows `(.venv)` while the environment is active. Leave it with `deactivate`.
 
-3. Install dependencies:
+3. Install the project and its dependencies. Use **either** option; both give the same environment.
+
+   **Option A: from `pyproject.toml`**
+   ```bash
+   pip install -e ".[data,notebook,dev]"
+   ```
+   `-e .` installs the `skillsig` package and its `skillsig` command from this folder; code changes take effect without reinstalling. The groups in brackets add the dataset downloader (`data`), Jupyter and seaborn for the notebooks (`notebook`), and pytest and ruff (`dev`). Leave out any group you don't need; the quotes stop zsh from reading the brackets as a pattern.
+
+   **Option B: from `requirements.txt`**
    ```bash
    pip install -r requirements.txt
    ```
+   This installs everything in Option A, with all three groups. `requirements.txt` reads its list from `pyproject.toml`, so versions are defined in one place.
 
 4. Point Jupyter at this environment before opening notebooks in `src/notebooks/`:
    ```bash
@@ -108,7 +129,7 @@ cd ../..
 The download is large and can take a long time. Re-running the script resumes and skips files that are already complete. Check that `src/data/gitskills_data/data/artifacts/` contains `part-*.parquet` files.
 
 ### 2. Build the generated files
-The EDA notebooks also read four derived Parquet files. Each is built by one SQL script in `db/`. Run these from the repository root. DuckDB is already installed by `requirements.txt`:
+The EDA notebooks also read four derived Parquet files. Each is built by one SQL script in `db/`. Run these from the repository root. DuckDB is already installed by step 3 of the Setup:
 
 ```bash
 mkdir -p src/data/generated_data
@@ -135,15 +156,54 @@ Keep the raw data in `src/data/gitskills_data/` and the generated files in `src/
 - **SQL scripts:** Run from the repository root. Their paths start with `src/data/`, as shown in the build commands above.
 
 ## Running the Pipeline
-After completing the Setup and Dataset Acquisition above:
+After completing the Setup and Dataset Acquisition above (including the generated files in step 2), the `skillsig` command-line pipeline rebuilds every table and figure. Run it from the repository root with the project environment active:
 
-1. Build all four generated files first, since even the shared notebook setup checks for generated files.
+```bash
+source .venv/bin/activate
+pip install -e .
+bash scripts/run_full.sh
+```
 
-2. Open any notebook in `src/notebooks/` using **GitSkills (.venv)** kernel.
+`scripts/run_full.sh` runs every stage in order on the full dataset with `--force`: intake, registry, features, labels, evaluations, the spot-check, and the report figures. It writes tables to `results/`, figures to `figures/report/`, and a log to `logs/`. `DRY_RUN=1 bash scripts/run_full.sh` lists the steps without running them. It never overwrites finished annotations: once `results/annotation/spot_A_done.xlsx` exists, it keeps the sample and scores it instead of drawing new sheets.
 
-3. Run all cells top to bottom.
+To run one step, use `python -m skillsig <stage> [--only <module>] [--dev-sample] [--force]`, for example:
 
-Each notebook covers one topic and runs independently after the data files are built:
+```bash
+python -m skillsig label --only rules_v2_1
+python -m skillsig export
+```
+
+`--dev-sample` runs on a 50,000-skill sample for quick checks. A step whose inputs and config are unchanged is skipped; code changes are not tracked, so add `--force` after editing code. The tests run with `python -m pytest -q`, and the full-data regression checks with `python -m pytest -q -m data tests/regression`.
+
+### With Claude Code or Codex
+Each stage also has an agent skill in `.claude/skills/` (Codex reads the same folders through `.agents/skills/`). Name a step id or module and `dev` or `full`; the skill checks the inputs, runs the step and reports the outputs. If the mode is left out, it asks. In Claude Code type the slash command; in Codex ask in plain words ("run the commit features on the dev sample").
+
+| Skill | Steps | Example |
+|---|---|---|
+| `/skillsig-prepare` | 0, 1a–1d | `/skillsig-prepare 1a` |
+| `/skillsig-intake` | 2 | `/skillsig-intake` |
+| `/skillsig-registry` | 3a–3e | `/skillsig-registry match full` |
+| `/skillsig-features` | 4a–4e, 5b–5d | `/skillsig-features 4b dev` |
+| `/skillsig-dedup` | 5a | `/skillsig-dedup full force` |
+| `/skillsig-label` | 6a–6h | `/skillsig-label rules_v2_1 full` |
+| `/skillsig-evaluate` | 7a–7e, 10p | `/skillsig-evaluate all full` |
+| `/skillsig-spotcheck` | 8, 8r, 9, 10, 8p, 9p | `/skillsig-spotcheck 10 full` |
+| `/skillsig-export` | 11 | `/skillsig-export full` |
+| `/pipeline` | all | `/pipeline plan`, `/pipeline full`, `/pipeline dev`, `/pipeline status` |
+
+The shared rules the skills follow (dev/full, `--force`, protected annotation files) are in [AGENTS.md](AGENTS.md). `python scripts/output_status.py <outputs>` shows whether outputs exist and which mode built them.
+
+| Guide | Contents |
+|---|---|
+| [SKILLS_RUNBOOK.md](SKILLS_RUNBOOK.md) | How to run the pipeline through the agent skills, with recipes for common tasks |
+| [docs/PIPELINE_RUNBOOK.md](docs/PIPELINE_RUNBOOK.md) | Every step in order, with what to check after each |
+| [docs/EXECUTION_STEPS.md](docs/EXECUTION_STEPS.md) | Each step's command, inputs, outputs and data size |
+| [docs/stages/](docs/stages/README.md) | Design notes for each stage |
+| [docs/report/FINDINGS.md](docs/report/FINDINGS.md) | The results and their charts |
+
+### Sprint 1 notebooks
+
+The exploratory analysis that the pipeline was built from lives in `src/notebooks/`. Each notebook runs on its own after the generated files are built: open it with the **GitSkills (.venv)** kernel and run all cells top to bottom.
 
 | Notebook | Topic |
 |---|---|
@@ -157,10 +217,8 @@ Each notebook covers one topic and runs independently after the data files are b
 | `EDA_repos` | Repository size, age, stars, and context by label |
 | `EDA_siblings` | Extra files bundled with skills |
 
-The pipeline is: **download raw Parquet files → build four derived files with DuckDB → run the notebooks → review tables and plots**. The notebooks group skills using copy counts and commit history.
-
 ## Outputs
-Each notebook in `src/notebooks/` contains its own tables and plots as saved cell outputs. Open the notebook directly to view the results. The headline findings so far:
+The pipeline's results and charts are summarised in [docs/report/FINDINGS.md](docs/report/FINDINGS.md). Each notebook in `src/notebooks/` also contains its own tables and plots as saved cell outputs. The Sprint 1 headline findings:
 
 - 3,797,117 `SKILL.md` files, but only 1,877,981 distinct contents. This means 50.5% of files are redundant copies.
 
@@ -183,8 +241,10 @@ Derived data lives in `src/data/generated_data/` and is ignored by git. Report c
 ## GitHub Project
 Our backlog and sprint tasks are tracked on the [GitHub project board](https://github.com/users/TJ690/projects/2).
 
-## Sprint 1 Report
+## Sprint Reports
 The [Sprint 1 report](report/sprint1_report.md) summarizes the dataset exploration, initial findings, and label rules developed during Sprint 1.
+
+The [Sprint 2 report](report/sprint2_report.md) covers the background, method, implementation, and preliminary results of the `skillsig` pipeline, including the hand-label agreement checks.
 
 ## Work Progress and Retrospectives
 See [work progress and retrospectives](docs/sprints/README.md) for completed work, lessons learned, and planned next steps.

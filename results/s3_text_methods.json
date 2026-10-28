@@ -1,0 +1,22 @@
+{
+  "best_auc_all": 0.710669145,
+  "best_method_all": "ensemble",
+  "ensemble_of": [
+    "features_gbm",
+    "tfidf_words",
+    "tfidf_chars"
+  ],
+  "in_text_disclosure": {
+    "agent_rows": 345,
+    "human_rows": 153
+  },
+  "n_agent": 20000,
+  "n_human": 20000,
+  "note": "Positives are disclosure-based and negatives are historical likely_human proxies, not verified authorship. Disclosure selection and label noise can bias AUC in either direction; no guaranteed lower bound is established. decided_* assume a 50/50 prior and precision against those proxy labels, not the no-history population.",
+  "seed": 20261015,
+  "target_precision": [
+    0.8,
+    0.9
+  ],
+  "text_chars": 6000
+}
