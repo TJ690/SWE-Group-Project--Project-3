@@ -9,11 +9,21 @@ The analysis explores the data and applies simple label rules. Wording features 
 
 ## Team
 
-- Product Owner
+The repository history records contributions from Venkat Repaka
+(`venkatrepaka-umich`), Jayden Cathey (`Jayden-Cathey`), and Terry (`TJ690`).
+Commit counts do not determine Scrum roles or measure the full research contribution.
 
-- Scrum Master
+| Sprint 2 role | Assignment |
+|---|---|
+| Product Owner | Jayden Cathey (`Jayden-Cathey`) |
+| Scrum Master | Not recorded in the repository; team confirmation required |
+| Developer / Researcher | Venkat Repaka (`venkatrepaka-umich`) |
+| Researcher | Terry (`TJ690`) |
 
-- Developers/Researchers
+The [Sprint 2 progress report](docs/sprints/sprint2/progress.md) records completed
+work, and the [retrospective](docs/sprints/sprint2/retrospective.md) records changes
+to the plan. AI-assisted work and its verification are disclosed in the
+[AI-use log](ai-use-log.md).
 
 ## Repository Structure
 

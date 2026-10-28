@@ -1,11 +1,11 @@
 # AI Use Log
 
-This log discloses how the team used AI tools on this project, as the course requires. Each entry says who used which tool, what it was used for, and how the output was checked.
+This log discloses how the team used AI tools on this project, as the course requires. Each entry records the tool, its use, and the available verification. Historical records do not identify the initiating team member for every AI session; a commit author alone does not establish who operated the tool.
 
 The study is about AI involvement in `SKILL.md` files, so two rules apply throughout:
 
 - **No AI labels.** No AI tool assigned a label to any skill in the hand-labelling sheets (spot-check, trailer check, template-pair review). All labels come from people.
-- **Answer keys stay blind.** AI tools were not used to open or summarise the review answer keys (`key.parquet`, `trailer_key.parquet`, `template_review/key.parquet`).
+- **Answer keys stay separate from annotation.** Automated sampling and scoring code uses private answer keys to join submitted answers to pipeline predictions. Keys must not be shown to annotators during independent review or used to generate their answers. This log does not claim that automated tools never accessed a key.
 
 ## Entries
 
@@ -22,14 +22,13 @@ The study is about AI involvement in `SKILL.md` files, so two rules apply throug
 - 437 automated tests run with `python -m pytest -q`.
 - Every output has a manifest recording its inputs, settings and git commit.
 
-*To complete:* list any modules written mainly by hand, and any AI-generated code that was rewritten after review.
+**Attribution limit:** The available record does not establish a complete module-by-module split between handwritten and AI-generated code, or every human rewrite. Tests establish checked behavior, not authorship. No such split is claimed here.
 
 ### Sprint 2 documentation with Claude Code
 
 **Tool:** Claude Code (Claude Opus 5.5)
 
 **What it was used for**
-- Comparing the Sprint 2 plan and the course specification with the repository, and listing the work still pending for Sprints 2 and 3.
 - Drafting `docs/sprints/sprint2/progress.md` and `retrospective.md`. The team then edited the retrospective: the "What was challenging" points and the RQ2 explanation are the team's own wording.
 - Drafting `report/sprint2_report.md` from the existing results tables, `docs/report/FINDINGS.md` and `docs/report/ANNOTATION_REVIEW.md`.
 - Writing `SKILLS_RUNBOOK.md`, a guide to running the pipeline through the agent skills, and adding README links to the new documents.
@@ -45,7 +44,34 @@ The study is about AI involvement in `SKILL.md` files, so two rules apply throug
 
 **Tool:** Claude Code
 
-`reports/GitSkills provenance sprint 2 plan.md` and the notes in `research_notes/GitSkills provenance sprint 2 plan/` collect web research on provenance signals, datasets and the backlog. *To complete:* say whether an AI research tool produced these, and how the cited sources were checked.
+**What it was used for**
+- The existing disclosure attributes the planning work to Claude Code. `reports/GitSkills provenance sprint 2 plan.md` and `research_notes/GitSkills provenance sprint 2 plan/` contain research notes on provenance signals, datasets and the backlog.
+
+**How it was checked**
+- The notes were compared with the local implementation and results during Sprint 2 reviews; planning estimates are not treated as measured findings.
+- The available record does not establish which research or browsing tools produced each note, or that every external citation was independently checked. Related-work citations require source verification before being presented as verified evidence in the final report.
+
+### Sprint 2 implementation and research review with OpenAI Codex
+
+**Tool:** OpenAI Codex.
+
+**Period:** Sprint 2 work recorded in this chat through 2026-10-28.
+
+**What it was used for**
+- Reviewing code, Markdown documentation, saved results and the course assignment against the Sprint 2 requirements.
+- Implementing and testing independent-rater agreement and scoring support, preserving submitted annotations and recording their hashes.
+- Implementing the separate reuse and disclosed-agent-involvement evidence report, without replacing the historical labels or human answers.
+- Separating exact registry recovery from similarity-conditioned evaluation, and building the paired-text review package and its scoring code. Codex did not supply the human pair-review judgments.
+- Revising conclusions, model interpretation notes and figure captions to distinguish proxy-label discrimination, visible disclosure, reuse evidence and unverified authorship.
+- Updating the README team documentation and this AI-use disclosure on 2026-10-28.
+
+**How it was checked**
+- Tests exercised agreement calculations, same-item comparisons, validation of submitted IDs and labels, evidence dimensions, paired-review handling and preservation of existing answers.
+- Original workbook hashes and canonical copies were checked against the recorded preservation hashes during the review.
+- Revised research wording was compared with saved numerical outputs. Tests and interpretation edits do not verify true authorship or replace independent human review.
+- The requirement audit did not execute a fresh end-to-end pipeline rebuild. That verification remains separate from the passing tests.
+
+**Remaining disclosure limits:** This entry records work visible in the current chat. It does not establish complete AI-session history, independently verify earlier tool/model claims, or certify that all generated work has received a separate human review.
 
 ## How to add an entry
 
