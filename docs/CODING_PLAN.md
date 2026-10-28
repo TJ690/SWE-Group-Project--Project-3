@@ -963,6 +963,10 @@ A style value is not proof of AI writing. Readability and word patterns assume E
 
 **Outputs:** `src/data/derived/s2_clusters.parquet`; `src/data/derived/s2_minhash_shards/`.
 
+**Purpose**
+
+Group skill texts with similar wording even when edits give them different file hashes. Exact hashes identify identical contents; approximate similarity helps find lightly edited versions and related texts.
+
 **Data flow**
 
 ```text
@@ -988,18 +992,35 @@ A and C belong to the same group even without a direct link.
 **Processing and algorithm**
 
 1. Remove the header, lower-case the body and collapse repeated spaces. The current one-million-character limit covers the full bodies in this dataset.
-2. Split the words into overlapping groups of five, called **shingles**. For example, six words give two five-word shingles.
-3. Build a **MinHash signature**: 128 numbers that summarize the shingle set. The fraction of matching numbers estimates **Jaccard similarity**: shared shingles divided by all different shingles. For example, 80 shared shingles out of a union of 100 gives 0.8.
-4. Use **locality-sensitive hashing (LSH)** to find candidates. It splits signatures into bands and looks for identical bands, avoiding a comparison of every pair of documents.
-5. Use **union-find** to join candidate links into connected groups. Save groups at settings 0.8 and 0.6, plus signature shards that later steps can reuse.
+2. Split the words into overlapping groups of five, called **shingles**. The text `run the tests before committing changes` produces `run the tests before committing` and `the tests before committing changes`. Small edits change nearby shingles while leaving the rest unchanged.
+3. Build a **MinHash signature**: 128 numbers summarizing the shingle set. The fraction of matching positions estimates **Jaccard similarity**, calculated as `shared shingles / all different shingles`. For example, 120 matching positions out of 128 give an estimated similarity of `0.9375`. The signature summarizes content; it cannot reconstruct the original text.
+4. Use **locality-sensitive hashing (LSH)** to find candidates. Split signatures into bands; an identical band creates a candidate link. Similar texts are more likely to share a band. Run at settings 0.8 (the main setting) and 0.6 (a broader comparison setting).
+5. Use **union-find** to merge connected candidates efficiently. The implementation joins band-match candidates without requiring their estimated similarity to pass a separate cut-off. Similarity scores are recorded but do not filter these merges. Save cluster rows for both settings and reusable signature shards.
 
 **Why this approach**
 
 Comparing every pair of about 1.8 million texts would require about 1.7 trillion comparisons. Compact signatures and candidate search make the task practical. Five-word groups retain local wording while tolerating small edits. Saving shards lets interrupted work resume.
 
+**Where it is used later**
+
+- [Step 5b](#step-5b) reuses signatures to find similar registry versions.
+- [Step 5c](#step-5c) counts identifier rarity across clusters rather than treating related texts as independent occurrences.
+- [Step 6b](#step-6b) uses a cluster of at least ten distinct texts at setting 0.8 as one templated-label signal.
+- [Step 6h](#step-6h) records clusters with at least two members as a separate reuse signal.
+- [Step 6e](#step-6e) and [step 6f](#step-6f) group related texts together during model evaluation, reducing overlap between training and held-out data.
+- [Step 7d](#step-7d) compares label results using the broader 0.6 clusters.
+
 **Output meaning and limits**
 
-A cluster is a connected candidate group. If A links to B and B links to C, all three join even when A and C are less alike. The threshold is an LSH search setting, not a guarantee that every pair in a cluster meets it. `nn_sim_est` is an estimated neighbour score.
+| Field | Meaning |
+| --- | --- |
+| `file_sha` | ID of the distinct text |
+| `cluster_id` | Identifier of its connected group |
+| `cluster_size` | Number of distinct texts in that group; a singleton has size 1 |
+| `threshold` | LSH setting used to form the groups |
+| `nn_sim_est` | Highest estimated similarity among candidate neighbours examined; missing when no neighbour was scored |
+
+Each readable skill has one row per setting. A cluster is a connected candidate group: if A links to B and B links to C, all three join even when A and C are less alike. The threshold is an LSH search setting, not a guarantee that every pair in a cluster meets it. Candidate text similarity does not establish a shared author, copying direction or one common template.
 
 In dev mode, clusters form only within the [step 2 sample](#step-2). Their sizes can be much smaller than in full mode. Signature shards use the same output folder in both modes.
 
@@ -1031,17 +1052,64 @@ Two real signature records from `shard_00000`; only the first four of 128 signat
 
 **Outputs:** `src/data/derived/s2_template.parquet`.
 
+**Purpose**
+
+Find whether each dataset skill has identical or similar content to a selected registry version. [Step 5a](#step-5a) groups dataset texts with each other; this step connects them to specific registry versions.
+
+**Data flow**
+
+```text
+Registry version texts           Dataset signatures
+        |                           from step 5a
+        v                                |
+Build MinHash signatures                 |
+        |                                |
+        v                                |
+Build registry LSH index <---------------+
+        |
+        v
+Find candidates and score similarity
+        |
+        v
+Choose best retrieved registry version
+        |
+        v
+Classify: exact / near / none
+        |
+        v
+s2_template.parquet
+```
+
 **Processing and algorithm**
 
-Build signatures for registry versions with the same settings as [step 5a](#step-5a). Search the registry index at 0.6 to find possible matches. Reuse dataset signatures from the shards. An exact hash match gets `exact`; otherwise the best retrieved candidate gets `near` if estimated Jaccard is at least 0.8. Other rows get `none`.
+1. Read registry version texts from the clones. Build MinHash signatures with the same normalization, five-word shingles, 128 values and seed as [step 5a](#step-5a), so both sets of signatures are comparable.
+2. Build a registry LSH index at search setting 0.6, broader than the final near-match cut-off of 0.8. Read dataset signatures from the saved shards instead of calculating them again.
+3. Record known exact hash matches from [step 3c](#step-3c) as `exact`, with score 1. For other skills, retrieve registry candidates through LSH and select the highest estimated Jaccard score: `matching signature positions / 128`. For example, 120 matching positions give `0.9375`.
+4. Assign `near` when the best retrieved candidate scores at least 0.8; otherwise assign `none`. Keep a below-cut-off candidate and its score when one was retrieved. With no candidate, save missing candidate fields and score zero.
+5. Attach the selected version's lineage. When several registry skills contain the same blob, use the earliest recorded lineage, with the origin assignment from step 3c taking priority when available.
 
 **Why this approach**
 
-Reusing signatures saves time and keeps comparisons consistent. Searching more broadly than the final 0.8 rule helps retrieve candidates near the boundary.
+Exact hashes miss edited copies. MinHash and LSH make approximate matching practical, while saved signatures avoid processing dataset texts again. Searching more broadly than the final 0.8 rule helps retrieve candidates near the boundary. A registry match supplies a specific reference version rather than only a group of similar texts.
+
+**Where it is used later**
+
+- [Step 6b](#step-6b) uses exact and near registry matches as templated-label signals. Known registry-origin representatives are excluded from these two rules.
+- [Step 6h](#step-6h) records registry-match evidence separately from disclosed agent involvement.
+- [Step 7b](#step-7b) checks recovery of exact matches and agreement on near-match candidates.
+- [Step 7d](#step-7d) examines the effect of changing the near-match cut-off. Lowering it cannot add candidates already marked `none` here.
 
 **Output meaning and limits**
 
-The nearest version is the best candidate found by the search, not a guaranteed global nearest neighbour. `none` means no qualifying match was found among the selected registries. It does not establish an original work.
+| Field | Meaning |
+| --- | --- |
+| `file_sha` | Dataset text being checked |
+| `match_kind` | `exact`, `near`, or `none` |
+| `nearest_blob` | Content hash of the selected registry version |
+| `nearest_lineage_id` | Registry skill associated with that version |
+| `est_jaccard` | Estimated similarity score; exact matches receive 1 |
+
+The nearest version is the best candidate retrieved by LSH, not a guaranteed closest match across every registry version. A match does not establish copying direction or original authorship. `none` means no qualifying match was found among the indexed versions, not confirmed originality.
 
 **Saved output examples**
 
@@ -1062,35 +1130,76 @@ The nearest version is the best candidate found by the search, not a guaranteed 
 
 **Outputs:** `src/data/derived/s2_specificity.parquet`.
 
+**Purpose**
+
+Measure how much of a skill's technical detail is uncommon across the dataset. Concrete paths, flags and code names provide more specific detail than general instructions such as “run the tests.”
+
 **Data flow**
 
 ```text
-Body text -> extract distinct identifiers
-                         |
-                         v
-             Count groups using each identifier
-                         ^
-                         |
-             Near-duplicate clusters (step 5a)
-                         |
-                         v
-             Rare if used by fewer than 5 groups
-                         |
-                         v
-             specificity = rare / all identifiers
+Skill text (step 0)           Clusters (step 5a)
+        |                           |
+        v                           |
+Extract distinct identifiers       |
+        |                           |
+        +------------+--------------+
+                     |
+                     v
+       Count groups using each identifier
+                     |
+                     v
+       Rare = appears in fewer than 5 groups
+                     |
+                     v
+       specificity = rare / all identifiers
+                     |
+                     v
+          s2_specificity.parquet
 ```
 
 **Processing and algorithm**
 
-Read up to 50,000 body characters and collect distinct code names, file paths, flags and inline code. Count how many near-duplicate groups use each identifier. An identifier is rare if fewer than five groups use it. Compute `specificity = n_rare / n_identifiers`. With fewer than three identifiers, save a missing score; skills with no identifiers have no row.
+1. Read the first 50,000 characters of each readable, representative skill's content. Remove the YAML header and URLs, then extract identifiers using fixed text patterns.
+
+| Identifier kind | Example |
+| --- | --- |
+| File path | `src/payments/refunds.py` |
+| Filename | `settings.yaml` |
+| Command-line flag | `--retry-limit` |
+| camelCase name | `fetchRefundStatus` |
+| snake_case name | `refund_retry_count` |
+| Inline code | Text inside backticks |
+
+2. Lowercase identifiers and keep distinct values per skill. Repeating one identifier 20 times counts it once.
+3. Join identifiers to the 0.8 clusters from [step 5a](#step-5a). Count distinct groups using each identifier; a skill without a cluster becomes its own group. An identifier is **rare** when fewer than five groups contain it.
+4. Calculate `specificity = n_rare / n_identifiers`. Seven rare identifiers out of ten give a score of `0.7`. Save `NULL` below three identifiers; skills with no identifiers have no output row.
+
+The implementation uses two passes: extract and save identifiers, then count group frequencies and calculate scores. Counting is split into 16 hash buckets to limit memory use. Saved parts allow interrupted work to resume.
 
 **Why this approach**
 
-Identifier rarity measures project detail rather than generic advice. Counting groups instead of copies prevents a widely copied skill from making its own identifiers seem common. Buckets and saved parts keep memory use manageable.
+Identifier rarity separates concrete technical detail from general advice. Counting groups rather than texts reduces the influence of near-copies: an identifier shared by 500 texts in one cluster counts as appearing in one group, not 500. A proportion makes skills with different numbers of identifiers easier to compare.
+
+**Where it is used later**
+
+- [Step 6e](#step-6e) combines specificity with wording and structure in the style-model experiment.
+- [Step 6f](#step-6f) includes it in feature-based logistic regression and gradient boosting.
+- [Step 6g](#step-6g) uses it in the optional no-history scoring experiment.
+
+These models join the table by `file_sha` and use the score, identifier count and a flag showing whether the score is available. The historical v2.1 label rules do not use specificity to choose labels.
 
 **Output meaning and limits**
 
-A high score suggests specific content. It does not establish human authorship: an agent can also read a project. `NULL` means too little evidence for this score.
+| Field | Meaning |
+| --- | --- |
+| `file_sha` | ID of the distinct skill text |
+| `n_identifiers` | Number of distinct extracted identifiers |
+| `n_rare` | Number used by fewer than five groups |
+| `specificity` | Rare identifiers divided by all extracted identifiers; `NULL` below three identifiers |
+
+A higher score means a greater share of uncommon technical details, not higher quality or verified authorship. Invented identifiers can also be rare, and an agent can use real repository details. Text patterns can miss identifiers or include ordinary prose inside backticks.
+
+Identifier frequencies use the full readable population even in development mode; only the scored IDs are restricted. Development clusters are sample-only, so their grouping can still change rarity estimates.
 
 The step reuses saved identifier parts. Leave them in place to resume. For a clean rebuild after input or extraction changes, move `src/data/derived/s2_specificity_identifiers` and `src/data/derived/s2_specificity_buckets_c*` aside, then run with `--force`.
 
@@ -1114,6 +1223,10 @@ The same step also saves resumable identifier and bucket parts under `src/data/d
 **Inputs and source steps:** [`src/data/gitskills_data/data/artifacts/*.parquet`](#step-0); [`src/data/gitskills_data/data/artifact_siblings/*.parquet`](#step-0).
 
 **Outputs:** `src/data/derived/s2_scaffold.parquet`; `results/s2_scaffold_top_outlines.csv`.
+
+**Purpose**
+
+Find shared scaffolds: repeated document structures or boilerplate that remain after names and wording change. [Steps 5a](#step-5a) and [5b](#step-5b) mainly compare text; this step also examines headings, YAML keys, placeholders and bundled-file layouts.
 
 **Data flow**
 
@@ -1141,19 +1254,53 @@ Placeholders   Heading         Masked body      Shared lines
 
 **Processing and algorithm**
 
-Measure unfinished placeholders, heading outlines, ordered header keys, folder layouts, masked bodies and shared lines. Masking replaces changing details such as names, URLs and numbers before comparing bodies. Count spread across different owners.
+Read skill content and the raw bundled-file records from [step 0](#step-0). Extract the following signals:
 
-For similar outlines, use MinHash LSH to find possible heading-set matches, then compare heading order using edit distance: the insertions, removals and replacements needed to turn one outline into another. Attach an outline to the first matching group leader. This avoids joining every outline through long chains. Outlines under four headings remain separate, and very large candidate buckets are skipped.
+| Signal | What it measures |
+| --- | --- |
+| Placeholders | Unfinished markers such as `[TODO …]`, `TBD:` and `your-skill-name`, outside code fences |
+| Generator markers | Recognized phrases from a known skill-creation template |
+| Heading outline | Heading text, levels and order, with the skill name replaced by `<name>` |
+| Front-matter keys | Ordered YAML field names, such as `name`, `description` and `license` |
+| Folder layout | Names of top-level bundled files and folders |
+| Masked body | Body text with changing details, such as names, paths, URLs and numbers, replaced before hashing |
+| Shared lines | Normalized body lines appearing across multiple owners |
 
-Assign the first matching `scaffold_basis`: generator marker, placeholder, masked copy across at least ten owners, at least 60% shared lines with three or more lines, or a shared outline supported by shared header keys or folder layout. A line is shared when at least five owners use it.
+Count spread across distinct owners: the account before `/` in `owner/repository`. Repeated files from one account do not increase the number of owners.
+
+**Outline matching:** MinHash LSH at setting 0.6 retrieves candidates with similar heading sets. Edit distance then measures the heading insertions, removals and replacements needed to turn one sequence into another. Calculate `similarity = 1 - edit distance / longer sequence length`. Leader clustering attaches an outline to the first matching leader at similarity 0.8 or above. Outlines with fewer than four headings remain separate; candidate buckets larger than 5,000 are skipped.
+
+**Shared-line calculation:** keep normalized lines of at least 20 characters. A line is shared when at least five owners use it. Calculate `shared_line_frac = shared eligible lines / eligible lines` and `customization = 1 - shared_line_frac`. Seven shared lines out of ten give values of `0.7` and `0.3`.
+
+**Scaffold decision:** apply these rules in order; the first match becomes `scaffold_basis`.
+
+| Order | Basis | Current condition |
+| --- | --- | --- |
+| 1 | `generator` | A recognized generator marker exists |
+| 2 | `placeholder` | At least one recognized placeholder exists |
+| 3 | `masked_copy` | The masked body is shared by at least ten owners |
+| 4 | `shared_lines` | At least three eligible lines, with at least 60% shared |
+| 5 | `outline` | At least four headings, an outline family spanning five owners, and supporting YAML keys or folder layout shared by at least five owners |
+
+The outline rule excludes configured stoplisted outlines. YAML support must include a key beyond the generic `name` and `description` fields. All measured signals remain in the output even though only one basis is selected.
 
 **Why this approach**
 
 Text-copy methods miss common structures filled with different wording. Several supporting signals are used because common headings alone are weak evidence. Owner counts reduce the effect of one person publishing many variants.
 
+**Where it is used later**
+
+- [Step 6h](#step-6h) records a non-null scaffold basis as a reuse flag, separately from AI disclosure.
+- [Step 7e](#step-7e) checks overlap with existing reuse signals and examines additional scaffold candidates.
+- [Step 8p](#step-8p) uses scaffold signals and saved line hashes to select paired texts for reuse evaluation.
+
+The historical v2.1 label rules do not use scaffold signals to assign labels.
+
 **Output meaning and limits**
 
-A scaffold signal is a candidate for review. Common good practice can also create similar structure. `customization = 1 - shared_line_frac` measures unshared lines, not quality or originality.
+`s2_scaffold.parquet` contains one row per readable distinct skill, with extracted signals, owner counts, shared-line fraction and the selected basis. `s2_scaffold_top_outlines.csv` lists the 200 most common exact outlines. Intermediate signals and line hashes are stored in `src/data/derived/s2_scaffold_parts/`.
+
+`customization` measures unshared-line proportion, not quality or originality. A missing `scaffold_basis` means no rule qualified, not proof that the text has no shared structure. Common headings and layouts can arise independently, so these signals identify candidates rather than prove copying or authorship. Development mode counts sharing only within the sample, which can reduce owner counts and qualifying signals.
 
 **Saved output examples**
 
