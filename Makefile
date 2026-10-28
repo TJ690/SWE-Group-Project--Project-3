@@ -7,7 +7,7 @@ STAGES := data registry features dedup label sample evaluate analyze rq2 export
 setup:
 	test -d .venv || python3 -m venv .venv
 	.venv/bin/python -m pip install --upgrade pip
-	.venv/bin/python -m pip install -e ".[dev]"
+	.venv/bin/python -m pip install -e ".[data,notebook,dev]"
 
 $(STAGES):
 	$(PYTHON) -m skillsig $@ $(ARGS)

@@ -16,7 +16,7 @@ Commit counts do not determine Scrum roles or measure the full research contribu
 | Sprint 2 role | Assignment |
 |---|---|
 | Product Owner | Jayden Cathey (`Jayden-Cathey`) |
-| Scrum Master | Not recorded in the repository; team confirmation required |
+| Scrum Master | Venkat Repaka (`venkatrepaka-umich`) |
 | Developer / Researcher | Venkat Repaka (`venkatrepaka-umich`) |
 | Researcher | Terry (`TJ690`) |
 
@@ -73,10 +73,19 @@ Use Python 3.13. Commands below are run from the repository root.
    ```
    The shell prompt shows `(.venv)` while the environment is active. Leave it with `deactivate`.
 
-3. Install dependencies:
+3. Install the project and its dependencies. Use **either** option; both give the same environment.
+
+   **Option A: from `pyproject.toml`**
+   ```bash
+   pip install -e ".[data,notebook,dev]"
+   ```
+   `-e .` installs the `skillsig` package and its `skillsig` command from this folder; code changes take effect without reinstalling. The groups in brackets add the dataset downloader (`data`), Jupyter and seaborn for the notebooks (`notebook`), and pytest and ruff (`dev`). Leave out any group you don't need; the quotes stop zsh from reading the brackets as a pattern.
+
+   **Option B: from `requirements.txt`**
    ```bash
    pip install -r requirements.txt
    ```
+   This installs everything in Option A, with all three groups. `requirements.txt` reads its list from `pyproject.toml`, so versions are defined in one place.
 
 4. Point Jupyter at this environment before opening notebooks in `src/notebooks/`:
    ```bash
@@ -120,7 +129,7 @@ cd ../..
 The download is large and can take a long time. Re-running the script resumes and skips files that are already complete. Check that `src/data/gitskills_data/data/artifacts/` contains `part-*.parquet` files.
 
 ### 2. Build the generated files
-The EDA notebooks also read four derived Parquet files. Each is built by one SQL script in `db/`. Run these from the repository root. DuckDB is already installed by `requirements.txt`:
+The EDA notebooks also read four derived Parquet files. Each is built by one SQL script in `db/`. Run these from the repository root. DuckDB is already installed by step 3 of the Setup:
 
 ```bash
 mkdir -p src/data/generated_data
