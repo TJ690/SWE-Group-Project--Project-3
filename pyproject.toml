@@ -41,7 +41,7 @@ skillsig = "skillsig.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["skillsig*"]
+include = ["skillsig*", "skill_genealogy*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

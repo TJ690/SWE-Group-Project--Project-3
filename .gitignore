@@ -10,6 +10,9 @@ src/data/generated_data/
 
 # skillsig pipeline: registry clones, stage outputs, API cache, secrets, large exports.
 src/data/registry_repos/
+src/data/wild_history/
+src/data/genealogy/
+src/data/genealogy_100/
 src/data/derived/
 src/data/cache/
 .env
@@ -22,6 +25,9 @@ results/annotation/*/
 __pycache__/
 *.py[cod]
 *.tmp
+
+# Package metadata written by `pip install -e .`, rebuilt on every install.
+*.egg-info/
 # pipeline run logs
 logs/
 *SWE*
