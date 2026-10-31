@@ -135,6 +135,13 @@ SCRIPT_EXTENSIONS: tuple[str, ...] = (
 # Larger scripts compared by sha only. Covers 99.8% of skill-folder scripts (about 3x the
 # 99th percentile, 69 KB); see "Script size limit" in docs/skill_genealogy/ARCHITECTURE_DECISIONS.md.
 MAX_SCRIPT_BYTES = 200_000
+# GIT8: blob ids per `git fetch`. 500 keeps one command line short.
+BLOB_FETCH_BATCH = 500
+# merge_shards writes text rows in groups of this size. One huge copy broke a file before.
+TEXT_ROW_GROUP = 1000
+# No design cap for SKILL.md. This is only the integer passed to read_blob_texts.
+# Git's own blob limit is about 2 GiB.
+SKILL_MD_MAX_BYTES = 2_000_000_000
 # Vendored folders.
 SKIPPED_FOLDERS: tuple[str, ...] = (
     "node_modules/",
