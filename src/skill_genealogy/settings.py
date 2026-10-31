@@ -1,6 +1,6 @@
-"""Paths and thresholds for every skill_genealogy stage.
+"""Paths, thresholds and script-risk patterns for every skill_genealogy stage.
 
-What: folders, file globs, and the numeric limits the stages share.
+What: folders, file globs, numeric limits, and script-risk patterns.
 Inputs: this file's location. The repo root is the nearest folder that
 contains ``pyproject.toml``.
 Outputs: none. ``data_dir`` and ``results_dir`` create their folder when
@@ -145,6 +145,48 @@ SKIPPED_FOLDERS: tuple[str, ...] = (
     "build/",
     ".git/",
 )
+# A16: what a script can do. A match is a capability, not a malware verdict.
+# Lists are the stage 9 examples (G04). Patterns are case-sensitive.
+SCRIPT_RISK_PATTERNS: dict[str, tuple[str, ...]] = {
+    "network": (
+        r"\bcurl\b",
+        r"\bwget\b",
+        r"requests\.",
+        r"fetch\(",
+        r"https?://",
+        r"urllib",
+    ),
+    "runs_commands": (
+        r"subprocess",
+        r"os\.system",
+        r"\beval\(",
+        r"\bexec\(",
+        r"child_process",
+    ),
+    "deletes_files": (
+        r"rm\s+-rf",
+        r"shutil\.rmtree",
+        r"\bunlink\(",
+        r"os\.remove",
+    ),
+    "reads_secrets": (
+        r"\.env\b",
+        r"API_KEY",
+        r"\btoken\b",
+        r"~/\.ssh",
+        r"credentials",
+    ),
+    "installs_packages": (
+        r"\bpip3? install",
+        r"npm (i|install)\b",
+        r"brew install",
+        r"curl[^\n|]*\|\s*(sh|bash)",
+    ),
+    "obfuscated": (
+        r"base64\s+(-d|--decode)",
+        r"[A-Za-z0-9+/]{200,}={0,2}",
+    ),
+}
 
 
 def data_dir(dev: bool) -> Path:

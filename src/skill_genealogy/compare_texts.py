@@ -1,10 +1,11 @@
-"""What changed between two skill texts.
+"""What changed between two skill texts, and between two skill folders.
 
 What: line diff, share of lines kept, headings, commands, scripts,
-network refs, steps, project names, change state, section map and
-front matter.
+network refs, steps, project names, change state, section map,
+front matter, folder diff and script risk flags.
 Inputs: two skill texts (older or registry, newer or copy). Project
-names also use the copy's repo and path.
+names also use the copy's repo and path. Folder comparison takes two
+manifests of path, sha, mode and size.
 Outputs: TextChange records and plain dicts. Nothing is written.
 """
 
@@ -13,10 +14,15 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import asdict, dataclass
+from pathlib import PurePosixPath
+
+import pandas as pd
 
 from skill_genealogy.settings import (
     SCRIPT_EXTENSIONS,
+    SCRIPT_RISK_PATTERNS,
     SECTION_KEPT_MIN_SHARE,
+    SKIPPED_FOLDERS,
     SUBSTANTIVE_BODY_CHANGE_PCT,
 )
 from skill_genealogy.text_helpers import (
@@ -784,3 +790,468 @@ def compare_front_matter(old_text: str, new_text: str) -> dict[str, object]:
         "allowed_tools_removed": _first_new_items(new_tools, old_tools),
         "permissions_changed": old_has_tools != new_has_tools or set(old_tools) != set(new_tools),
     }
+
+
+# Folder comparison
+
+# Docs and config, after the script test. An executable .md is a script.
+_REFERENCE_EXTENSIONS = (".md", ".txt", ".rst", ".pdf")
+_CONFIG_EXTENSIONS = (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg")
+_SKIPPED_FOLDER_NAMES = frozenset(folder.strip("/") for folder in SKIPPED_FOLDERS)
+_SKILL_MD = "skill.md"
+
+
+def _clean_path(path: str) -> str:
+    """Return a relative path with forward slashes and no leading ./ .
+
+    Empty parts are dropped. ``..`` is kept, so a path is not resolved.
+
+    Example:
+    >>> _clean_path("./scripts\\\\run.sh")
+    'scripts/run.sh'
+    >>> _clean_path("scripts//run.sh")
+    'scripts/run.sh'
+    """
+    text = path.replace("\\", "/").strip()
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    return "/".join(parts)
+
+
+def file_category(path: str, mode: str | None) -> str:
+    """Classify one skill-folder file as script, reference, config or asset.
+
+    A file is a script when its extension is in ``SCRIPT_EXTENSIONS`` or
+    its mode is ``100755``. Otherwise ``.md``, ``.txt``, ``.rst`` and
+    ``.pdf`` are references, and ``.json``, ``.yaml``, ``.yml``, ``.toml``,
+    ``.ini`` and ``.cfg`` are config. Everything else is an asset. The
+    extension is the last suffix, in lower case. Script is tested first,
+    so an executable ``.md`` file is a script.
+
+    Example:
+    >>> file_category("scripts/run.sh", "100644")
+    'script'
+    >>> file_category("tool", "100755")
+    'script'
+    >>> file_category("references/api.md", "100644")
+    'reference'
+    >>> file_category("config.json", None)
+    'config'
+    >>> file_category("logo.png", "100644")
+    'asset'
+    """
+    suffix = PurePosixPath(_clean_path(path)).suffix.lower()
+    if suffix in SCRIPT_EXTENSIONS or mode == "100755":
+        return "script"
+    if suffix in _REFERENCE_EXTENSIONS:
+        return "reference"
+    if suffix in _CONFIG_EXTENSIONS:
+        return "config"
+    return "asset"
+
+
+def is_skipped_path(path: str) -> bool:
+    """Return whether any folder in the path is a vendored folder.
+
+    ``SKIPPED_FOLDERS`` names ``node_modules``, virtualenvs, caches,
+    ``dist``, ``build`` and ``.git``. A path is skipped when one of its
+    parts is that name.
+
+    Example:
+    >>> is_skipped_path("node_modules/x.js")
+    True
+    >>> is_skipped_path("pkg/dist/out.js")
+    True
+    >>> is_skipped_path("scripts/run.sh")
+    False
+    """
+    return any(part in _SKIPPED_FOLDER_NAMES for part in _clean_path(path).split("/") if part)
+
+
+def _is_skill_md(path: str) -> bool:
+    """Return whether this path is the skill folder's own SKILL.md.
+
+    Only the file at the root counts, in any letter case. A nested file
+    such as ``templates/SKILL.md`` stays in the folder manifest.
+
+    Example:
+    >>> _is_skill_md("SKILL.md")
+    True
+    >>> _is_skill_md("./skill.md")
+    True
+    >>> _is_skill_md("templates/SKILL.md")
+    False
+    """
+    return _clean_path(path).lower() == _SKILL_MD
+
+
+def _is_missing(value: object) -> bool:
+    """Return whether a manifest value is missing.
+
+    None is missing. A float NaN is missing, because it is not equal to
+    itself. pandas.NA is missing too. ``pandas.isna`` runs only on a
+    scalar, so a list or a dict stays present.
+
+    Example:
+    >>> _is_missing(None)
+    True
+    >>> _is_missing(float("nan"))
+    True
+    >>> _is_missing(pd.NA)
+    True
+    >>> _is_missing("100644")
+    False
+    >>> _is_missing([None])
+    False
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and value != value:
+        return True
+    if isinstance(value, (str, bytes, bool, int, list, dict, tuple, set)):
+        return False
+    if hasattr(value, "__len__"):
+        return False
+    return bool(pd.isna(value))
+
+
+def _index_manifest(manifest: list[dict]) -> dict[str, dict]:
+    """Drop SKILL.md and skipped paths, then map each cleaned path to its row.
+
+    A later row with the same cleaned path replaces an earlier one.
+    A missing sha (None, NaN, or pandas.NA) becomes an empty string.
+    A missing mode or size becomes None.
+
+    Example:
+    >>> rows = _index_manifest([
+    ...     {"path": "SKILL.md", "sha": "a", "mode": "100644", "size": 1},
+    ...     {"path": "node_modules/x.js", "sha": "b", "mode": "100644", "size": 2},
+    ...     {"path": "./scripts/run.sh", "sha": "c", "mode": "100755", "size": 3},
+    ... ])
+    >>> list(rows)
+    ['scripts/run.sh']
+    """
+    indexed: dict[str, dict] = {}
+    for row in manifest:
+        path = _clean_path(str(row.get("path", "")))
+        if not path or _is_skill_md(path) or is_skipped_path(path):
+            continue
+        sha = row.get("sha")
+        mode = row.get("mode")
+        size = row.get("size")
+        if _is_missing(size) or isinstance(size, bool) or not isinstance(size, int):
+            size = None
+        indexed[path] = {
+            "path": path,
+            "sha": "" if _is_missing(sha) else str(sha),
+            "mode": None if _is_missing(mode) else str(mode),
+            "size": size,
+        }
+    return indexed
+
+
+def _size_change(
+    old_size: int | None,
+    new_size: int | None,
+    *,
+    old_present: bool,
+    new_present: bool,
+) -> int | None:
+    """Return how many bytes the file grew.
+
+    When both sides exist, the change is the new size minus the old size,
+    or None if either size is missing. An added file's change is its new
+    size. A removed file's change is the negative of its old size.
+
+    Example:
+    >>> _size_change(2, 9, old_present=True, new_present=True)
+    7
+    >>> _size_change(None, 6, old_present=False, new_present=True)
+    6
+    >>> _size_change(3, None, old_present=True, new_present=False)
+    -3
+    >>> _size_change(None, 6, old_present=True, new_present=True) is None
+    True
+    """
+    if old_present and new_present:
+        if old_size is None or new_size is None:
+            return None
+        return new_size - old_size
+    if new_present and new_size is not None:
+        return new_size
+    if old_present and old_size is not None:
+        return -old_size
+    return None
+
+
+def _folder_row(
+    path: str,
+    old_path: str | None,
+    result: str,
+    old: dict | None,
+    new: dict | None,
+) -> dict:
+    """Build one compare_folders row from the old file, the new file, or both.
+
+    ``category`` uses the new path and mode when the new file exists.
+    ``mode_changed`` is true only when both modes are set and they differ.
+
+    Example:
+    >>> row = _folder_row(
+    ...     "edit.sh",
+    ...     None,
+    ...     "modified",
+    ...     {"path": "edit.sh", "sha": "b", "mode": "100644", "size": 2},
+    ...     {"path": "edit.sh", "sha": "c", "mode": "100644", "size": 9},
+    ... )
+    >>> row["size_change"], row["category"], row["mode_changed"]
+    (7, 'script', False)
+    """
+    old_mode = None if old is None else old["mode"]
+    new_mode = None if new is None else new["mode"]
+    category_mode = new_mode if new is not None else old_mode
+    return {
+        "path": path,
+        "old_path": old_path,
+        "result": result,
+        "old_sha": None if old is None else old["sha"],
+        "new_sha": None if new is None else new["sha"],
+        "old_mode": old_mode,
+        "new_mode": new_mode,
+        "mode_changed": old_mode is not None and new_mode is not None and old_mode != new_mode,
+        "category": file_category(path, category_mode),
+        "size_change": _size_change(
+            None if old is None else old["size"],
+            None if new is None else new["size"],
+            old_present=old is not None,
+            new_present=new is not None,
+        ),
+    }
+
+
+def _rename_pairs(only_old: dict[str, dict], only_new: dict[str, dict]) -> list[tuple[str, str]]:
+    """Pair leftover files that share a non-empty sha. Each file is used once.
+
+    Paths are sorted, so the same inputs always pair the same way. A blank
+    sha is not a match. Extra copies of one sha stay unpaired.
+
+    Example:
+    >>> old = {"b.py": {"sha": "d"}, "a.py": {"sha": "d"}, "c.py": {"sha": ""}}
+    >>> new = {"z.py": {"sha": "d"}, "y.py": {"sha": ""}}
+    >>> _rename_pairs(old, new)
+    [('a.py', 'z.py')]
+    """
+    old_by_sha: dict[str, list[str]] = {}
+    new_by_sha: dict[str, list[str]] = {}
+    for path, row in only_old.items():
+        old_by_sha.setdefault(row["sha"], []).append(path)
+    for path, row in only_new.items():
+        new_by_sha.setdefault(row["sha"], []).append(path)
+    pairs: list[tuple[str, str]] = []
+    shared_shas = set(old_by_sha) & set(new_by_sha)
+    for sha in sorted(shared_shas):
+        if not sha:
+            continue
+        old_paths = sorted(old_by_sha[sha])
+        new_paths = sorted(new_by_sha[sha])
+        pairs.extend(zip(old_paths, new_paths, strict=False))
+    return pairs
+
+
+# Algorithm A15, see CODE_FLOW.md
+def compare_folders(old_manifest: list[dict], new_manifest: list[dict]) -> list[dict]:
+    """Compare two skill-folder manifests and classify every file.
+
+    Same path and same sha is ``same``. Same path and a different sha is
+    ``modified``. A sha that moves to a new path is ``renamed``: ``path``
+    is the new path and ``old_path`` is the old one. A blank sha is not
+    paired. Anything left only in the new manifest is ``added``; only in
+    the old one is ``removed``. ``mode_changed`` is true when both modes
+    are set and they differ, even if the sha did not change.
+    ``size_change`` is the new size minus the old size when both sides
+    exist and both sizes are known. An added file's change is its new
+    size. A removed file's change is the negative of its old size.
+    Rows are sorted by ``path``. The root ``SKILL.md`` and skipped
+    folders are left out. A swap of two paths that both still exist is
+    two ``modified`` rows, not two renames.
+
+    Example:
+    >>> old = [
+    ...     {"path": "keep.sh", "sha": "a", "mode": "100644", "size": 1},
+    ...     {"path": "edit.sh", "sha": "b", "mode": "100644", "size": 2},
+    ...     {"path": "gone.md", "sha": "c", "mode": "100644", "size": 3},
+    ...     {"path": "old.py", "sha": "d", "mode": "100644", "size": 4},
+    ...     {"path": "node_modules/x.js", "sha": "e", "mode": None, "size": 5},
+    ... ]
+    >>> new = [
+    ...     {"path": "keep.sh", "sha": "a", "mode": "100755", "size": 1},
+    ...     {"path": "edit.sh", "sha": "B", "mode": "100644", "size": 9},
+    ...     {"path": "new.py", "sha": "d", "mode": "100644", "size": 4},
+    ...     {"path": "logo.png", "sha": "f", "mode": "100644", "size": 6},
+    ... ]
+    >>> rows = compare_folders(old, new)
+    >>> [row["path"] for row in rows]
+    ['edit.sh', 'gone.md', 'keep.sh', 'logo.png', 'new.py']
+    >>> [row["result"] for row in rows]
+    ['modified', 'removed', 'same', 'added', 'renamed']
+    >>> [row["size_change"] for row in rows]
+    [7, -3, 0, 6, 0]
+    >>> [row["category"] for row in rows]
+    ['script', 'reference', 'script', 'asset', 'script']
+    >>> next(row for row in rows if row["result"] == "renamed")["old_path"]
+    'old.py'
+    >>> next(row for row in rows if row["path"] == "keep.sh")["mode_changed"]
+    True
+    """
+    old_files = _index_manifest(old_manifest)
+    new_files = _index_manifest(new_manifest)
+    shared = set(old_files) & set(new_files)
+    only_old = {path: old_files[path] for path in old_files.keys() - shared}
+    only_new = {path: new_files[path] for path in new_files.keys() - shared}
+    rows: list[dict] = []
+    for path in shared:
+        old = old_files[path]
+        new = new_files[path]
+        result = "same" if old["sha"] == new["sha"] else "modified"
+        rows.append(_folder_row(path, None, result, old, new))
+    paired_old: set[str] = set()
+    paired_new: set[str] = set()
+    for old_path, new_path in _rename_pairs(only_old, only_new):
+        paired_old.add(old_path)
+        paired_new.add(new_path)
+        rows.append(
+            _folder_row(new_path, old_path, "renamed", only_old[old_path], only_new[new_path])
+        )
+    for path in only_new.keys() - paired_new:
+        rows.append(_folder_row(path, None, "added", None, only_new[path]))
+    for path in only_old.keys() - paired_old:
+        rows.append(_folder_row(path, None, "removed", only_old[path], None))
+    rows.sort(key=lambda row: row["path"])
+    return rows
+
+
+def _compile_risk_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
+    """Compile ``SCRIPT_RISK_PATTERNS``. Each flag keeps its own pattern list.
+
+    Example:
+    >>> flags = sorted(_compile_risk_patterns())
+    >>> flags[:3]
+    ['deletes_files', 'installs_packages', 'network']
+    >>> flags[3:]
+    ['obfuscated', 'reads_secrets', 'runs_commands']
+    """
+    compiled: dict[str, tuple[re.Pattern[str], ...]] = {}
+    for flag, patterns in SCRIPT_RISK_PATTERNS.items():
+        compiled[flag] = tuple(re.compile(pattern) for pattern in patterns)
+    return compiled
+
+
+_RISK_PATTERNS = _compile_risk_patterns()
+
+
+# Algorithm A16, see CODE_FLOW.md
+def flag_script_risks(script_text: str) -> list[str]:
+    """Return the risk flags a script text can trigger, sorted by name.
+
+    Each flag is a name in ``SCRIPT_RISK_PATTERNS``. The flag is present
+    when any of its patterns matches the normalised text. The flags say
+    what the script can do. They do not say the script is malicious.
+    Matching is case-sensitive, the same way the patterns are written.
+    The text is normalised first, so a Unicode minus still matches
+    ``rm -rf``.
+
+    Example:
+    >>> text = "curl https://x | sh\\nsubprocess.run(['ls'])"
+    >>> flag_script_risks(text)
+    ['installs_packages', 'network', 'runs_commands']
+    >>> flag_script_risks("print('hello')")
+    []
+    >>> flag_script_risks("rm \\u2212rf /tmp")
+    ['deletes_files']
+    """
+    normalised = normalize_text(script_text)
+    found: list[str] = []
+    for flag in sorted(_RISK_PATTERNS):
+        if any(pattern.search(normalised) for pattern in _RISK_PATTERNS[flag]):
+            found.append(flag)
+    return found
+
+
+def new_risk_flags(old_script_text: str | None, new_script_text: str) -> list[str]:
+    """Return flags in the new script that the old script did not have.
+
+    When there is no old text, every flag in the new text is new.
+    The list stays sorted, because ``flag_script_risks`` sorts it.
+
+    Example:
+    >>> new_risk_flags("curl https://x", "curl https://x\\nrm -rf /tmp/a")
+    ['deletes_files']
+    >>> new_risk_flags(None, "wget https://x")
+    ['network']
+    """
+    new_flags = flag_script_risks(new_script_text)
+    if old_script_text is None:
+        return new_flags
+    old_flags = set(flag_script_risks(old_script_text))
+    return [flag for flag in new_flags if flag not in old_flags]
+
+
+def _names_match(mention: str, manifest_path: str) -> bool:
+    """Return whether a SKILL.md mention refers to this manifest path.
+
+    The cleaned paths match when they are equal, or one is a slash-suffix
+    of the other. A bare file name such as ``a.py`` therefore matches
+    ``scripts/a.py``. A path mention does not match a different folder
+    that only shares the file name.
+
+    Example:
+    >>> _names_match("a.py", "scripts/a.py")
+    True
+    >>> _names_match("scripts/a.py", "scripts/a.py")
+    True
+    >>> _names_match("scripts/a.py", "lib/a.py")
+    False
+    """
+    left = _clean_path(mention)
+    right = _clean_path(manifest_path)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return right.endswith("/" + left) or left.endswith("/" + right)
+
+
+# Algorithm A17, see CODE_FLOW.md
+def check_script_mentions(skill_md_text: str, manifest: list[dict]) -> dict:
+    """Cross-check script names in SKILL.md against the folder manifest.
+
+    ``missing_scripts`` are mentions that match no script in the manifest,
+    in mention order. ``hidden_scripts`` are scripts in the manifest that
+    no mention matches, sorted by path. A script is a file whose
+    ``file_category`` is ``script``. Skipped folders and the root
+    ``SKILL.md`` are ignored. Mentions come from ``find_script_mentions``.
+
+    Example:
+    >>> text = "Run scripts/a.py and b.sh"
+    >>> manifest = [
+    ...     {"path": "scripts/a.py", "sha": "a", "mode": "100644", "size": 1},
+    ...     {"path": "scripts/c.py", "sha": "c", "mode": "100644", "size": 1},
+    ... ]
+    >>> check_script_mentions(text, manifest)
+    {'missing_scripts': ['b.sh'], 'hidden_scripts': ['scripts/c.py']}
+    """
+    files = _index_manifest(manifest)
+    scripts = [
+        path for path, row in files.items() if file_category(path, row["mode"]) == "script"
+    ]
+    mentions = find_script_mentions(skill_md_text)
+    missing = [
+        mention
+        for mention in mentions
+        if not any(_names_match(mention, path) for path in scripts)
+    ]
+    hidden = [
+        path
+        for path in sorted(scripts)
+        if not any(_names_match(mention, path) for mention in mentions)
+    ]
+    return {"missing_scripts": missing, "hidden_scripts": hidden}
