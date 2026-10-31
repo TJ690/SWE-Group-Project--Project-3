@@ -1,0 +1,306 @@
+{
+  "run_date": "2026-10-31T13:54:33.519865+00:00",
+  "checks": [
+    {
+      "name": "artifacts",
+      "status": "PASS",
+      "numbers": {
+        "files": 31
+      },
+      "message": "found 31 files"
+    },
+    {
+      "name": "repos",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found 1 file"
+    },
+    {
+      "name": "mining_runs",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found 1 file"
+    },
+    {
+      "name": "artifact_siblings",
+      "status": "PASS",
+      "numbers": {
+        "files": 45
+      },
+      "message": "found 45 files"
+    },
+    {
+      "name": "wild_history_versions",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found versions.parquet"
+    },
+    {
+      "name": "wild_history_blobs",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found blobs.parquet"
+    },
+    {
+      "name": "wild_history_repo_status",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found repo_status.parquet"
+    },
+    {
+      "name": "minhash_plan",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found plan.json"
+    },
+    {
+      "name": "minhash_shard_ids",
+      "status": "PASS",
+      "numbers": {
+        "files": 37
+      },
+      "message": "found 37 shard id files"
+    },
+    {
+      "name": "minhash_signatures",
+      "status": "PASS",
+      "numbers": {
+        "files": 37
+      },
+      "message": "found 37 signature files"
+    },
+    {
+      "name": "clusters",
+      "status": "PASS",
+      "numbers": {
+        "files": 1
+      },
+      "message": "found s2_clusters.parquet"
+    },
+    {
+      "name": "artifacts_columns",
+      "status": "PASS",
+      "numbers": {
+        "columns": 30
+      },
+      "message": "all required columns are present"
+    },
+    {
+      "name": "repos_columns",
+      "status": "PASS",
+      "numbers": {
+        "columns": 11
+      },
+      "message": "all required columns are present"
+    },
+    {
+      "name": "artifact_siblings_columns",
+      "status": "PASS",
+      "numbers": {
+        "columns": 9
+      },
+      "message": "all required columns are present"
+    },
+    {
+      "name": "wild_history_versions_columns",
+      "status": "PASS",
+      "numbers": {
+        "rows": 451043,
+        "columns": [
+          "repo",
+          "target_path",
+          "path_at_commit",
+          "file_sha",
+          "commit",
+          "commit_at",
+          "author_key",
+          "subject",
+          "status",
+          "blob",
+          "commit_seq",
+          "version_seq",
+          "is_dataset_version",
+          "post_snapshot",
+          "ai_tools_ext",
+          "has_ai_trailer"
+        ]
+      },
+      "message": "columns: repo, target_path, path_at_commit, file_sha, commit, commit_at, author_key, subject, status, blob, commit_seq, version_seq, is_dataset_version, post_snapshot, ai_tools_ext, has_ai_trailer"
+    },
+    {
+      "name": "artifact_counts_and_nulls",
+      "status": "WARN",
+      "numbers": {
+        "artifact_rows": 3797117,
+        "distinct_file_sha": 1877981,
+        "distinct_repos": 282200,
+        "null_file_sha_share": 0.0,
+        "null_content_share": 0.504801,
+        "null_first_commit_at_share": 0.879238,
+        "content_sha_ok_share": 0.488128,
+        "file_sha_without_content": 0,
+        "file_sha_with_first_commit_at": 458323
+      },
+      "message": "null share above 1% for content, first_commit_at"
+    },
+    {
+      "name": "repo_counts_and_nulls",
+      "status": "PASS",
+      "numbers": {
+        "repo_rows": 282200,
+        "distinct_repos": 282200,
+        "null_stars_share": 0.001825
+      },
+      "message": "null share of stars is at or below 1%"
+    },
+    {
+      "name": "date_ranges",
+      "status": "PASS",
+      "numbers": {
+        "today_utc": "2026-10-31",
+        "capture_start": "2026-07-09T17:26:45.768703",
+        "capture_end": "2026-07-20T22:26:56.553671",
+        "first_commit_min": "2014-06-30T09:10:04",
+        "first_commit_max": "2026-07-23T18:01:48",
+        "last_commit_min": "2000-01-01T00:00:00",
+        "last_commit_max": "2026-07-23T21:24:27",
+        "commits_after_today": 0,
+        "runs_after_today": 0,
+        "unparsed_dates": 0
+      },
+      "message": "dates are on or before 2026-10-31"
+    },
+    {
+      "name": "artifacts_repos_join",
+      "status": "PASS",
+      "numbers": {
+        "found": 282200,
+        "total": 282200,
+        "share": 1.0
+      },
+      "message": "artifact repos coverage is at least 99%"
+    },
+    {
+      "name": "wild_history_join",
+      "status": "PASS",
+      "numbers": {
+        "found": 26164,
+        "total": 26164,
+        "share": 1.0
+      },
+      "message": "wild_history paths coverage is at least 99%"
+    },
+    {
+      "name": "minhash_id_join",
+      "status": "PASS",
+      "numbers": {
+        "found": 1840872,
+        "total": 1840872,
+        "share": 1.0,
+        "id_char_min": 40,
+        "id_char_max": 40
+      },
+      "message": "minhash ids coverage is at least 99%"
+    },
+    {
+      "name": "cluster_id_join",
+      "status": "PASS",
+      "numbers": {
+        "found": 1840872,
+        "total": 1840872,
+        "share": 1.0
+      },
+      "message": "cluster ids coverage is at least 99%"
+    },
+    {
+      "name": "minhash_settings",
+      "status": "PASS",
+      "numbers": {
+        "body_max_chars": 1000000,
+        "chunk_rows": 50000,
+        "dev": false,
+        "input_stamp": {
+          "length": 31
+        },
+        "limit": null,
+        "num_perm": 128,
+        "sample_fraction": null,
+        "seed": 20261015,
+        "shingle_words": 5,
+        "signature_file": "shard_00000.npy",
+        "signature_dtype": "uint32",
+        "signature_rows": 50000,
+        "signature_columns": 128,
+        "seed_matches": true
+      },
+      "message": "num_perm and shingle_words match settings"
+    },
+    {
+      "name": "registry_rule_preview",
+      "status": "PASS",
+      "numbers": {
+        "repos": 3968,
+        "skills": 176526,
+        "files": 228579,
+        "min_stars": 100,
+        "min_skills": 5
+      },
+      "message": "registry rule before the English filter"
+    },
+    {
+      "name": "non_english_share",
+      "status": "PASS",
+      "numbers": {
+        "sampled": 5000,
+        "requested_sample_size": 5000,
+        "seed": 20261015,
+        "non_english_share": 0.1344,
+        "english_share": 0.8602,
+        "unknown_share": 0.0054,
+        "share_by_language": {
+          "en": 0.8602,
+          "zh": 0.058,
+          "ja": 0.017,
+          "de": 0.0158,
+          "ko": 0.0116,
+          "pt": 0.0098,
+          "es": 0.0074,
+          "unknown": 0.0054,
+          "fr": 0.0046,
+          "ru": 0.0028,
+          "tr": 0.002,
+          "vi": 0.0016,
+          "ar": 0.0014,
+          "nl": 0.001,
+          "it": 0.0008,
+          "id": 0.0006
+        }
+      },
+      "message": "unknown counts as English; non_english_share is what the filter drops"
+    },
+    {
+      "name": "copy_download_size",
+      "status": "PASS",
+      "numbers": {
+        "copy_files": 806418,
+        "copy_paths": 806418,
+        "copy_repos": 38762,
+        "paths_with_wild_history": 194,
+        "repos_to_clone": 38754
+      },
+      "message": "exact file_sha copies only; near copies are not included"
+    }
+  ]
+}
