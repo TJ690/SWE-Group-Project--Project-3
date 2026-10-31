@@ -109,6 +109,8 @@ MIN_VERIFIED_LINE_SHARE = 0.50
 BOILERPLATE_MIN_OWNERS = 50
 # Same as rq2.substantive_body_change_pct.
 SUBSTANTIVE_BODY_CHANGE_PCT = 5
+# A13: a registry section is "kept" at or above this share of unchanged lines. 0 means removed.
+SECTION_KEPT_MIN_SHARE = 0.9
 # Same as rq2.grace_days.
 STALE_AFTER_DAYS = 30
 # Parent search cap.
