@@ -58,6 +58,10 @@ MIN_REGISTRY_ENGLISH_SKILLS = 5
 HUB_MIN_SHARE = 0.25
 # Smaller repos are never hubs.
 HUB_TEST_MIN_SKILLS = 5
+# A hub also needs at least this many dated texts. One dated text is not enough.
+HUB_MIN_DATED_SKILLS = 5
+# Report when missing commit dates cover more than this share of registry texts.
+NULL_DATE_REPORT_ABOVE = 0.10
 # Dev sample size in registries.
 DEV_REGISTRY_COUNT = 30
 # Dev sample keeps at least this many hubs.
@@ -133,7 +137,7 @@ SCRIPT_EXTENSIONS: tuple[str, ...] = (
     ".rb",
 )
 # Larger scripts compared by sha only. Covers 99.8% of skill-folder scripts (about 3x the
-# 99th percentile, 69 KB); see "Script size limit" in docs/skill_genealogy/ARCHITECTURE_DECISIONS.md.
+# 99th percentile, 69 KB). See "Script size limit" in ARCHITECTURE_DECISIONS.md.
 MAX_SCRIPT_BYTES = 200_000
 # GIT8: blob ids per `git fetch`. 500 keeps one command line short.
 BLOB_FETCH_BATCH = 500

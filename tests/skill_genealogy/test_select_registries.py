@@ -1,4 +1,4 @@
-"""Tests for stage 2 step 1, language labels.
+"""Tests for stage 2: language labels, the registry rule, the hub test and roles.
 
 Tiny frames and parquet files. No full dataset. The pool test labels two texts.
 """
@@ -13,13 +13,19 @@ import pytest
 import skill_genealogy.settings as settings
 from skill_genealogy.file_helpers import connect_duckdb
 from skill_genealogy.select_registries import (
+    _register_language,
     _should_write_sample,
+    assign_repo_roles,
+    compute_hub_shares,
+    count_english_skills_per_repo,
     draw_language_check_sample,
     label_all_skill_languages,
     label_languages,
+    pick_dev_registries,
     read_distinct_texts_in_chunks,
     read_inputs,
     score_language_check,
+    select_registry_repos,
     summarize_languages,
 )
 from skill_genealogy.text_helpers import normalize_text, split_front_matter
@@ -28,10 +34,7 @@ ENGLISH = (
     "This skill tells you how to use the tool when you need it. "
     "Follow the steps in order and check the result."
 )
-CHINESE = (
-    "这是一个中文技能，用来检查文件并写出简短报告。\n"
-    "它说明每个步骤，并且不使用英文句子。"
-)
+CHINESE = "这是一个中文技能，用来检查文件并写出简短报告。\n它说明每个步骤，并且不使用英文句子。"
 GERMAN = (
     "Dieser Absatz beschreibt eine deutsche Fertigkeit zum Prüfen von Dateien.\n"
     "Er bleibt durchgehend auf Deutsch und nennt keine englischen Befehle."
@@ -276,3 +279,243 @@ def test_read_inputs_names_the_builder(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(settings, "ARTIFACTS_GLOB", str(tmp_path / "missing" / "*.parquet"))
     with pytest.raises(FileNotFoundError, match="download_data.py"):
         read_inputs(connect_duckdb())
+
+
+def test_missing_language_file_names_the_rebuild_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Steps 2–6 stop and name ``--force-languages`` when the label file is missing."""
+    monkeypatch.setattr(settings, "REPO_ROOT", tmp_path)
+    with pytest.raises(FileNotFoundError, match="--force-languages"):
+        _register_language(connect_duckdb())
+
+
+def _hub_fixture() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Three repos. B has four dated texts, two of them older in A, plus one undated text.
+
+    t4 has the same time in B and C. A non-English text is older in Z and must be ignored.
+    """
+    artifacts = pd.DataFrame(
+        {
+            "repo_full_name": [
+                "A",
+                "B",
+                "A",
+                "B",
+                "B",
+                "C",
+                "B",
+                "C",
+                "B",
+                "Z",
+                "B",
+            ],
+            "file_sha": [
+                "t1",
+                "t1",
+                "t2",
+                "t2",
+                "t3",
+                "t3",
+                "t4",
+                "t4",
+                "t_null",
+                "t_zh",
+                "t_zh",
+            ],
+            "first_commit_at": [
+                "2020-01-01",
+                "2020-06-01",
+                "2020-02-01",
+                "2020-07-01",
+                "2020-03-01",
+                "2020-08-01",
+                "2020-04-01",
+                "2020-04-01",
+                None,
+                "2019-01-01",
+                "2021-01-01",
+            ],
+        }
+    )
+    labels = pd.DataFrame(
+        {
+            "file_sha": ["t1", "t2", "t3", "t4", "t_null", "t_zh"],
+            "is_english": [True, True, True, True, True, False],
+        }
+    )
+    return artifacts, labels
+
+
+def test_hub_share_for_texts_first_seen_in_an_older_repo() -> None:
+    """B's four dated texts include two that are older in A, so the share is 0.5.
+
+    The undated text is left out. The non-English text is left out. A is 0.
+    The default cutoff keeps B (five English texts) and drops A and C.
+    """
+    artifacts, labels = _hub_fixture()
+    con = connect_duckdb()
+    con.register("artifacts", artifacts)
+    con.register("skill_language", labels)
+    named = compute_hub_shares(con, repos=["A", "B", "C"]).set_index("repo")
+    default = compute_hub_shares(con).set_index("repo")
+    con.close()
+    assert int(named.loc["B", "skills_tested"]) == 4
+    assert int(named.loc["B", "first_seen_elsewhere"]) == 2
+    assert float(named.loc["B", "hub_share"]) == 0.5
+    assert float(named.loc["A", "hub_share"]) == 0.0
+    assert int(named.loc["C", "first_seen_elsewhere"]) == 1
+    assert bool(named.loc["B", "hub_share"] >= settings.HUB_MIN_SHARE) is True
+    assert list(default.index) == ["B"]
+    assert int(default.loc["B", "skills_tested"]) == 4
+
+
+def test_tie_on_earliest_date_is_not_elsewhere() -> None:
+    """The same earliest time is not elsewhere for either tied repo.
+
+    The smaller name is the recorded winner, and the later repo C still counts.
+    """
+    artifacts = pd.DataFrame(
+        {
+            "repo_full_name": ["B", "A", "C"],
+            "file_sha": ["t", "t", "t"],
+            "first_commit_at": ["2020-05-01", "2020-05-01", "2020-06-01"],
+        }
+    )
+    labels = pd.DataFrame({"file_sha": ["t"], "is_english": [True]})
+    con = connect_duckdb()
+    con.register("artifacts", artifacts)
+    con.register("skill_language", labels)
+    shares = compute_hub_shares(con, repos=["A", "B", "C"]).set_index("repo")
+    con.close()
+    assert int(shares.loc["A", "first_seen_elsewhere"]) == 0
+    assert int(shares.loc["B", "first_seen_elsewhere"]) == 0
+    assert int(shares.loc["C", "first_seen_elsewhere"]) == 1
+    assert float(shares.loc["A", "hub_share"]) == 0.0
+    assert float(shares.loc["B", "hub_share"]) == 0.0
+
+
+def test_repo_roles_for_hub_registry_and_fork() -> None:
+    """A 50-star hub stays a hub. A 200-star non-hub is a registry. A fork is not."""
+    skills = pd.DataFrame(
+        {
+            "repo": ["a/hub", "b/reg", "c/fork", "d/tiny", "e/both"],
+            "owner": ["a", "b", "c", "d", "e"],
+            "stars": [50, 200, 1000, 500, 150],
+            "is_fork": [0, 0, 1, 0, 0],
+            "english_skills": [10, 10, 20, 1, 8],
+            "files": [10, 12, 20, 1, 8],
+        }
+    )
+    hubs = pd.DataFrame(
+        {
+            "repo": ["a/hub", "b/reg", "c/fork", "e/both"],
+            "skills_tested": [10, 10, 20, 8],
+            "first_seen_elsewhere": [5, 0, 0, 2],
+            "hub_share": [0.5, 0.0, 0.0, 0.25],
+        }
+    )
+    roles = assign_repo_roles(skills, hubs).set_index("repo")
+    assert roles.loc["a/hub", "repo_role"] == "hub"
+    assert bool(roles.loc["a/hub", "is_hub"]) is True
+    assert bool(roles.loc["a/hub", "is_registry"]) is False
+    assert roles.loc["b/reg", "repo_role"] == "registry"
+    assert roles.loc["c/fork", "repo_role"] == "repository"
+    assert roles.loc["d/tiny", "repo_role"] == "repository"
+    assert roles.loc["e/both", "repo_role"] == "registry_hub"
+    assert bool(roles.loc["a/hub", "hub_tested"]) is True
+    assert bool(roles.loc["e/both", "hub_tested"]) is True
+    chosen = select_registry_repos(skills)
+    assert list(chosen["repo"]) == ["b/reg", "e/both"]
+
+
+def test_one_dated_text_is_not_a_hub() -> None:
+    """A share of 1.0 on one dated text stays a repository. The share is kept."""
+    skills = pd.DataFrame(
+        {
+            "repo": ["thin/one"],
+            "owner": ["thin"],
+            "stars": [50],
+            "is_fork": [0],
+            "english_skills": [10],
+            "files": [10],
+        }
+    )
+    hubs = pd.DataFrame(
+        {
+            "repo": ["thin/one"],
+            "skills_tested": [1],
+            "first_seen_elsewhere": [1],
+            "hub_share": [1.0],
+        }
+    )
+    roles = assign_repo_roles(skills, hubs).iloc[0]
+    assert float(roles["hub_share"]) == 1.0
+    assert bool(roles["is_hub"]) is False
+    assert bool(roles["hub_tested"]) is False
+    assert roles["repo_role"] != "hub"
+    assert roles["repo_role"] == "repository"
+
+
+def test_pick_dev_registries_is_stable_and_keeps_hubs() -> None:
+    """Thirty rows, ten in each size group, at least three hubs, same rows on two draws.
+
+    A frame with no hubs still returns thirty rows and does not invent hubs.
+    """
+    rows = [
+        {
+            "repo": f"owner/r{index:03d}",
+            "english_skills": index + 1,
+            "is_hub": index in {5, 40, 80},
+        }
+        for index in range(90)
+    ]
+    frame = pd.DataFrame(rows)
+    first = pick_dev_registries(frame, count=30, min_hubs=3, seed=settings.RANDOM_SEED)
+    second = pick_dev_registries(frame, count=30, min_hubs=3, seed=settings.RANDOM_SEED)
+    assert len(first) == 30
+    assert int(first["is_hub"].sum()) >= 3
+    assert first.equals(second)
+    assert first["size_group"].value_counts().to_dict() == {
+        "small": 10,
+        "medium": 10,
+        "large": 10,
+    }
+    hubs = set(first.loc[first["is_hub"], "repo"])
+    assert hubs == {"owner/r005", "owner/r040", "owner/r080"}
+    plain = frame.copy()
+    plain["is_hub"] = False
+    none = pick_dev_registries(plain, count=30, min_hubs=3, seed=settings.RANDOM_SEED)
+    assert len(none) == 30
+    assert int(none["is_hub"].sum()) == 0
+
+
+def test_count_english_skills_keeps_empty_repos() -> None:
+    """English texts are distinct shas. A repo with only a non-English text counts as zero."""
+    artifacts = pd.DataFrame(
+        {
+            "repo_full_name": ["acme/a", "acme/a", "acme/b"],
+            "file_sha": ["en", "en", "zh"],
+            "first_commit_at": ["2020-01-01", "2020-01-01", "2020-01-01"],
+        }
+    )
+    labels = pd.DataFrame({"file_sha": ["en", "zh"], "is_english": [True, False]})
+    repos = pd.DataFrame(
+        {
+            "full_name": ["acme/a", "acme/b", "acme/c"],
+            "owner": ["acme", "acme", "acme"],
+            "stars": [10, 20, 30],
+            "is_fork": [0, 0, 1],
+        }
+    )
+    con = connect_duckdb()
+    con.register("artifacts", artifacts)
+    con.register("skill_language", labels)
+    con.register("repos", repos)
+    counted = count_english_skills_per_repo(con).set_index("repo")
+    con.close()
+    assert int(counted.loc["acme/a", "english_skills"]) == 1
+    assert int(counted.loc["acme/a", "files"]) == 2
+    assert int(counted.loc["acme/b", "english_skills"]) == 0
+    assert int(counted.loc["acme/c", "english_skills"]) == 0
+    assert list(counted.index) == ["acme/a", "acme/b", "acme/c"]
