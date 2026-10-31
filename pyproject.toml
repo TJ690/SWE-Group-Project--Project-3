@@ -18,6 +18,7 @@ dependencies = [
     "statsmodels==0.15.0",
     "datasketch==2.0.0",
     "httpx==0.28.1",
+    "lingua-language-detector==2.2.0",
     "matplotlib==3.11.2",
     "openpyxl==3.1.5",
 ]

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from lingua import Language
+
 
 def _find_repo_root() -> Path:
     """Return the nearest folder above this file that contains pyproject.toml.
@@ -64,6 +66,39 @@ DEV_MIN_HUBS = 3
 SHINGLE_WORDS = 5
 # Same as main pipeline minhash.num_perm.
 MINHASH_NUM_PERM = 128
+# MinHash seed. Same value as RANDOM_SEED and the main pipeline plan.json.
+MINHASH_SEED = RANDOM_SEED
+# A8: fewer than this many letters is "unknown" (short skills count as English).
+MIN_LANGUAGE_LETTERS = 20
+# A8: Latin-script letter share required before a text can be labelled English.
+MIN_ENGLISH_LETTER_SHARE = 0.75
+# A8: lingua confidence of the top language; below this the text is "unknown".
+LANGUAGE_MIN_CONFIDENCE = 0.50
+# A8: characters of the body read for language detection (speed).
+LANGUAGE_MAX_CHARS = 2000
+# A8: languages lingua chooses from. A text outside this list is still non-English.
+CANDIDATE_LANGUAGES: tuple[Language, ...] = (
+    Language.ENGLISH,
+    Language.CHINESE,
+    Language.JAPANESE,
+    Language.KOREAN,
+    Language.RUSSIAN,
+    Language.UKRAINIAN,
+    Language.GERMAN,
+    Language.FRENCH,
+    Language.SPANISH,
+    Language.PORTUGUESE,
+    Language.ITALIAN,
+    Language.DUTCH,
+    Language.POLISH,
+    Language.TURKISH,
+    Language.VIETNAMESE,
+    Language.INDONESIAN,
+    Language.ARABIC,
+    Language.PERSIAN,
+    Language.HINDI,
+    Language.THAI,
+)
 # Same as thresholds.templated_jaccard_min.
 NEAR_COPY_MIN_JACCARD = 0.80
 # Broder 1997 containment, our choice.
