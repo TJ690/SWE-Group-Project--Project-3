@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from skill_genealogy.assign_families import (
     _assemble_copy_histories,
     _jaccard_fast,
     _jaccard_simple,
+    build_proven_pairs,
     build_text_families,
     choose_origin_version,
     find_history_exact_links,
     find_history_near_links,
+    measure_link_method_recall,
     pick_strongest_link,
+    score_methods_on_pair,
 )
 from skill_genealogy.file_helpers import connect_duckdb
 from skill_genealogy.find_copies import signature_for_text
@@ -765,3 +769,259 @@ def test_family_kinds() -> None:
     assert lone.family_id == "single:sha-lone"
     assert bool(lone.registry_self) is False
     assert int(lone.files) == 1
+
+
+def _skill_lines(prefix: str, count: int, words: int) -> str:
+    """``count`` lines. Each line has ``words`` tokens that no other line uses."""
+    rows = []
+    for index in range(count):
+        tokens = [f"{prefix}{index:02d}w{word:02d}" for word in range(words)]
+        rows.append(" ".join(tokens))
+    return "\n".join(rows)
+
+
+def _recall_of(frame: pd.DataFrame, method: str) -> pd.Series:
+    """The one recall row for ``method``."""
+    return frame.loc[frame["method"].eq(method)].iloc[0]
+
+
+def test_link_method_recall_on_three_proven_pairs() -> None:
+    """Unchanged is found by every method. A grown copy is containment only. Reworded is missed.
+
+    The grown copy keeps 40 registry lines and adds 60 new lines, so 60% of
+    its lines are new. A later registry version matches none of the three,
+    and the older version still counts.
+    """
+    registry = _skill_lines("reg", 40, 12)
+    grown = registry + "\n" + _skill_lines("new", 60, 5)
+    reworded = _skill_lines("other", 40, 12)
+    later = _skill_lines("later", 10, 12)
+    grown_lines = grown.splitlines()
+    assert len(grown_lines) == 100
+    assert sum(line.startswith("new") for line in grown_lines) / len(grown_lines) == 0.6
+
+    unchanged_flags = score_methods_on_pair([later, registry], registry)
+    grown_flags = score_methods_on_pair([later, registry], grown)
+    reworded_flags = score_methods_on_pair([later, registry], reworded)
+    assert unchanged_flags == {
+        "exact": True,
+        "minhash_jaccard": True,
+        "containment": True,
+        "line_check": True,
+        "any_text_method": True,
+    }
+    assert grown_flags["exact"] is False
+    assert grown_flags["minhash_jaccard"] is False
+    assert grown_flags["containment"] is True
+    assert grown_flags["line_check"] is True
+    assert grown_flags["any_text_method"] is True
+    assert reworded_flags["any_text_method"] is False
+    assert score_methods_on_pair([later], registry)["exact"] is False
+
+    lineage = "plain/reg::skills/grown"
+    bodies = {"same": registry, "grown": grown, "reworded": reworded}
+    copies = []
+    histories = []
+    for name in ("same", "grown", "reworded"):
+        copies.append(
+            {
+                "repo": "a/r",
+                "path": f"skills/{name}/SKILL.md",
+                "file_sha": name,
+                "lineage_id": lineage,
+                "link": "history_exact",
+                "is_fork": False,
+            }
+        )
+        histories.append(
+            {
+                "repo": "a/r",
+                "path": f"skills/{name}/SKILL.md",
+                "blob": name,
+                "commit_date": "2026-06-01T00:00:00Z",
+                "version_seq": 1,
+            }
+        )
+    copies.append(
+        {
+            "repo": "a/r",
+            "path": "skills/near/SKILL.md",
+            "file_sha": "near",
+            "lineage_id": lineage,
+            "link": "near",
+            "is_fork": False,
+        }
+    )
+    pairs = build_proven_pairs(pd.DataFrame(copies), pd.DataFrame(histories))
+    assert list(pairs["path"]) == [
+        "skills/grown/SKILL.md",
+        "skills/reworded/SKILL.md",
+        "skills/same/SKILL.md",
+    ]
+    versions = pd.DataFrame(
+        [
+            {"lineage_id": lineage, "version_seq": 2, "blob": "later"},
+            {"lineage_id": lineage, "version_seq": 1, "blob": "v1"},
+        ]
+    )
+    texts = {"v1": registry, "later": later, **bodies}
+    recall = measure_link_method_recall(pairs, versions, texts)
+    assert list(recall["method"]) == [
+        "exact",
+        "minhash_jaccard",
+        "containment",
+        "line_check",
+        "any_text_method",
+    ]
+    assert int(_recall_of(recall, "exact").found) == 1
+    assert int(_recall_of(recall, "minhash_jaccard").found) == 1
+    assert int(_recall_of(recall, "containment").found) == 2
+    assert int(_recall_of(recall, "line_check").found) == 2
+    assert int(_recall_of(recall, "any_text_method").found) == 2
+    assert _recall_of(recall, "exact").recall == pytest.approx(1 / 3)
+    assert _recall_of(recall, "containment").recall == pytest.approx(2 / 3)
+    assert _recall_of(recall, "exact").recall_without_forks == pytest.approx(1 / 3)
+
+
+def test_forks_inflate_recall_and_edges() -> None:
+    """A matching fork raises recall. The current blob is the newest one, not an older match."""
+    registry = _skill_lines("reg", 40, 12)
+    reworded = _skill_lines("other", 40, 12)
+    copies = pd.DataFrame(
+        [
+            {
+                "repo": "a/fork",
+                "path": "skills/a/SKILL.md",
+                "file_sha": "fork-sha",
+                "lineage_id": "L",
+                "link": "history_exact",
+                "is_fork": True,
+            },
+            {
+                "repo": "a/r",
+                "path": "skills/a/SKILL.md",
+                "file_sha": "edit-sha",
+                "lineage_id": "L",
+                "link": "history_exact",
+                "is_fork": False,
+            },
+        ]
+    )
+    histories = pd.DataFrame(
+        [
+            {
+                "repo": "a/fork",
+                "path": "skills/a/SKILL.md",
+                "blob": "fork-sha",
+                "commit_date": "2026-02-01T00:00:00Z",
+                "version_seq": 1,
+            },
+            {
+                "repo": "a/r",
+                "path": "skills/a/SKILL.md",
+                "blob": "old-match",
+                "commit_date": "2026-01-01T00:00:00Z",
+                "version_seq": 1,
+            },
+            {
+                "repo": "a/r",
+                "path": "skills/a/SKILL.md",
+                "blob": "edit-sha",
+                "commit_date": "2026-06-01T00:00:00Z",
+                "version_seq": 2,
+            },
+        ]
+    )
+    pairs = build_proven_pairs(copies, histories)
+    edited = pairs.loc[pairs["repo"].eq("a/r")].iloc[0]
+    assert edited.current_text_sha == "edit-sha"
+    versions = pd.DataFrame([{"lineage_id": "L", "version_seq": 1, "blob": "v1"}])
+    texts = {"v1": registry, "fork-sha": registry, "edit-sha": reworded, "old-match": registry}
+    recall = measure_link_method_recall(pairs, versions, texts)
+    assert int(_recall_of(recall, "exact").found) == 1
+    assert _recall_of(recall, "exact").recall == pytest.approx(0.5)
+    assert _recall_of(recall, "exact").recall_without_forks == pytest.approx(0.0)
+
+    dataset_only = pd.DataFrame(
+        [
+            {
+                "repo": "b/r",
+                "path": "skills/a/SKILL.md",
+                "file_sha": "dataset",
+                "lineage_id": "L",
+                "link": "history_exact",
+            }
+        ]
+    )
+    fallen_back = build_proven_pairs(dataset_only, pd.DataFrame())
+    assert fallen_back["current_text_sha"].iloc[0] == "dataset"
+    empty = build_proven_pairs(
+        pd.DataFrame(columns=["repo", "path", "lineage_id", "link"]),
+        pd.DataFrame(),
+    )
+    assert empty.empty
+    zeros = measure_link_method_recall(empty)
+    assert int(zeros["proven_pairs"].iloc[0]) == 0
+    assert "tfidf" not in set(zeros["method"])
+    with pytest.raises(ValueError):
+        measure_link_method_recall(pd.DataFrame([{"repo": "a/r"}]), versions=versions)
+
+
+def test_tfidf_column_is_counted_only_when_present() -> None:
+    """A G30 score of at least 0.80 is one more recall row. Below 0.80 is a miss."""
+    scored = pd.DataFrame(
+        {
+            "exact": [True, False, False],
+            "jaccard_found": [True, False, False],
+            "containment_found": [True, True, False],
+            "verified_found": [True, True, False],
+            "is_fork": [False, False, True],
+            "tfidf_instructions": [0.93, 0.10, 0.50],
+        }
+    )
+    recall = measure_link_method_recall(scored)
+    tfidf = _recall_of(recall, "tfidf")
+    assert list(recall["method"])[-1] == "tfidf"
+    assert int(tfidf.found) == 1
+    assert tfidf.recall == pytest.approx(1 / 3)
+    assert tfidf.recall_without_forks == pytest.approx(0.5)
+    empty_flags = score_methods_on_pair([""], "")
+    assert empty_flags["exact"] is True
+    assert empty_flags["minhash_jaccard"] is False
+    assert empty_flags["line_check"] is False
+    assert empty_flags["any_text_method"] is True
+
+
+def test_same_date_keeps_the_higher_version_seq() -> None:
+    """Two history rows on one date: the higher version_seq is the current text."""
+    copies = pd.DataFrame(
+        [
+            {
+                "repo": "a/r",
+                "path": "skills/a/SKILL.md",
+                "file_sha": "dataset",
+                "lineage_id": "L",
+                "link": "history_exact",
+            }
+        ]
+    )
+    histories = pd.DataFrame(
+        [
+            {
+                "repo": "a/r",
+                "path": "skills/a/SKILL.md",
+                "blob": "low",
+                "commit_date": "2026-06-01T00:00:00Z",
+                "version_seq": 1,
+            },
+            {
+                "repo": "a/r",
+                "path": "skills/a/SKILL.md",
+                "blob": "high",
+                "commit_date": "2026-06-01T00:00:00Z",
+                "version_seq": 4,
+            },
+        ]
+    )
+    pairs = build_proven_pairs(copies, histories)
+    assert pairs["current_text_sha"].iloc[0] == "high"

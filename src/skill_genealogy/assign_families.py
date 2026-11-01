@@ -6,8 +6,9 @@ registry version that link points at, limited by the copy's first commit
 date. Each English text is then placed in a family.
 Inputs: copy tables, registry lineages, both history stores, the language
 table, and ``s2_clusters.parquet``. See ``read_inputs``.
-Outputs: ``copy_files.parquet``, ``families.parquet``, and
-``history_link_counts.parquet`` in the dev or full data folder.
+Outputs: ``copy_files.parquet``, ``families.parquet``,
+``history_link_counts.parquet``, ``proven_pairs.parquet``, and
+``link_method_recall.parquet`` in the dev or full data folder.
 Run:
     python -m skill_genealogy.assign_families --dev
 """
@@ -23,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from skill_genealogy import settings
+from skill_genealogy.compare_texts import share_of_registry_lines_kept
 from skill_genealogy.file_helpers import (
     build_arg_parser,
     check_inputs_exist,
@@ -34,7 +36,12 @@ from skill_genealogy.file_helpers import (
     write_parquet,
 )
 from skill_genealogy.find_copies import load_signatures, signature_for_text
-from skill_genealogy.text_helpers import estimate_jaccard, minhash_from_array
+from skill_genealogy.text_helpers import (
+    estimate_containment,
+    estimate_jaccard,
+    minhash_from_array,
+    normalize_text,
+)
 
 # Lower rank is stronger. A29 is the stage 6 download-target card, so these
 # start at A30. exact beats history_exact. history_near beats cluster.
@@ -51,6 +58,39 @@ _STRONGER_THAN_HISTORY_NEAR = frozenset({"exact", "near", "near_contained"})
 _HISTORY_LINKS = frozenset({"history_exact", "history_near"})
 _ZERO_BLOB = "0" * 40
 _BOILERPLATE_CACHE: set[str] | None = None
+# A literal IN list is what DuckDB pushes into the parquet scan. A join
+# does not, and would read every skill text. 200 shas stay under the
+# query-size limit while still filtering the file.
+_TEXT_SHA_BATCH = 200
+_TEXT_METHOD_FLAGS = (
+    ("exact", "exact"),
+    ("minhash_jaccard", "jaccard_found"),
+    ("containment", "containment_found"),
+    ("line_check", "verified_found"),
+)
+_RECALL_COLUMNS = [
+    "method",
+    "proven_pairs",
+    "found",
+    "recall",
+    "recall_without_forks",
+]
+_PROVEN_COLUMNS = [
+    "repo",
+    "path",
+    "lineage_id",
+    "current_file_sha",
+    "exact",
+    "jaccard_found",
+    "containment_found",
+    "verified_found",
+]
+_PROVEN_FLAGS = (
+    "exact",
+    "jaccard_found",
+    "containment_found",
+    "verified_found",
+)
 
 _HISTORY_COLUMNS = [
     "repo",
@@ -412,6 +452,43 @@ LEFT JOIN (
 ) AS counts ON assigned.family_id = counts.family_id
 """
 
+# Query Q7.14, see QUERIES.md
+# Registry version text for the lineages a history-exact file points at.
+PROVEN_REGISTRY_TEXTS_SQL = """
+SELECT sha AS blob, any_value(text) AS text
+FROM read_parquet({path})
+WHERE sha IN ({sha_list})
+GROUP BY sha
+"""
+
+# Query Q7.15, see QUERIES.md
+# Current text of a copied skill, from the stage 6 text store.
+PROVEN_HISTORY_TEXTS_SQL = """
+SELECT sha AS blob, any_value(text) AS text
+FROM read_parquet({path})
+WHERE sha IN ({sha_list})
+GROUP BY sha
+"""
+
+# Query Q7.16, see QUERIES.md
+# Current text when the newest blob is in wild history, not stage 6.
+PROVEN_WILD_TEXTS_SQL = """
+SELECT blob, any_value(content) AS text
+FROM read_parquet({path})
+WHERE blob IN ({sha_list})
+GROUP BY blob
+"""
+
+# Query Q7.17, see QUERIES.md
+# Dataset text for a sha that neither history store has.
+PROVEN_DATASET_TEXTS_SQL = """
+SELECT file_sha AS blob, any_value(content) AS text
+FROM read_parquet({path})
+WHERE file_sha IN ({sha_list})
+  AND content IS NOT NULL
+GROUP BY file_sha
+"""
+
 
 def _quote_path(path: str) -> str:
     """Return a single-quoted SQL string with quotes escaped."""
@@ -434,13 +511,20 @@ def _dataset_dir() -> Path:
 
 
 def _output_paths(dev: bool) -> list[Path]:
-    """Return the three stage 7 parquet files for this mode."""
+    """Return the five stage 7 parquet files for this mode."""
     folder = settings.data_dir(dev)
     return [
         folder / "copy_files.parquet",
         folder / "families.parquet",
         folder / "history_link_counts.parquet",
+        folder / "proven_pairs.parquet",
+        folder / "link_method_recall.parquet",
     ]
+
+
+def _registry_texts_path(dev: bool) -> Path:
+    """Return ``registry_history_texts.parquet`` for this mode."""
+    return settings.data_dir(dev) / "registry_history" / "registry_history_texts.parquet"
 
 
 def _copied_history_dir(dev: bool) -> Path:
@@ -579,6 +663,7 @@ def read_inputs(con: duckdb.DuckDBPyConnection, dev: bool) -> None:
         "copied_changes": copied / "copied_skill_history_changes.parquet",
         "copied_texts": copied / "copied_skill_history_texts.parquet",
         "registry_changes": registry_changes,
+        "registry_texts": _registry_texts_path(dev),
         "copy_candidates": folder / "copy_candidates.parquet",
         "text_links": folder / "text_links.parquet",
         "lineage_versions": folder / "lineage_versions.parquet",
@@ -605,6 +690,7 @@ def read_inputs(con: duckdb.DuckDBPyConnection, dev: bool) -> None:
             "copied_changes": f"python -m skill_genealogy.download_copied_skill_history{flag}",
             "copied_texts": f"python -m skill_genealogy.download_copied_skill_history{flag}",
             "registry_changes": f"python -m skill_genealogy.download_registry_history{flag}",
+            "registry_texts": f"python -m skill_genealogy.download_registry_history{flag}",
             "copy_candidates": copies,
             "text_links": copies,
             "lineage_versions": lineages,
@@ -1840,6 +1926,458 @@ def _history_link_counts(copy_files: pd.DataFrame) -> pd.DataFrame:
     return counts[columns]
 
 
+def _sha_key(value: object) -> str:
+    """Lowercase blob sha, or ``""`` when the cell is empty or the zero sha."""
+    if not isinstance(value, str):
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except TypeError:
+            return ""
+        value = str(value)
+    text = value.strip().lower()
+    if text in {"", "none", "nan", "<na>", _ZERO_BLOB}:
+        return ""
+    return text
+
+
+def _empty_proven() -> pd.DataFrame:
+    """No history-exact files. The scorer still sees its columns."""
+    columns = ["repo", "path", "current_text_sha", "lineage_id", "file_sha", "is_fork"]
+    return _empty_frame(columns)
+
+
+def _newest_history_blob(histories: pd.DataFrame) -> pd.DataFrame:
+    """One blob per file: latest real commit date, then highest version_seq.
+
+    A missing date sorts before a real date, so an undated row does not
+    beat a dated one. Within one date, the higher ``version_seq`` wins.
+
+    Example:
+    >>> rows = pd.DataFrame([
+    ...     {"repo": "a/r", "path": "p", "blob": "old",
+    ...      "commit_date": "2026-01-01T00:00:00Z", "version_seq": 5},
+    ...     {"repo": "a/r", "path": "p", "blob": "new",
+    ...      "commit_date": None, "version_seq": 9},
+    ... ])
+    >>> _newest_history_blob(rows)["current_text_sha"].iloc[0]
+    'old'
+    """
+    columns = ["repo", "path", "current_text_sha"]
+    if histories.empty:
+        return _empty_frame(columns)
+    needed = ("repo", "path", "blob", "commit_date", "version_seq")
+    _require_columns(histories, needed, "histories")
+    frame = histories.copy()
+    frame["_ts"] = frame["commit_date"].map(_parse_time)
+    frame["_missing"] = frame["_ts"].isna()
+    frame["_seq"] = pd.to_numeric(frame["version_seq"], errors="coerce").fillna(0)
+    frame = frame.sort_values(
+        ["repo", "path", "_missing", "_ts", "_seq"],
+        ascending=[True, True, False, True, True],
+        kind="mergesort",
+    )
+    newest = frame.groupby(["repo", "path"], sort=False).tail(1)
+    return newest.rename(columns={"blob": "current_text_sha"})[columns]
+
+
+def build_proven_pairs(copy_files: pd.DataFrame, histories: pd.DataFrame) -> pd.DataFrame:
+    """History-exact files, with the sha of the copy's current text.
+
+    The current text is the newest history row. A file with no history row
+    keeps its dataset ``file_sha``. Any other winning link is left out.
+    ``is_fork`` stays on the row so recall can be computed without forks.
+
+    Inputs: copy files after the strongest link is chosen, and history rows.
+    Outputs: ``repo, path, current_text_sha, lineage_id``, plus ``file_sha``
+    and ``is_fork``.
+
+    Example:
+    >>> copies = pd.DataFrame([{
+    ...     "repo": "a/r", "path": "skills/a/SKILL.md", "file_sha": "now",
+    ...     "lineage_id": "reg::skills/a", "link": "history_exact",
+    ... }])
+    >>> histories = pd.DataFrame([
+    ...     {"repo": "a/r", "path": "skills/a/SKILL.md", "blob": "old",
+    ...      "commit_date": "2026-01-01T00:00:00Z", "version_seq": 1},
+    ...     {"repo": "a/r", "path": "skills/a/SKILL.md", "blob": "new",
+    ...      "commit_date": "2026-06-01T00:00:00Z", "version_seq": 2},
+    ... ])
+    >>> build_proven_pairs(copies, histories)["current_text_sha"].iloc[0]
+    'new'
+    """
+    _require_columns(copy_files, ("repo", "path", "lineage_id", "link"), "copy_files")
+    proven = copy_files.loc[copy_files["link"].astype(str).eq("history_exact")].copy()
+    if proven.empty:
+        return _empty_proven()
+    proven = proven.merge(_newest_history_blob(histories), on=["repo", "path"], how="left")
+    if "file_sha" not in proven.columns:
+        proven["file_sha"] = pd.NA
+    missing = proven["current_text_sha"].map(_sha_key).eq("")
+    proven.loc[missing, "current_text_sha"] = proven.loc[missing, "file_sha"]
+    if "is_fork" not in proven.columns:
+        proven["is_fork"] = False
+    else:
+        proven["is_fork"] = proven["is_fork"].map(_as_bool)
+    proven = proven.drop_duplicates(["repo", "path"], keep="first")
+    columns = ["repo", "path", "current_text_sha", "lineage_id", "file_sha", "is_fork"]
+    ordered = proven[columns].sort_values(["repo", "path"], kind="mergesort")
+    return ordered.reset_index(drop=True)
+
+
+def _sql_sha_list(shas: list[str]) -> str:
+    """Comma-separated quoted hex shas. Anything else is left out of the SQL."""
+    quoted = []
+    for sha in shas:
+        if sha and all(character in "0123456789abcdef" for character in sha):
+            quoted.append("'" + sha + "'")
+    return ", ".join(quoted)
+
+
+def _texts_from_frame(frame: pd.DataFrame) -> dict[str, str]:
+    """Map a lowercase sha to its text. A non-string cell becomes ``""``."""
+    found: dict[str, str] = {}
+    if frame.empty or "blob" not in frame.columns or "text" not in frame.columns:
+        return found
+    for blob, text in zip(frame["blob"].tolist(), frame["text"].tolist(), strict=True):
+        key = _sha_key(blob)
+        if key:
+            found[key] = text if isinstance(text, str) else ""
+    return found
+
+
+def _read_text_batches(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    path: str | Path,
+    shas: list[str],
+) -> dict[str, str]:
+    """Read texts for ``shas`` in batches. ``sql`` has ``{path}`` and ``{sha_list}``."""
+    found: dict[str, str] = {}
+    unique = list(dict.fromkeys(sha for sha in shas if sha))
+    for start in range(0, len(unique), _TEXT_SHA_BATCH):
+        sha_list = _sql_sha_list(unique[start : start + _TEXT_SHA_BATCH])
+        if not sha_list:
+            continue
+        query = sql.format(path=_quote_path(str(path)), sha_list=sha_list)
+        found.update(_texts_from_frame(_fetch_frame(con, query)))
+    return found
+
+
+def _load_missing_texts(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    path: str | Path,
+    shas: list[str],
+    found: dict[str, str],
+) -> None:
+    """Add texts for shas that are not already in ``found``."""
+    missing = [sha for sha in shas if sha and sha not in found]
+    found.update(_read_text_batches(con, sql, path, missing))
+
+
+def _version_shas(pairs: pd.DataFrame, versions: pd.DataFrame) -> list[str]:
+    """Blobs of the lineages these proven pairs point at."""
+    if pairs.empty or versions.empty or "blob" not in versions.columns:
+        return []
+    lineages = set(pairs["lineage_id"].dropna().astype(str))
+    chosen = versions.loc[versions["lineage_id"].astype(str).isin(lineages)]
+    return [_sha_key(value) for value in chosen["blob"].tolist()]
+
+
+def _copy_shas(pairs: pd.DataFrame) -> list[str]:
+    """Current history shas, plus the dataset sha used when history text is missing."""
+    shas: list[str] = []
+    for column in ("current_text_sha", "file_sha"):
+        if column in pairs.columns:
+            shas.extend(_sha_key(value) for value in pairs[column].tolist())
+    return shas
+
+
+def _prefer_available_text(pairs: pd.DataFrame, texts: dict[str, str]) -> pd.DataFrame:
+    """Use ``file_sha`` when the newest history blob has no stored text."""
+    frame = pairs.copy()
+    have = frame["current_text_sha"].map(lambda value: _sha_key(value) in texts)
+    if "file_sha" not in frame.columns:
+        return frame
+    file_keys = frame["file_sha"].map(_sha_key)
+    use_file = ~have & file_keys.isin(texts) & file_keys.ne("")
+    frame.loc[use_file, "current_text_sha"] = frame.loc[use_file, "file_sha"].astype(str)
+    return frame
+
+
+def _load_pair_texts(
+    con: duckdb.DuckDBPyConnection,
+    pairs: pd.DataFrame,
+    versions: pd.DataFrame,
+    dev: bool,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Load the current copy text and every version of the linked lineage.
+
+    Registry history is tried first for a version blob, then the dataset.
+    A copy blob is taken from stage 6, then wild history, then the dataset.
+    The sha on the returned pairs is the text that will be scored.
+
+    Inputs: an open connection, proven pairs, lineage versions, and ``dev``.
+    Outputs: the pairs, and a map of lowercase sha to raw text.
+    """
+    if pairs.empty:
+        return pairs, {}
+    texts: dict[str, str] = {}
+    version_shas = _version_shas(pairs, versions)
+    _load_missing_texts(
+        con, PROVEN_REGISTRY_TEXTS_SQL, _registry_texts_path(dev), version_shas, texts
+    )
+    _load_missing_texts(
+        con, PROVEN_DATASET_TEXTS_SQL, settings.ARTIFACTS_GLOB, version_shas, texts
+    )
+    copy_shas = _copy_shas(pairs)
+    copied_texts = _copied_history_dir(dev) / "copied_skill_history_texts.parquet"
+    _load_missing_texts(con, PROVEN_HISTORY_TEXTS_SQL, copied_texts, copy_shas, texts)
+    wild_blobs = settings.WILD_HISTORY_DIR / "blobs.parquet"
+    _load_missing_texts(con, PROVEN_WILD_TEXTS_SQL, wild_blobs, copy_shas, texts)
+    _load_missing_texts(con, PROVEN_DATASET_TEXTS_SQL, settings.ARTIFACTS_GLOB, copy_shas, texts)
+    return _prefer_available_text(pairs, texts), texts
+
+
+def _text_for_sha(texts: dict[str, str], sha: object) -> str | None:
+    """The stored text, or None when this sha was not loaded."""
+    key = _sha_key(sha)
+    if key == "" or key not in texts:
+        return None
+    return texts[key]
+
+
+def _lineage_text_lists(versions: pd.DataFrame, texts: dict[str, str]) -> dict[str, list[str]]:
+    """Registry texts per lineage, oldest ``version_seq`` first. Missing blobs are skipped."""
+    if versions.empty or "lineage_id" not in versions.columns or "blob" not in versions.columns:
+        return {}
+    frame = versions
+    if "version_seq" in frame.columns:
+        frame = frame.sort_values("version_seq", kind="mergesort")
+    grouped: dict[str, list[str]] = {}
+    for lineage, blob in zip(frame["lineage_id"], frame["blob"], strict=True):
+        text = _text_for_sha(texts, blob)
+        if text is None:
+            continue
+        grouped.setdefault(str(lineage), []).append(text)
+    return grouped
+
+
+def _body_signature(
+    text: str,
+    boilerplate: set[str],
+    cache: dict[str, tuple[np.ndarray, int]],
+) -> tuple[np.ndarray, int]:
+    """MinHash values and the shingle count. A repeated body is not signed again."""
+    found = cache.get(text)
+    if found is None:
+        found = signature_for_text(text, boilerplate)
+        cache[text] = found
+    return found
+
+
+def _estimated_scores(
+    registry_text: str,
+    copy_text: str,
+    boilerplate: set[str],
+    cache: dict[str, tuple[np.ndarray, int]],
+) -> tuple[float, float]:
+    """Estimated Jaccard and containment. A body with no shingles scores 0.
+
+    Containment is ``estimate_containment`` of that Jaccard and the two
+    shingle counts, the same estimate stage 5 stores on a near link.
+    """
+    registry_values, registry_size = _body_signature(registry_text, boilerplate, cache)
+    copy_values, copy_size = _body_signature(copy_text, boilerplate, cache)
+    if registry_size == 0 or copy_size == 0:
+        return 0.0, 0.0
+    jaccard = estimate_jaccard(
+        minhash_from_array(registry_values),
+        minhash_from_array(copy_values),
+    )
+    return jaccard, estimate_containment(jaccard, registry_size, copy_size)
+
+
+def _passes_one_version(
+    registry_text: str,
+    copy_text: str,
+    boilerplate: set[str],
+    cache: dict[str, tuple[np.ndarray, int]],
+) -> dict[str, bool]:
+    """One registry version against the copy. Thresholds are the stage 5 cutoffs."""
+    same = normalize_text(registry_text) == normalize_text(copy_text)
+    jaccard, containment = _estimated_scores(registry_text, copy_text, boilerplate, cache)
+    kept = share_of_registry_lines_kept(registry_text, copy_text)
+    return {
+        "exact": same,
+        "minhash_jaccard": jaccard >= settings.NEAR_COPY_MIN_JACCARD,
+        "containment": containment >= settings.NEAR_COPY_MIN_CONTAINMENT,
+        "line_check": kept >= settings.MIN_VERIFIED_LINE_SHARE,
+    }
+
+
+def _score_against_versions(
+    registry_texts: list[str],
+    copy_text: str | None,
+    cache: dict[str, tuple[np.ndarray, int]],
+) -> dict[str, bool]:
+    """True when any version passes. A copy sha with no stored text passes nothing."""
+    found = {name: False for name, _column in _TEXT_METHOD_FLAGS}
+    if copy_text is None:
+        found["any_text_method"] = False
+        return found
+    boilerplate = _boilerplate_lines()
+    for registry_text in registry_texts:
+        hits = _passes_one_version(registry_text, copy_text, boilerplate, cache)
+        for name, _column in _TEXT_METHOD_FLAGS:
+            found[name] = found[name] or hits[name]
+        if all(found[name] for name, _column in _TEXT_METHOD_FLAGS):
+            break
+    found["any_text_method"] = any(found[name] for name, _column in _TEXT_METHOD_FLAGS)
+    return found
+
+
+# Algorithm A35, see CODE_FLOW.md
+def score_methods_on_pair(registry_texts: list[str], copy_text: str) -> dict[str, bool]:
+    """True when any lineage version passes that text method.
+
+    ``exact`` is the same normalised text. ``minhash_jaccard`` is estimated
+    Jaccard at least ``NEAR_COPY_MIN_JACCARD``. ``containment`` is estimated
+    containment at least ``NEAR_COPY_MIN_CONTAINMENT``. ``line_check`` keeps
+    at least ``MIN_VERIFIED_LINE_SHARE`` of the registry body lines.
+    ``any_text_method`` is true when one of those four is true. An empty
+    version list finds nothing.
+
+    Example:
+    >>> score_methods_on_pair(["alpha beta"], "alpha beta")["exact"]
+    True
+    >>> score_methods_on_pair(["alpha beta"], "other words")["exact"]
+    False
+    >>> score_methods_on_pair([], "alpha beta")["any_text_method"]
+    False
+    """
+    return _score_against_versions(registry_texts, copy_text, {})
+
+
+def _score_proven_pairs(
+    pairs: pd.DataFrame,
+    versions: pd.DataFrame,
+    texts: dict[str, str],
+) -> pd.DataFrame:
+    """Add the four method flags. One signature cache is shared across the pairs."""
+    frame = pairs.copy()
+    for name in _PROVEN_FLAGS:
+        frame[name] = False
+    if frame.empty:
+        return frame
+    grouped = _lineage_text_lists(versions, texts)
+    cache: dict[str, tuple[np.ndarray, int]] = {}
+    flags = [
+        _score_against_versions(
+            grouped.get(str(lineage), []),
+            _text_for_sha(texts, sha),
+            cache,
+        )
+        for lineage, sha in zip(frame["lineage_id"], frame["current_text_sha"], strict=True)
+    ]
+    frame["exact"] = [row["exact"] for row in flags]
+    frame["jaccard_found"] = [row["minhash_jaccard"] for row in flags]
+    frame["containment_found"] = [row["containment"] for row in flags]
+    frame["verified_found"] = [row["line_check"] for row in flags]
+    return frame
+
+
+def _flag_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Boolean column, or False on every row when the column is absent."""
+    if column not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    return frame[column].map(_as_bool).astype(bool)
+
+
+def _recall_row(method: str, hits: pd.Series, forks: pd.Series) -> dict[str, object]:
+    """``found / proven_pairs``, and the same ratio after forks are removed."""
+    total = int(len(hits))
+    found = int(hits.sum()) if total else 0
+    kept = ~forks
+    kept_total = int(kept.sum()) if total else 0
+    kept_found = int(hits.loc[kept].sum()) if kept_total else 0
+    return {
+        "method": method,
+        "proven_pairs": total,
+        "found": found,
+        "recall": found / total if total else 0.0,
+        "recall_without_forks": kept_found / kept_total if kept_total else 0.0,
+    }
+
+
+def _tfidf_hits(frame: pd.DataFrame) -> pd.Series | None:
+    """True when a ``tfidf`` column is at least 0.80. None when G30 columns are absent.
+
+    A boolean column counts as 1 or 0. G30 has not named a cutoff, so a
+    numeric score uses ``NEAR_COPY_MIN_JACCARD``.
+    """
+    columns = [name for name in frame.columns if str(name).startswith("tfidf")]
+    if not columns:
+        return None
+    if frame.empty:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    numbers = frame[columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return numbers.max(axis=1) >= settings.NEAR_COPY_MIN_JACCARD
+
+
+def _recall_from_flags(frame: pd.DataFrame) -> pd.DataFrame:
+    """One recall row per method, in the order the report prints them."""
+    forks = _flag_series(frame, "is_fork")
+    rows = []
+    any_hit = pd.Series(False, index=frame.index, dtype=bool)
+    for _method, column in _TEXT_METHOD_FLAGS:
+        hits = _flag_series(frame, column)
+        any_hit = any_hit | hits
+        rows.append(_recall_row(_method, hits, forks))
+    rows.append(_recall_row("any_text_method", any_hit, forks))
+    tfidf = _tfidf_hits(frame)
+    if tfidf is not None:
+        rows.append(_recall_row("tfidf", tfidf, forks))
+    return pd.DataFrame(rows, columns=_RECALL_COLUMNS)
+
+
+def measure_link_method_recall(
+    pairs: pd.DataFrame,
+    versions: pd.DataFrame | None = None,
+    texts: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Recall of each text method on history-proven pairs.
+
+    ``recall`` is ``found / proven_pairs``. ``recall_without_forks`` drops
+    ``is_fork`` rows from both counts, because a fork shares the registry
+    history and makes the test set look larger. Pass ``versions``
+    (``lineage_id``, ``blob``) and ``texts`` (sha to raw text) to score the
+    pairs. A frame that already has the flag columns is counted as it is.
+    ``tfidf`` is added only when a column name starts with ``tfidf``.
+
+    Example:
+    >>> pairs = pd.DataFrame([{
+    ...     "exact": True, "jaccard_found": True, "containment_found": True,
+    ...     "verified_found": True, "is_fork": False,
+    ... }])
+    >>> row = measure_link_method_recall(pairs).iloc[0]
+    >>> row.method == "exact" and int(row.found) == 1 and float(row.recall) == 1.0
+    True
+    """
+    if (versions is None) != (texts is None):
+        raise ValueError("versions and texts are passed together")
+    scored = pairs
+    needs_score = "jaccard_found" not in pairs.columns
+    if versions is not None and texts is not None and needs_score:
+        scored = _score_proven_pairs(pairs, versions, texts)
+    elif needs_score and not pairs.empty:
+        raise ValueError("pairs need method columns, or versions and texts")
+    return _recall_from_flags(scored)
+
+
 def _public_copy_files(frame: pd.DataFrame) -> pd.DataFrame:
     """Return ``copy_files`` with the output columns only."""
     result = frame.copy()
@@ -1854,21 +2392,53 @@ def _public_copy_files(frame: pd.DataFrame) -> pd.DataFrame:
     return result[_COPY_COLUMNS]
 
 
+def _public_proven(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return proven pairs with the output columns only."""
+    result = frame.copy()
+    if "current_file_sha" not in result.columns:
+        if "current_text_sha" in result.columns:
+            result["current_file_sha"] = result["current_text_sha"]
+        else:
+            result["current_file_sha"] = pd.NA
+    for name in _PROVEN_COLUMNS:
+        if name not in result.columns:
+            result[name] = False if name in _PROVEN_FLAGS else pd.NA
+    for name in _PROVEN_FLAGS:
+        result[name] = result[name].map(_as_bool)
+    return result.loc[:, list(_PROVEN_COLUMNS)]
+
+
+def _public_recall(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the recall table with its five columns, in method order."""
+    result = frame.copy()
+    for name in _RECALL_COLUMNS:
+        if name not in result.columns:
+            result[name] = 0
+    result["proven_pairs"] = pd.to_numeric(result["proven_pairs"], errors="coerce").fillna(0)
+    result["proven_pairs"] = result["proven_pairs"].astype(int)
+    result["found"] = pd.to_numeric(result["found"], errors="coerce").fillna(0).astype(int)
+    return result.loc[:, list(_RECALL_COLUMNS)]
+
+
 def save_outputs(
     copy_files: pd.DataFrame,
     families: pd.DataFrame,
     history_counts: pd.DataFrame,
+    proven: pd.DataFrame,
+    recall: pd.DataFrame,
     dev: bool,
 ) -> None:
-    """Write the three stage 7 tables. Rows are sorted so a rerun matches.
+    """Write the five stage 7 tables. Family rows are sorted so a rerun matches.
 
-    Inputs: the copy-file table, the family table, and the history-link counts.
-    Outputs: parquet files under ``data_dir(dev)``.
+    Inputs: copy files, families, history-link counts, proven pairs, and recall.
+    Outputs: parquet files under ``data_dir(dev)``. Recall stays in method order.
     """
-    copy_path, family_path, count_path = _output_paths(dev)
+    copy_path, family_path, count_path, proven_path, recall_path = _output_paths(dev)
     write_parquet(_public_copy_files(copy_files), copy_path, ["repo", "path"])
     write_parquet(families[_FAMILY_COLUMNS], family_path, ["file_sha"])
     write_parquet(history_counts, count_path, ["link", "history_source"])
+    write_parquet(_public_proven(proven), proven_path, ["repo", "path"])
+    write_parquet(_public_recall(recall), recall_path)
 
 
 def _family_kind_numbers(families: pd.DataFrame) -> dict[str, int]:
@@ -1885,11 +2455,25 @@ def _family_kind_numbers(families: pd.DataFrame) -> dict[str, int]:
     return numbers
 
 
+def _pairs_no_method_finds(proven: pd.DataFrame) -> pd.DataFrame:
+    """Proven pairs where exact, Jaccard, containment and the line check all miss."""
+    if proven.empty:
+        return proven
+    missed = pd.Series(True, index=proven.index)
+    for name in _PROVEN_FLAGS:
+        if name in proven.columns:
+            missed = missed & ~proven[name].map(_as_bool)
+    if "repo" in proven.columns and "path" in proven.columns:
+        return proven.loc[missed].sort_values(["repo", "path"], kind="mergesort")
+    return proven.loc[missed]
+
+
 def _summary_numbers(
     copy_files: pd.DataFrame,
     families: pd.DataFrame,
     history_counts: pd.DataFrame,
     histories: pd.DataFrame,
+    proven: pd.DataFrame,
     seconds: float,
 ) -> dict[str, object]:
     """The counts the stage prints. Family file totals are not summed per text."""
@@ -1916,7 +2500,26 @@ def _summary_numbers(
     if not histories.empty:
         numbers["history_rows"] = int(len(histories))
         numbers["inherited_history_rows"] = int(histories["inherited"].sum())
+    numbers["proven_pairs"] = int(len(proven))
+    numbers["proven_missed_by_text"] = int(len(_pairs_no_method_finds(proven)))
     return numbers
+
+
+def _print_recall(recall: pd.DataFrame, proven: pd.DataFrame) -> None:
+    """Print the recall table and two proven pairs that no text method finds."""
+    print("link method recall")
+    if recall.empty:
+        print("proven_pairs: 0")
+    else:
+        for record in recall.itertuples(index=False):
+            print(
+                f"{record.method}: found {int(record.found)} of {int(record.proven_pairs)}"
+                f" recall {float(record.recall):.4f}"
+                f" without_forks {float(record.recall_without_forks):.4f}"
+            )
+    missed = _pairs_no_method_finds(proven)
+    print(f"proven pairs no text method finds: {len(missed)}")
+    print_sample_records(missed, "edited copies text methods miss")
 
 
 def _print_outputs(
@@ -1924,26 +2527,33 @@ def _print_outputs(
     families: pd.DataFrame,
     history_counts: pd.DataFrame,
     histories: pd.DataFrame,
+    proven: pd.DataFrame,
+    recall: pd.DataFrame,
     seconds: float,
 ) -> None:
-    """Print the stage summary and two sample rows of each output."""
+    """Print the stage summary, the recall table, and two sample rows of each output."""
     print_summary(
         "assign families",
-        _summary_numbers(copy_files, families, history_counts, histories, seconds),
+        _summary_numbers(copy_files, families, history_counts, histories, proven, seconds),
     )
     print_sample_records(copy_files, "copy file sample")
     print_sample_records(families, "family sample")
     print_sample_records(history_counts, "history link count sample")
+    _print_recall(recall, proven)
+    print_sample_records(proven, "proven pair sample")
+    print_sample_records(recall, "recall sample")
 
 
 def _print_saved_summary(dev: bool) -> None:
-    """Reprint the summary from the three files already on disk."""
-    copy_path, family_path, count_path = _output_paths(dev)
+    """Reprint the summary from the five files already on disk."""
+    saved = [read_parquet(path) for path in _output_paths(dev)]
     _print_outputs(
-        read_parquet(copy_path),
-        read_parquet(family_path),
-        read_parquet(count_path),
+        saved[0],
+        saved[1],
+        saved[2],
         _empty_frame(_HISTORY_COLUMNS),
+        saved[3],
+        saved[4],
         0.0,
     )
 
@@ -1963,10 +2573,10 @@ def _build_file_links(
 
 
 def main() -> None:
-    """Assign families, history links, and the origin version of each copy.
+    """Assign families, then measure recall on history-proven copies.
 
     ``--dev`` reads and writes the dev folder. ``--force`` rebuilds the
-    three outputs. A second run without ``--force`` prints ``skip``.
+    five outputs. A second run without ``--force`` prints ``skip``.
     """
     parser = build_arg_parser("Assign families, history links, and origin versions.")
     args = parser.parse_args()
@@ -2021,18 +2631,27 @@ def main() -> None:
         print("Step 6: text families", flush=True)
         families = build_text_families(con, copy_files, dev)
         history_counts = _history_link_counts(copy_files)
+        # Step 9: Proven pairs (algorithm A35, queries Q7.14–Q7.17).
+        print("Step 9: proven pairs", flush=True)
+        proven_input = build_proven_pairs(copy_files, histories)
+        proven_input, pair_texts = _load_pair_texts(con, proven_input, versions, dev)
+        proven = _score_proven_pairs(proven_input, versions, pair_texts)
+        recall = measure_link_method_recall(proven)
+        print(f"proven pairs {len(proven)}", flush=True)
         # Step 7: Save and print counts and two sample records.
         print("Step 7: save outputs", flush=True)
-        save_outputs(copy_files, families, history_counts, dev)
+        save_outputs(copy_files, families, history_counts, proven, recall, dev)
     finally:
         con.close()
         _remove_temp_dir(temp_dir)
-    saved_copy, saved_families, saved_counts = (read_parquet(path) for path in _output_paths(dev))
+    saved = [read_parquet(path) for path in _output_paths(dev)]
     _print_outputs(
-        saved_copy,
-        saved_families,
-        saved_counts,
+        saved[0],
+        saved[1],
+        saved[2],
         histories,
+        saved[3],
+        saved[4],
         time.perf_counter() - started,
     )
 

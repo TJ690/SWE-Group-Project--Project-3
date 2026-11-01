@@ -13,6 +13,11 @@ src/data/registry_repos/
 src/data/wild_history/
 src/data/genealogy/
 src/data/genealogy_100/
+# skill_genealogy stage outputs (rebuilt by the stages; download stores are large)
+src/data/skill_genealogy/*
+src/data/skill_genealogy_dev/
+# the language check sheet holds the team's hand labels, so it stays in git
+!src/data/skill_genealogy/language_check_sample.csv
 src/data/derived/
 src/data/cache/
 .env
