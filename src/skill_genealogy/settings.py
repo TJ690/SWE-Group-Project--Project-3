@@ -109,8 +109,12 @@ NEAR_COPY_MIN_JACCARD = 0.80
 NEAR_COPY_MIN_CONTAINMENT = 0.80
 # Line-diff check after a near match.
 MIN_VERIFIED_LINE_SHARE = 0.50
-# A line in skills of this many owners is template text (tuned in G13).
+# A22: a line shared by this many GitHub owners is template text.
+# G12 keeps 50 unless the top 30 lines are real skill content (see PROGRESS).
 BOILERPLATE_MIN_OWNERS = 50
+# A22: lines with fewer whitespace-separated words are dropped before the owner
+# count. A two-word heading such as "## usage" is not treated as boilerplate.
+BOILERPLATE_MIN_WORDS = 3
 # Same as rq2.substantive_body_change_pct.
 SUBSTANTIVE_BODY_CHANGE_PCT = 5
 # A13: a registry section is "kept" at or above this share of unchanged lines. 0 means removed.
