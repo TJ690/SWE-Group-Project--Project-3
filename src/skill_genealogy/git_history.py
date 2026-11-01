@@ -88,6 +88,9 @@ _CHANGE_COLUMNS = [
     "is_skill_md",
     "is_script",
     "commit_seq",
+    "repo_path",
+    "old_repo_path",
+    "history_role",
 ]
 _TEXT_SCHEMA = pa.schema([("sha", pa.string()), ("text", pa.string())])
 _STATUS_COLUMNS = [
@@ -97,6 +100,9 @@ _STATUS_COLUMNS = [
     "head_commit",
     "seconds",
     "follow_renames",
+    "not_ours",
+    "after_copy",
+    "twin",
 ]
 
 
@@ -122,6 +128,8 @@ class RepoResult:
     ``head_commit`` is the default-branch tip, or None when there is no commit.
     ``follow_renames`` is false when the repo has more than
     ``MANY_PATHS_LIMIT`` skill folders. ``seconds`` is how long the mine took.
+    ``not_ours``, ``after_copy`` and ``twin`` count change rows dropped
+    because another folder was not this skill.
     """
 
     repo: str
@@ -130,6 +138,9 @@ class RepoResult:
     head_commit: str | None
     seconds: float
     follow_renames: bool
+    not_ours: int = 0
+    after_copy: int = 0
+    twin: int = 0
 
 
 def run_git(
@@ -212,7 +223,8 @@ def read_folder_log(clone_dir: Path, folder: str, follow: bool) -> list[dict]:
     Outputs: rows from ``parse_raw_log``, newest commit first. Paths are
     repo-relative, not relative to the skill folder.
     """
-    return _read_folder_log(clone_dir, folder, follow, DOWNLOAD_TIMEOUT_SECONDS)
+    rows, _drops = _read_folder_log(clone_dir, folder, follow, DOWNLOAD_TIMEOUT_SECONDS)
+    return rows
 
 
 def read_folder_log_many(clone_dir: Path, folders: list[str]) -> list[dict]:
@@ -433,11 +445,21 @@ def _mine_checked(
         return empty, _empty_changes(), _empty_texts()
     chosen = _choose_folders(clone_dir, folders, timeout_seconds)
     follow = len(chosen) <= MANY_PATHS_LIMIT
-    grouped = _grouped_logs(clone_dir, chosen, follow, timeout_seconds)
+    grouped, drops = _grouped_logs(clone_dir, chosen, follow, timeout_seconds)
     changes = _changes_frame(repo, grouped)
     texts, used_lazy = _texts_for_changes(clone_dir, changes, timeout_seconds)
     message = _LAZY_FETCH_MESSAGE if used_lazy else ""
-    result = RepoResult(repo, "ok", message, head, 0.0, follow)
+    result = RepoResult(
+        repo,
+        "ok",
+        message,
+        head,
+        0.0,
+        follow,
+        not_ours=drops["not_ours"],
+        after_copy=drops["after_copy"],
+        twin=drops["twin"],
+    )
     return result, changes, texts
 
 
@@ -455,20 +477,26 @@ def _choose_folders(
 
 def _grouped_logs(
     clone_dir: Path, folders: list[str], follow: bool, timeout_seconds: int
-) -> list[tuple[str, list[dict]]]:
-    """Pair each skill folder with the log rows that belong to it."""
+) -> tuple[list[tuple[str, list[dict]]], dict[str, int]]:
+    """Pair each skill folder with its rows, and count rows dropped by reason."""
+    drops = {"not_ours": 0, "after_copy": 0, "twin": 0}
     if follow:
-        grouped = [
-            (folder, _read_folder_log(clone_dir, folder, True, timeout_seconds))
-            for folder in folders
-        ]
+        grouped = []
+        for folder in folders:
+            folder_rows, part = _read_folder_log(
+                clone_dir, folder, True, timeout_seconds
+            )
+            grouped.append((folder, folder_rows))
+            for key in drops:
+                drops[key] += part[key]
     else:
         rows = _read_folder_log_many(clone_dir, folders, timeout_seconds)
         grouped = _split_rows_by_folder(folders, rows)
-    return [
+    grouped = [
         (folder, _drop_deeper_skill_rows(folder, folder_rows, folders))
         for folder, folder_rows in grouped
     ]
+    return grouped, drops
 
 
 def _split_rows_by_folder(folders: list[str], rows: list[dict]) -> list[tuple[str, list[dict]]]:
@@ -526,6 +554,9 @@ def _change_record(
         "is_skill_md": _is_skill_md_name(file_path) or _is_skill_md_name(old_file_path),
         "is_script": _is_script_file(file_path, old_file_path, row["old_mode"], row["new_mode"]),
         "commit_seq": sequence[row["commit"]],
+        "repo_path": row["path"],
+        "old_repo_path": row["old_path"] or "",
+        "history_role": row.get("history_role") or "own",
     }
 
 
@@ -567,21 +598,37 @@ def _real_shas(*shas: str) -> list[str]:
 
 
 def _read_folder_log(
-    clone_dir: Path, folder: str, follow: bool, timeout_seconds: int
-) -> list[dict]:
+    clone_dir: Path,
+    folder: str,
+    follow: bool,
+    timeout_seconds: int,
+) -> tuple[list[dict], dict[str, int]]:
     """GIT4 plus GIT5 when following, otherwise one GIT5 log."""
+    zeros = {"not_ours": 0, "after_copy": 0, "twin": 0}
     cleaned = _clean_folder(folder)
     if not follow:
-        # Git command GIT5, see CODE_FLOW.md
-        text = run_git(
-            _log_args(follow=False, pathspecs=[_pathspec(cleaned)]),
-            clone_dir,
-            timeout_seconds,
-            allow_lazy=True,
-        )
-        return parse_raw_log(text)
-    follow_rows = _follow_skill_rows(clone_dir, cleaned, timeout_seconds)
-    pathspecs = _followed_pathspecs(cleaned, follow_rows)
+        return _one_folder_log(clone_dir, cleaned, timeout_seconds), zeros
+    return _followed_folder_log(clone_dir, cleaned, timeout_seconds)
+
+
+def _one_folder_log(clone_dir: Path, folder: str, timeout_seconds: int) -> list[dict]:
+    """GIT5 for the folder as it is now."""
+    # Git command GIT5, see CODE_FLOW.md
+    text = run_git(
+        _log_args(follow=False, pathspecs=[_pathspec(folder)]),
+        clone_dir,
+        timeout_seconds,
+        allow_lazy=True,
+    )
+    return parse_raw_log(text)
+
+
+def _followed_folder_log(
+    clone_dir: Path, folder: str, timeout_seconds: int
+) -> tuple[list[dict], dict[str, int]]:
+    """Follow SKILL.md, then keep former names and copy sources."""
+    follow_rows = _follow_skill_rows(clone_dir, folder, timeout_seconds)
+    pathspecs = _followed_pathspecs(folder, follow_rows)
     # Git command GIT5, see CODE_FLOW.md
     text = run_git(
         _log_args(follow=False, pathspecs=pathspecs),
@@ -589,9 +636,12 @@ def _read_folder_log(
         timeout_seconds,
         allow_lazy=True,
     )
-    return _keep_skill_life(
-        cleaned, parse_raw_log(text), follow_rows, clone_dir, timeout_seconds
+    parsed = parse_raw_log(text)
+    parsed, drops = _classify_folder_rows(
+        folder, parsed, follow_rows, clone_dir, timeout_seconds
     )
+    kept = _keep_skill_life(folder, parsed, follow_rows, clone_dir, timeout_seconds)
+    return kept, drops
 
 
 def _follow_skill_rows(clone_dir: Path, folder: str, timeout_seconds: int) -> list[dict]:
@@ -632,6 +682,479 @@ def _targets_from_follow_log(rows: list[dict]) -> tuple[list[str], list[str]]:
             else:
                 folders.append(parent)
     return folders, root_files
+
+
+def _classify_folder_rows(
+    folder: str,
+    rows: list[dict],
+    follow_rows: list[dict],
+    clone_dir: Path,
+    timeout_seconds: int,
+) -> tuple[list[dict], dict[str, int]]:
+    """Mark own, former_folder and copy_source. A rename chain joins one hop at a time."""
+    counts = {"not_ours": 0, "after_copy": 0, "twin": 0}
+    for row in rows:
+        row["history_role"] = "own"
+    pending = _extra_skill_folders(folder, follow_rows)
+    if not pending:
+        return rows, counts
+    accepted = {folder}
+    trees: dict[str, list[dict]] = {}
+    kept = rows
+    while pending:
+        kept, pending, grew = _accept_one_pass(
+            folder, pending, accepted, kept, follow_rows, counts,
+            trees, clone_dir, timeout_seconds,
+        )
+        if grew:
+            continue
+        for candidate in pending:
+            kept = _drop_not_ours(kept, folder, candidate, [], counts)
+        break
+    return _drop_repeated_paths(kept, folder), counts
+
+
+def _drop_repeated_paths(rows: list[dict], folder: str) -> list[dict]:
+    """Keep one row when two folders strip to the same path in one commit."""
+    role_rank = {"own": 0, "former_folder": 1, "copy_source": 2}
+    status_rank = {"R": 0, "C": 1, "A": 2, "M": 3, "D": 4}
+    best: dict[tuple[str, str], tuple[tuple[int, int], dict]] = {}
+    for row in rows:
+        key = (row["commit"], _row_relative_path(row, folder))
+        score = (
+            role_rank.get(str(row.get("history_role")), 9),
+            status_rank.get(row["status"], 9),
+        )
+        current = best.get(key)
+        if current is None or score < current[0]:
+            best[key] = (score, row)
+    chosen = {id(item[1]) for item in best.values()}
+    return [row for row in rows if id(row) in chosen]
+
+
+def _row_relative_path(row: dict, folder: str) -> str:
+    """Skill-relative path used to spot two names of one file."""
+    prefix = str(row.get("role_folder") or folder)
+    return _relative_to_one(row["path"], prefix)
+
+
+def _accept_one_pass(
+    folder: str,
+    pending: list[str],
+    accepted: set[str],
+    rows: list[dict],
+    follow_rows: list[dict],
+    counts: dict[str, int],
+    trees: dict[str, list[dict]],
+    clone_dir: Path,
+    timeout_seconds: int,
+) -> tuple[list[dict], list[str], bool]:
+    """Accept every candidate that can join ``accepted`` on this pass."""
+    waiting: list[str] = []
+    grew = False
+    kept = rows
+    for candidate in pending:
+        leave = _leave_toward_accepted(candidate, follow_rows, accepted)
+        if leave is None:
+            waiting.append(candidate)
+            continue
+        tree = _cached_tree(trees, clone_dir, leave, timeout_seconds)
+        kept, took = _apply_candidate(
+            folder, candidate, leave, kept, follow_rows, tree, accepted, counts
+        )
+        if took:
+            accepted.add(candidate)
+        grew = True
+    return kept, waiting, grew
+
+
+def _cached_tree(
+    trees: dict[str, list[dict]], clone_dir: Path, commit: str, timeout_seconds: int
+) -> list[dict]:
+    """GIT4b for ``commit``, read once per hop."""
+    if commit not in trees:
+        trees[commit] = _diff_tree_changes(clone_dir, commit, timeout_seconds)
+    return trees[commit]
+
+
+def _apply_candidate(
+    folder: str,
+    candidate: str,
+    leave: str,
+    rows: list[dict],
+    follow_rows: list[dict],
+    tree: list[dict],
+    accepted: set[str],
+    counts: dict[str, int],
+) -> tuple[list[dict], bool]:
+    """Keep or drop one GIT4 folder. True means it joined the accepted set."""
+    fate = _candidate_fate(candidate, accepted, leave, rows, follow_rows, tree)
+    if fate != "ours":
+        return _drop_not_ours(rows, folder, candidate, tree, counts), False
+    if _source_survives(candidate, tree):
+        return _keep_copy_source(rows, folder, candidate, leave, counts), True
+    return _keep_former_folder(rows, folder, candidate, leave, counts), True
+
+
+def _source_survives(candidate: str, tree: list[dict]) -> bool:
+    """True unless the leave commit deletes or renames the candidate's SKILL.md.
+
+    ``tree`` is the GIT4b diff of that commit. A copy leaves the file in place.
+    """
+    for change in tree:
+        if _deleted_skill(change, candidate):
+            return False
+        if change["status"] == "R" and _skill_left_candidate(change, candidate):
+            return False
+    return True
+
+
+def _candidate_fate(
+    candidate: str,
+    accepted: set[str],
+    leave: str,
+    rows: list[dict],
+    follow_rows: list[dict],
+    tree: list[dict],
+) -> str:
+    """``ours`` when this hop's leave commit moves into an accepted folder.
+
+    The full commit diff wins over the path-limited log. That log can pair
+    the file with us when the commit renamed it to a third folder.
+    """
+    if _renamed_elsewhere(candidate, accepted, tree):
+        return "third"
+    groups = (
+        tree,
+        [row for row in rows if row["commit"] == leave],
+        [row for row in follow_rows if row["commit"] == leave],
+    )
+    for group in groups:
+        if _left_toward(candidate, accepted, group):
+            return "ours"
+    return "third"
+
+
+def _leave_toward_accepted(
+    candidate: str, follow_rows: list[dict], accepted: set[str]
+) -> str | None:
+    """Newest commit where the candidate's SKILL.md left toward ``accepted``."""
+    for row in follow_rows:
+        moved = _skill_left_candidate(row, candidate)
+        moved = moved and _path_in_accepted(row["path"], accepted)
+        deleted = _deleted_skill(row, candidate)
+        deleted = deleted and _arrived_in(follow_rows, row["commit"], accepted)
+        if moved or deleted:
+            return row["commit"]
+    return None
+
+
+def _drop_not_ours(
+    rows: list[dict],
+    folder: str,
+    candidate: str,
+    tree: list[dict],
+    counts: dict[str, int],
+) -> list[dict]:
+    """Drop the candidate. A false rename into this folder becomes an add."""
+    third = _renamed_elsewhere(candidate, {folder}, tree)
+    kept: list[dict] = []
+    for row in rows:
+        if _candidate_row(row, candidate, folder):
+            counts["not_ours"] += 1
+            continue
+        if third and _moves_into(row, candidate, folder):
+            kept.append(_as_plain_add(row))
+            continue
+        kept.append(row)
+    return kept
+
+
+def _keep_copy_source(
+    rows: list[dict],
+    folder: str,
+    candidate: str,
+    birth: str,
+    counts: dict[str, int],
+) -> list[dict]:
+    """Keep the source only strictly before this folder's first SKILL.md."""
+    index = _commit_index(rows)
+    birth_at = index[birth]
+    kept: list[dict] = []
+    older = 0
+    dropped = 0
+    for row in rows:
+        if not _candidate_row(row, candidate, folder):
+            kept.append(row)
+            continue
+        if index[row["commit"]] > birth_at:
+            row["history_role"] = "copy_source"
+            row["role_folder"] = candidate
+            kept.append(row)
+            older += 1
+            continue
+        dropped += 1
+    if older == 0:
+        counts["twin"] += dropped
+        return kept
+    counts["after_copy"] += dropped
+    return kept
+
+
+def _keep_former_folder(
+    rows: list[dict],
+    folder: str,
+    candidate: str,
+    birth: str,
+    counts: dict[str, int],
+) -> list[dict]:
+    """Keep the old name through the commit that left it, and store the move as R."""
+    index = _commit_index(rows)
+    birth_at = index[birth]
+    kept: list[dict] = []
+    for row in rows:
+        if _moves_into(row, candidate, folder):
+            row["role_folder"] = candidate
+        if not _candidate_row(row, candidate, folder):
+            kept.append(row)
+            continue
+        if index[row["commit"]] >= birth_at:
+            row["history_role"] = "former_folder"
+            row["role_folder"] = candidate
+            kept.append(row)
+            continue
+        counts["not_ours"] += 1
+    rewritten = _rewrite_delete_add(kept, folder, candidate, birth)
+    return _drop_birth_copies(rewritten, folder, candidate, birth)
+
+
+def _rewrite_delete_add(
+    rows: list[dict], folder: str, candidate: str, birth: str
+) -> list[dict]:
+    """Turn a delete plus an add in the leave commit into one rename."""
+    if any(_moves_into(row, candidate, folder) and row["commit"] == birth for row in rows):
+        return rows
+    deletes, adds = _delete_add_pairs(rows, folder, candidate, birth)
+    paired = set(deletes) & set(adds)
+    if not paired:
+        return rows
+    drop_ids = {id(deletes[rel]) for rel in paired} | {id(adds[rel]) for rel in paired}
+    made = [_joined_rename(adds[rel], deletes[rel], candidate) for rel in sorted(paired)]
+    return [row for row in rows if id(row) not in drop_ids] + made
+
+
+def _delete_add_pairs(
+    rows: list[dict], folder: str, candidate: str, birth: str
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Relative path to the delete under the old folder and the add under the new one."""
+    deletes: dict[str, dict] = {}
+    adds: dict[str, dict] = {}
+    for row in rows:
+        if row["commit"] != birth:
+            continue
+        if row["status"] == "D" and _path_in_folder(row["path"], candidate):
+            deletes[_relative_to_one(row["path"], candidate)] = row
+        if row["status"] == "A" and _path_in_folder(row["path"], folder):
+            adds[_relative_to_one(row["path"], folder)] = row
+    return deletes, adds
+
+
+def _drop_birth_copies(
+    rows: list[dict], folder: str, candidate: str, birth: str
+) -> list[dict]:
+    """Drop an old-folder row in the arrival commit when this folder has that path.
+
+    The arrival row is the one that stays. Two rows would share file_path.
+    """
+    own = {
+        _relative_to_one(row["path"], folder)
+        for row in rows
+        if row["commit"] == birth
+        and row.get("history_role") != "former_folder"
+        and _path_in_folder(row["path"], folder)
+    }
+    if not own:
+        return rows
+    kept: list[dict] = []
+    for row in rows:
+        if row.get("history_role") != "former_folder" or row["commit"] != birth:
+            kept.append(row)
+            continue
+        rel = _relative_to_one(row["path"] or row["old_path"], candidate)
+        if rel not in own:
+            kept.append(row)
+    return kept
+
+
+def _joined_rename(add: dict, delete: dict, candidate: str) -> dict:
+    """One R row. ``old_repo_path`` is the delete's full path."""
+    joined = dict(add)
+    joined["status"] = "R"
+    joined["old_path"] = delete["path"]
+    joined["old_sha"] = delete["old_sha"]
+    joined["old_mode"] = delete["old_mode"]
+    joined["history_role"] = "own"
+    joined["role_folder"] = candidate
+    return joined
+
+
+def _birth_commit(folder: str, rows: list[dict]) -> str | None:
+    """Oldest commit whose new path is this folder's own SKILL.md."""
+    index = _commit_index(rows)
+    birth = None
+    best = -1
+    for row in rows:
+        if not _is_skill_md_name(row["path"]) or _parent_folder(row["path"]) != folder:
+            continue
+        place = index[row["commit"]]
+        if place > best:
+            birth = row["commit"]
+            best = place
+    return birth
+
+
+def _extra_skill_folders(folder: str, follow_rows: list[dict]) -> list[str]:
+    """Parents of SKILL.md in the follow log, other than ``folder``."""
+    found: list[str] = []
+    for row in follow_rows:
+        for key in ("path", "old_path"):
+            path = row[key]
+            if not path or not _is_skill_md_name(path):
+                continue
+            parent = _parent_folder(path)
+            if parent in {folder, ".", ""} or parent in found:
+                continue
+            found.append(parent)
+    return found
+
+
+def _diff_tree_changes(clone_dir: Path, commit: str, timeout_seconds: int) -> list[dict]:
+    """Every file change in ``commit``, with no path limit. See GIT4b."""
+    # Git command GIT4b, see CODE_FLOW.md
+    text = run_git(
+        [
+            "diff-tree",
+            "-r",
+            "--find-renames",
+            "--no-abbrev",
+            "--no-commit-id",
+            "--raw",
+            commit,
+        ],
+        clone_dir,
+        timeout_seconds,
+        allow_lazy=True,
+    )
+    found: list[dict] = []
+    for line in text.splitlines():
+        if not line.startswith(":"):
+            continue
+        change = _parse_raw_line(line)
+        if change is not None:
+            found.append(change)
+    return found
+
+
+def _renamed_elsewhere(candidate: str, accepted: set[str], tree: list[dict]) -> bool:
+    """True when the candidate's SKILL.md moves to a folder outside ``accepted``."""
+    for change in tree:
+        if not _skill_left_candidate(change, candidate):
+            continue
+        if not _path_in_accepted(change["path"], accepted):
+            return True
+    return False
+
+
+def _left_toward(candidate: str, accepted: set[str], rows: list[dict]) -> bool:
+    """True when the candidate's SKILL.md moves into ``accepted`` or is deleted there."""
+    arrived = any(
+        _is_skill_md_name(row["path"]) and _path_in_accepted(row["path"], accepted) for row in rows
+    )
+    for row in rows:
+        if _skill_left_candidate(row, candidate) and _path_in_accepted(row["path"], accepted):
+            return True
+        if _deleted_skill(row, candidate) and arrived:
+            return True
+    return False
+
+
+def _deleted_skill(row: dict, candidate: str) -> bool:
+    """True when this row deletes the candidate's SKILL.md."""
+    return (
+        row["status"] == "D"
+        and _is_skill_md_name(row["path"])
+        and _path_in_folder(row["path"], candidate)
+    )
+
+
+def _arrived_in(rows: list[dict], commit: str, accepted: set[str]) -> bool:
+    """True when ``commit`` adds or edits SKILL.md inside an accepted folder."""
+    for row in rows:
+        if row["commit"] != commit:
+            continue
+        if _is_skill_md_name(row["path"]) and _path_in_accepted(row["path"], accepted):
+            return True
+    return False
+
+
+def _path_in_accepted(path: str, accepted: set[str]) -> bool:
+    """True when ``path`` sits in any folder in ``accepted``."""
+    return any(_path_in_folder(path, name) for name in accepted)
+
+
+def _skill_left_candidate(change: dict, candidate: str) -> bool:
+    """True when this row renames or copies SKILL.md out of ``candidate``."""
+    if change["status"] not in {"R", "C"} or not change.get("old_path"):
+        return False
+    if not _is_skill_md_name(change["old_path"]):
+        return False
+    return _path_in_folder(change["old_path"], candidate)
+
+
+def _candidate_row(row: dict, candidate: str, folder: str) -> bool:
+    """True when the row is in the other folder, not in this one."""
+    if _path_in_folder(row["path"], folder):
+        return False
+    if _path_in_folder(row["path"], candidate):
+        return True
+    return bool(row["old_path"]) and _path_in_folder(row["old_path"], candidate)
+
+
+def _moves_into(row: dict, candidate: str, folder: str) -> bool:
+    """True when this row renames or copies a file from ``candidate`` into ``folder``."""
+    if row["status"] not in {"R", "C"} or not row.get("old_path"):
+        return False
+    return _path_in_folder(row["old_path"], candidate) and _path_in_folder(row["path"], folder)
+
+
+def _as_plain_add(row: dict) -> dict:
+    """Store a false rename as an add. The old path belonged to another skill."""
+    added = dict(row)
+    added["status"] = "A"
+    added["old_path"] = ""
+    added["old_sha"] = _ZERO_SHA
+    added["old_mode"] = "000000"
+    added["history_role"] = "own"
+    return added
+
+
+def _path_in_folder(path: str, folder: str) -> bool:
+    """True when ``path`` is a file inside ``folder``. The root is only root files."""
+    if not path:
+        return False
+    if folder in {"", "."}:
+        return "/" not in path
+    return path.startswith(folder.strip("/") + "/")
+
+
+def _relative_to_one(path: str, folder: str) -> str:
+    """Path with one folder prefix removed. A root folder returns the path."""
+    if not path or folder in {"", "."}:
+        return path
+    prefix = folder.strip("/") + "/"
+    if path.startswith(prefix):
+        return path[len(prefix):]
+    return path
 
 
 def _keep_skill_life(
@@ -1329,6 +1852,10 @@ def _prefixes(folder: str, rows: list[dict]) -> list[str]:
     found: list[str] = []
     if folder not in {"", "."}:
         found.append(folder.strip("/"))
+    for row in rows:
+        extra = str(row.get("role_folder") or "")
+        if extra and extra not in {"", "."} and extra not in found:
+            found.append(extra)
     historical = _historical_skill_folders(folder, rows)
     for row in rows:
         for key in ("path", "old_path"):
@@ -1643,6 +2170,8 @@ def _status_frame(rows: list[dict]) -> pd.DataFrame:
     for column in _STATUS_COLUMNS:
         if column not in frame.columns:
             frame[column] = pd.NA
+    for column in ("not_ours", "after_copy", "twin"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0).astype("int64")
     return frame.loc[:, _STATUS_COLUMNS]
 
 

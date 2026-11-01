@@ -18,6 +18,8 @@ import pytest
 from skill_genealogy.git_history import (
     GitError,
     RepoResult,
+    _changes_frame,
+    _classify_folder_rows,
     clone_history_only,
     hash_author_email,
     head_commit,
@@ -662,6 +664,9 @@ def test_merge_shards_is_stable_and_splits_text_row_groups(tmp_path: Path) -> No
                 "is_skill_md": True,
                 "is_script": False,
                 "commit_seq": 1,
+                "repo_path": "skills/extra/SKILL.md",
+                "old_repo_path": "",
+                "history_role": "own",
             }
         ]
     )
@@ -716,6 +721,249 @@ def test_merge_shards_is_stable_and_splits_text_row_groups(tmp_path: Path) -> No
     status_json = json.loads((shard_dir / "acme__pdf.status.json").read_text(encoding="utf-8"))
     assert status_json["status"] == "ok"
     assert not (shard_dir / "acme__pdf.status.tmp").exists()
+
+
+def _long_skill(prefix: str) -> str:
+    """A SKILL.md body long enough for git to see a copy or a rename."""
+    lines = [f"{prefix} {index}" for index in range(30)]
+    return "# skill\n" + "\n".join(lines) + "\n"
+
+
+def test_delete_plus_add_becomes_former_folder(tmp_path: Path) -> None:
+    """A move git stores as D + A is a former folder, and the move row is R."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    (origin / "old").mkdir()
+    (origin / "old" / "SKILL.md").write_text("alpha\n")
+    _commit(origin, "add old", "2026-04-01T00:00:00+00:00")
+    (origin / "new").mkdir()
+    (origin / "new" / "SKILL.md").write_text("completely different text\n")
+    (origin / "old" / "SKILL.md").unlink()
+    env = _git_env("2026-04-02T00:00:00+00:00")
+    _git(origin, ["add", "-A"], env)
+    _git(origin, ["commit", "-m", "move unlike"], env)
+    clone = tmp_path / "clone"
+    clone_history_only("acme/move", clone, 60, url=origin.as_uri())
+    text = run_git(
+        [
+            "log",
+            "--raw",
+            "--no-abbrev",
+            "--find-renames",
+            "--date=iso-strict",
+            "--format=@@%H|%aI|%ae|%s",
+            "--",
+            "old/",
+            "new/",
+        ],
+        clone,
+        60,
+        allow_lazy=True,
+    )
+    rows = parse_raw_log(text)
+    assert any(row["status"] == "D" for row in rows)
+    assert any(row["status"] == "A" and row["path"] == "new/SKILL.md" for row in rows)
+    assert not any(row["status"] == "R" for row in rows)
+    classified, _drops = _classify_folder_rows("new", rows, rows, clone, 60)
+    frame = _changes_frame("acme/move", [("new", classified)])
+    former = frame[frame["history_role"] == "former_folder"]
+    assert list(former["file_path"]) == ["SKILL.md"]
+    assert list(former["repo_path"]) == ["old/SKILL.md"]
+    move = frame[frame["status"] == "R"].iloc[0]
+    assert move["old_repo_path"] == "old/SKILL.md"
+    assert move["file_path"] == "SKILL.md"
+    assert move["history_role"] == "own"
+
+
+def test_copy_keeps_source_rows_before_the_copy(tmp_path: Path) -> None:
+    """A source that still exists, and is not edited again, is a copy source."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    source = origin / "skills" / "src"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(_long_skill("same"))
+    _commit(origin, "add source", "2026-04-01T00:00:00+00:00")
+    dest = origin / "skills" / "dst"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text(_long_skill("same"))
+    _commit(origin, "copy", "2026-04-02T00:00:00+00:00")
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/copy")
+    assert result.status == "ok"
+    dest_rows = changes[changes["skill_folder"] == "skills/dst"]
+    copied = dest_rows[dest_rows["history_role"] == "copy_source"]
+    own = dest_rows[dest_rows["history_role"] == "own"]
+    assert list(copied["repo_path"]) == ["skills/src/SKILL.md"]
+    assert list(copied["file_path"]) == ["SKILL.md"]
+    assert list(own["repo_path"]) == ["skills/dst/SKILL.md"]
+    assert int(copied["commit_seq"].max()) < int(own["commit_seq"].min())
+    assert result.after_copy == 0
+    assert result.twin == 0
+
+
+def test_copy_drops_source_edits_after_the_copy(tmp_path: Path) -> None:
+    """Edits of the source after the copy are not rows of the destination."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    source = origin / "skills" / "src"
+    source.mkdir(parents=True)
+    body = _long_skill("same")
+    (source / "SKILL.md").write_text(body)
+    _commit(origin, "add source", "2026-04-01T00:00:00+00:00")
+    dest = origin / "skills" / "dst"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text(body)
+    _commit(origin, "copy", "2026-04-02T00:00:00+00:00")
+    (source / "SKILL.md").write_text(body + "later\n")
+    _commit(origin, "edit source", "2026-04-03T00:00:00+00:00")
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/copy")
+    dest_rows = changes[changes["skill_folder"] == "skills/dst"]
+    assert "edit source" not in set(dest_rows["subject"])
+    assert (dest_rows["history_role"] == "copy_source").any()
+    assert (dest_rows["history_role"] == "own").any()
+    assert result.after_copy >= 1
+
+
+def test_twins_keep_no_rows_of_the_other_folder(tmp_path: Path) -> None:
+    """Two folders added and edited together do not take each other's rows."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    body = _long_skill("twin")
+    for name in ("claude", "agents"):
+        folder = origin / name / "skills" / "x"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(body)
+    _commit(origin, "add twins", "2026-04-01T00:00:00+00:00")
+    edited = _long_skill("twin") + "edit\n"
+    for name in ("claude", "agents"):
+        (origin / name / "skills" / "x" / "SKILL.md").write_text(edited)
+    _commit(origin, "edit both", "2026-04-02T00:00:00+00:00")
+    _result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/twins")
+    for folder in ("claude/skills/x", "agents/skills/x"):
+        rows = changes[changes["skill_folder"] == folder]
+        assert len(rows) == 2
+        assert set(rows["history_role"]) == {"own"}
+        assert rows["repo_path"].str.startswith(folder + "/").all()
+
+
+def test_follow_to_a_third_folder_is_not_ours(tmp_path: Path) -> None:
+    """Rows are dropped when the birth commit renamed the file to another folder."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    other = origin / "skills" / "other"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text(_long_skill("same") + "old extra\n")
+    _commit(origin, "add other", "2026-04-01T00:00:00+00:00")
+    env = _git_env("2026-04-02T00:00:00+00:00")
+    (origin / "skills" / "third").mkdir()
+    _git(origin, ["mv", "skills/other/SKILL.md", "skills/third/SKILL.md"], env)
+    mine = origin / "skills" / "mine"
+    mine.mkdir()
+    (mine / "SKILL.md").write_text(_long_skill("same") + "mine extra\n")
+    _git(origin, ["add", "-A"], env)
+    _git(origin, ["commit", "-m", "split"], env)
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/third")
+    assert result.status == "ok"
+    assert result.not_ours >= 1
+    mine_rows = changes[changes["skill_folder"] == "skills/mine"]
+    assert not mine_rows["repo_path"].str.startswith("skills/other/").any()
+    assert not mine_rows["old_repo_path"].str.startswith("skills/other/").any()
+    assert set(mine_rows["history_role"]) == {"own"}
+    assert list(mine_rows["status"]) == ["A"]
+
+
+def test_former_arrival_does_not_repeat_file_path(tmp_path: Path) -> None:
+    """An old-folder edit in the copy commit does not add a second SKILL.md row.
+
+    The source is deleted only later, so the leave commit still has it:
+    those earlier rows are copy_source, not former_folder.
+    """
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    (origin / "old").mkdir()
+    (origin / "old" / "SKILL.md").write_text(_long_skill("same"))
+    _commit(origin, "add old", "2026-04-01T00:00:00+00:00")
+    env = _git_env("2026-04-02T00:00:00+00:00")
+    (origin / "new").mkdir()
+    (origin / "new" / "SKILL.md").write_text(_long_skill("same"))
+    (origin / "old" / "SKILL.md").write_text(_long_skill("same") + "edit\n")
+    _git(origin, ["add", "-A"], env)
+    _git(origin, ["commit", "-m", "copy and edit"], env)
+    env = _git_env("2026-04-03T00:00:00+00:00")
+    _git(origin, ["rm", "-r", "old"], env)
+    _git(origin, ["commit", "-m", "remove old"], env)
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/arrive")
+    assert result.status == "ok"
+    rows = changes[changes["skill_folder"] == "new"]
+    sizes = rows.groupby(["commit", "file_path"], sort=False).size()
+    assert int(sizes.max()) == 1
+    assert (rows["history_role"] == "copy_source").any()
+    assert (rows["history_role"] == "own").any()
+
+
+def test_reused_former_name_stays_former(tmp_path: Path) -> None:
+    """A new skill at an old folder name does not turn the old skill into a copy."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    folder = origin / "s" / "a"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# a\n")
+    (folder / "run.sh").write_text("echo a\n")
+    _commit(origin, "add a", "2026-07-01T00:00:00+00:00")
+    (folder / "SKILL.md").write_text("# a\n\nmore\n")
+    _commit(origin, "edit a", "2026-07-02T00:00:00+00:00")
+    env = _git_env("2026-07-03T00:00:00+00:00")
+    _git(origin, ["mv", "s/a", "s/b"], env)
+    _git(origin, ["commit", "-m", "a to b"], env)
+    reused = origin / "s" / "a"
+    reused.mkdir()
+    (reused / "SKILL.md").write_text("# new a\n")
+    _commit(origin, "new a", "2026-07-04T00:00:00+00:00")
+    env = _git_env("2026-07-05T00:00:00+00:00")
+    _git(origin, ["mv", "s/b", "s/c"], env)
+    _git(origin, ["commit", "-m", "b to c"], env)
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/reused-chain")
+    assert result.status == "ok"
+    assert result.after_copy == 0
+    assert result.not_ours == 1
+    moved = changes[changes["skill_folder"] == "s/c"]
+    assert list(moved["status"]) == ["A", "A", "M", "R", "R", "R", "R"]
+    assert set(moved["file_path"]) == {"SKILL.md", "run.sh"}
+    assert list(moved["history_role"].head(5)) == ["former_folder"] * 5
+    fresh = changes[changes["skill_folder"] == "s/a"]
+    assert list(zip(fresh["status"], fresh["history_role"], fresh["subject"], strict=True)) == [
+        ("A", "own", "new a")
+    ]
+
+
+def test_rename_chain_keeps_every_hop(tmp_path: Path) -> None:
+    """A rename a -> b -> c keeps a's files and the a -> b move."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    folder = origin / "s" / "a"
+    (folder / "scripts").mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# a\n")
+    (folder / "scripts" / "run.sh").write_text("echo a\n")
+    _commit(origin, "add a", "2026-06-01T00:00:00+00:00")
+    (folder / "SKILL.md").write_text("# a\n\nmore\n")
+    _commit(origin, "edit a", "2026-06-02T00:00:00+00:00")
+    env = _git_env("2026-06-03T00:00:00+00:00")
+    _git(origin, ["mv", "s/a", "s/b"], env)
+    _git(origin, ["commit", "-m", "a to b"], env)
+    (origin / "s" / "b" / "SKILL.md").write_text("# b\n")
+    _commit(origin, "edit b", "2026-06-04T00:00:00+00:00")
+    env = _git_env("2026-06-05T00:00:00+00:00")
+    _git(origin, ["mv", "s/b", "s/c"], env)
+    _git(origin, ["commit", "-m", "b to c"], env)
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/chain")
+    assert result.status == "ok"
+    assert result.not_ours == 0
+    rows = changes[changes["skill_folder"] == "s/c"]
+    assert list(rows["status"]) == ["A", "A", "M", "R", "R", "M", "R", "R"]
+    assert list(rows["commit_seq"]) == [1, 1, 2, 3, 3, 4, 5, 5]
+    assert rows.iloc[0]["status"] == "A"
+    hop = rows[(rows["status"] == "R") & (rows["commit_seq"] == 3)]
+    assert set(hop["history_role"]) == {"former_folder"}
+    assert hop["old_repo_path"].str.startswith("s/a/").all()
 
 
 def test_run_git_raises_on_failure(tmp_path: Path) -> None:

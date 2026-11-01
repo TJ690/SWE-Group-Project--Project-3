@@ -56,6 +56,9 @@ _STATUS_COLUMNS = [
     "head_commit",
     "seconds",
     "follow_renames",
+    "not_ours",
+    "after_copy",
+    "twin",
     "skill_folders",
     "changes",
 ]
@@ -447,6 +450,9 @@ def _status_row(
         "head_commit": result.head_commit,
         "seconds": result.seconds,
         "follow_renames": result.follow_renames,
+        "not_ours": result.not_ours,
+        "after_copy": result.after_copy,
+        "twin": result.twin,
         "skill_folders": folder_count,
         "changes": change_count,
     }
@@ -475,6 +481,10 @@ def _attach_counts(status: pd.DataFrame, changes: pd.DataFrame) -> pd.DataFrame:
     merged = base.merge(counts, on="repo", how="left")
     merged["skill_folders"] = merged["skill_folders"].fillna(0).astype("int64")
     merged["changes"] = merged["changes"].fillna(0).astype("int64")
+    for name in ("not_ours", "after_copy", "twin"):
+        if name not in merged.columns:
+            merged[name] = 0
+        merged[name] = pd.to_numeric(merged[name], errors="coerce").fillna(0).astype("int64")
     return merged.loc[:, _STATUS_COLUMNS]
 
 
@@ -600,6 +610,7 @@ def _print_report(
     totals = _change_totals(changes)
     text_rows, scripts_with_text, text_bytes = _text_stats(texts_path, _script_shas(changes))
     counts = _status_counts(status)
+    dropped = _dropped_row_totals(status)
     repeated = duplicate_change_keys(changes)
     if repeated:
         print(f"warning: duplicate_change_keys {repeated}", flush=True)
@@ -612,6 +623,9 @@ def _print_report(
         "skill_folders": totals["skill_folders"],
         "changes": totals["changes"],
         "skill_md_versions": totals["skill_md_versions"],
+        "not_ours": dropped["not_ours"],
+        "after_copy": dropped["after_copy"],
+        "twin": dropped["twin"],
         "scripts_with_text": scripts_with_text,
         "text_rows": text_rows,
         "text_bytes": text_bytes,
@@ -625,6 +639,17 @@ def _print_report(
     print_sample_records(changes, "Sample changes", 2)
     print_sample_records(_text_sample(texts_path), "Sample texts", 2)
     print_sample_records(status, "Sample status", 2)
+
+
+def _dropped_row_totals(status: pd.DataFrame) -> dict[str, int]:
+    """Rows dropped because another folder was not this skill, summed over repos."""
+    totals = {}
+    for name in ("not_ours", "after_copy", "twin"):
+        if status.empty or name not in status.columns:
+            totals[name] = 0
+            continue
+        totals[name] = int(pd.to_numeric(status[name], errors="coerce").fillna(0).sum())
+    return totals
 
 
 def _status_counts(status: pd.DataFrame) -> dict[str, int]:
