@@ -107,8 +107,17 @@ CANDIDATE_LANGUAGES: tuple[Language, ...] = (
 NEAR_COPY_MIN_JACCARD = 0.80
 # Broder 1997 containment, our choice.
 NEAR_COPY_MIN_CONTAINMENT = 0.80
-# Line-diff check after a near match.
+# A23: LSH band used only to gather containment candidates. Near copies use
+# NEAR_COPY_MIN_JACCARD. A copy can contain the older text and still have a
+# Jaccard below 0.80, so those pairs are queried at 0.5. A copy that grew
+# much larger than the source can fall below 0.5 and be missed.
+REHOST_CONTAINMENT_LSH_THRESHOLD = 0.5
+# Line-diff check after a near match. A link below this share of registry
+# body lines is dropped. 0.50 keeps a copy that still has half the source lines.
 MIN_VERIFIED_LINE_SHARE = 0.50
+# A27: pass a lineage only through s2_clusters rows at this threshold.
+# The file also has 0.60 clusters. Those group looser neighbours and are not used.
+CLUSTER_LINK_THRESHOLD = 0.80
 # A22: a line shared by this many GitHub owners is template text.
 # G12 keeps 50 unless the top 30 lines are real skill content (see PROGRESS).
 BOILERPLATE_MIN_OWNERS = 50
