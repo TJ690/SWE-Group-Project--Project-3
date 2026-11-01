@@ -8,16 +8,22 @@ import pandas as pd
 
 from skill_genealogy.build_registry_lineages import (
     CHANGE_COLUMNS,
+    COMMIT_MANIFEST_COLUMNS,
     FRONT_MATTER_FIELDS,
+    PACKAGE_COLUMNS,
+    STORED_MANIFEST_COLUMNS,
     TEXT_CHANGE_FIELDS,
     _copied_from_not_kept,
     _finish_lineages,
+    _manifests_for_packages,
     compare_consecutive_versions,
     join_renamed_folders,
     label_lineage_language,
     mark_removed_lineages,
+    number_package_versions,
     number_text_versions,
     read_skill_md_changes,
+    rebuild_folder_manifests,
 )
 from skill_genealogy.compare_texts import TextChange, compare_front_matter
 
@@ -566,3 +572,273 @@ def test_read_skill_md_changes_keeps_only_skill_rows(tmp_path, monkeypatch) -> N
     )
     got = read_skill_md_changes(True)
     assert list(got["file_path"]) == ["SKILL.md"]
+
+
+def _folder(**overrides: object) -> dict[str, object]:
+    """One folder-file change. Override any field the case cares about."""
+    base: dict[str, object] = {
+        "lineage_id": "acme/copy::skills/new",
+        "repo": "acme/copy",
+        "skill_folder": "skills/new",
+        "history_role": "own",
+        "status": "A",
+        "file_path": "SKILL.md",
+        "old_file_path": "",
+        "repo_path": "",
+        "old_repo_path": "",
+        "new_sha": "blob",
+        "new_mode": "100644",
+        "commit": "c1",
+        "commit_date": "2026-01-01T00:00:00Z",
+        "commit_seq": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def _text_version(commit: str, seq: int = 1, date: str = "2026-01-01T00:00:00Z") -> dict:
+    """One SKILL.md version row. The text itself is not needed here."""
+    return {
+        "lineage_id": "acme/copy::skills/new",
+        "version_seq": seq,
+        "commit": commit,
+        "commit_date": date,
+    }
+
+
+def _files_at(manifests: pd.DataFrame, commit: str) -> dict[str, str]:
+    """Path to sha after ``commit``. A commit with no package files returns {}."""
+    rows = manifests.loc[manifests["commit"] == commit]
+    found: dict[str, str] = {}
+    for path, sha in zip(rows["path"], rows["sha"], strict=True):
+        if pd.isna(path):
+            continue
+        found[str(path)] = str(sha)
+    return found
+
+
+def test_folder_edits_make_five_package_versions() -> None:
+    """Five commits, one package version each. The SKILL.md text stays version 1."""
+    rows = [
+        _folder(commit="c1", commit_seq=1, commit_date="2026-01-01T00:00:00Z"),
+        _folder(
+            commit="c1",
+            commit_seq=1,
+            commit_date="2026-01-01T00:00:00Z",
+            file_path="references/x.md",
+            new_sha="ref",
+        ),
+        _folder(
+            commit="c2",
+            commit_seq=2,
+            commit_date="2026-01-02T00:00:00Z",
+            status="A",
+            file_path="scripts/a.py",
+            new_sha="py1",
+        ),
+        _folder(
+            commit="c3",
+            commit_seq=3,
+            commit_date="2026-01-03T00:00:00Z",
+            status="M",
+            file_path="scripts/a.py",
+            new_sha="py2",
+        ),
+        _folder(
+            commit="c4",
+            commit_seq=4,
+            commit_date="2026-01-04T00:00:00Z",
+            status="R",
+            file_path="scripts/b.py",
+            old_file_path="scripts/a.py",
+            new_sha="py2",
+        ),
+        _folder(
+            commit="c5",
+            commit_seq=5,
+            commit_date="2026-01-05T00:00:00Z",
+            status="D",
+            file_path="references/x.md",
+            new_sha="0" * 40,
+            new_mode="000000",
+        ),
+    ]
+    manifests = rebuild_folder_manifests(pd.DataFrame(rows))
+    packages = number_package_versions(manifests, pd.DataFrame([_text_version("c1")]))
+    stored = _manifests_for_packages(manifests, packages)
+    assert list(packages["package_version_seq"]) == [1, 2, 3, 4, 5]
+    assert [int(value) for value in packages["version_seq"]] == [1, 1, 1, 1, 1]
+    assert list(packages["commit"]) == ["c1", "c2", "c3", "c4", "c5"]
+    assert list(packages["changed_skill_md"]) == [True, False, False, False, False]
+    assert list(packages["changed_scripts"]) == [False, True, True, True, False]
+    assert list(packages["changed_other_files"]) == [True, False, False, False, True]
+    assert list(packages["file_count"]) == [1, 2, 2, 2, 1]
+    assert list(packages["script_count"]) == [0, 1, 1, 1, 1]
+    assert _files_at(manifests, "c1") == {"references/x.md": "ref"}
+    assert _files_at(manifests, "c2") == {"references/x.md": "ref", "scripts/a.py": "py1"}
+    assert _files_at(manifests, "c3") == {"references/x.md": "ref", "scripts/a.py": "py2"}
+    assert _files_at(manifests, "c4") == {"references/x.md": "ref", "scripts/b.py": "py2"}
+    assert _files_at(manifests, "c5") == {"scripts/b.py": "py2"}
+    assert "SKILL.md" not in set(stored["path"])
+    categories = dict(zip(stored["path"], stored["file_category"], strict=True))
+    assert categories["scripts/b.py"] == "script"
+    assert categories["references/x.md"] == "reference"
+    assert list(stored["size"].isna()) == [True] * len(stored)
+    assert list(packages.columns) == PACKAGE_COLUMNS
+    assert list(stored.columns) == STORED_MANIFEST_COLUMNS
+
+
+def test_node_modules_file_is_ignored() -> None:
+    """A vendored path does not change the package. A real script in that commit does."""
+    rows = [
+        _folder(commit="c1", commit_seq=1, commit_date="2026-01-01T00:00:00Z"),
+        _folder(
+            commit="c2",
+            commit_seq=2,
+            commit_date="2026-01-02T00:00:00Z",
+            file_path="node_modules/left-pad/index.js",
+            new_sha="vendored",
+        ),
+        _folder(
+            commit="c3",
+            commit_seq=3,
+            commit_date="2026-01-03T00:00:00Z",
+            file_path="scripts/a.py",
+            new_sha="py1",
+        ),
+        _folder(
+            commit="c3",
+            commit_seq=3,
+            commit_date="2026-01-03T00:00:00Z",
+            file_path="node_modules/other/index.js",
+            new_sha="also-vendored",
+        ),
+    ]
+    manifests = rebuild_folder_manifests(pd.DataFrame(rows))
+    packages = number_package_versions(manifests, pd.DataFrame([_text_version("c1")]))
+    assert list(packages["commit"]) == ["c1", "c3"]
+    assert list(packages["package_version_seq"]) == [1, 2]
+    assert _files_at(manifests, "c2") == {}
+    assert _files_at(manifests, "c3") == {"scripts/a.py": "py1"}
+    assert int(packages.iloc[1]["script_count"]) == 1
+
+
+def test_same_relative_path_rename_does_not_start_a_package_version() -> None:
+    """Renaming the skill folder keeps the file. The package content does not change."""
+    rows = [
+        _folder(commit="c1", commit_seq=1, commit_date="2026-01-01T00:00:00Z"),
+        _folder(
+            commit="c2",
+            commit_seq=2,
+            commit_date="2026-01-02T00:00:00Z",
+            history_role="former_folder",
+            file_path="scripts/a.py",
+            repo_path="skills/old/scripts/a.py",
+            new_sha="py1",
+        ),
+        _folder(
+            commit="c3",
+            commit_seq=3,
+            commit_date="2026-01-03T00:00:00Z",
+            status="R",
+            file_path="scripts/a.py",
+            old_file_path="scripts/a.py",
+            repo_path="skills/new/scripts/a.py",
+            old_repo_path="skills/old/scripts/a.py",
+            new_sha="py1",
+        ),
+    ]
+    manifests = rebuild_folder_manifests(pd.DataFrame(rows))
+    packages = number_package_versions(manifests, pd.DataFrame([_text_version("c1")]))
+    assert list(packages["commit"]) == ["c1", "c2"]
+    assert _files_at(manifests, "c3") == {"scripts/a.py": "py1"}
+
+
+def test_copy_source_and_outside_files_are_not_package_files() -> None:
+    """A source skill's files, and a prompt that never sat in this folder, stay out."""
+    prompt = ".github/prompts/perf-test.prompt.md"
+    rows = [
+        _folder(commit="c1", commit_seq=1, commit_date="2026-01-01T00:00:00Z"),
+        _folder(
+            commit="c2",
+            commit_seq=2,
+            commit_date="2026-01-02T00:00:00Z",
+            history_role="copy_source",
+            file_path="scripts/secret.py",
+            repo_path="skills/src/scripts/secret.py",
+            new_sha="secret",
+        ),
+        _folder(
+            commit="c3",
+            commit_seq=3,
+            commit_date="2026-01-03T00:00:00Z",
+            file_path=prompt,
+            repo_path=prompt,
+            new_sha="prompt",
+        ),
+    ]
+    manifests = rebuild_folder_manifests(pd.DataFrame(rows))
+    packages = number_package_versions(manifests, pd.DataFrame([_text_version("c1")]))
+    assert list(packages["commit"]) == ["c1"]
+    assert int(packages.iloc[0]["file_count"]) == 0
+    assert _files_at(manifests, "c1") == {}
+
+
+def test_whitespace_skill_edit_does_not_start_a_package_version() -> None:
+    """A later SKILL.md commit is a package version only when the text version changes."""
+    rows = [
+        _folder(commit="c1", commit_seq=1, commit_date="2026-01-01T00:00:00Z", new_sha="v1"),
+        _folder(
+            commit="c2",
+            commit_seq=2,
+            commit_date="2026-01-02T00:00:00Z",
+            status="M",
+            new_sha="v1-space",
+        ),
+        _folder(
+            commit="c3",
+            commit_seq=3,
+            commit_date="2026-01-03T00:00:00Z",
+            file_path="scripts/a.py",
+            new_sha="py1",
+        ),
+    ]
+    manifests = rebuild_folder_manifests(pd.DataFrame(rows))
+    packages = number_package_versions(manifests, pd.DataFrame([_text_version("c1")]))
+    assert list(packages["commit"]) == ["c1", "c3"]
+    assert [int(value) for value in packages["version_seq"]] == [1, 1]
+    assert list(packages["changed_skill_md"]) == [True, False]
+
+
+def test_empty_inputs_return_empty_tables() -> None:
+    """No folder changes and no text versions return empty tables with the right columns."""
+    manifests = rebuild_folder_manifests(pd.DataFrame())
+    packages = number_package_versions(pd.DataFrame(), pd.DataFrame())
+    assert manifests.empty
+    assert packages.empty
+    assert list(manifests.columns) == COMMIT_MANIFEST_COLUMNS
+    assert list(packages.columns) == PACKAGE_COLUMNS
+
+
+def test_nested_skill_md_stays_in_the_manifest_as_a_reference() -> None:
+    """cn/SKILL.md is a folder file. The root SKILL.md stays out of the manifest."""
+    rows = [
+        _folder(commit="c1", commit_seq=1, commit_date="2026-01-01T00:00:00Z"),
+        _folder(
+            commit="c1",
+            commit_seq=1,
+            commit_date="2026-01-01T00:00:00Z",
+            file_path="cn/SKILL.md",
+            new_sha="nested",
+        ),
+    ]
+    manifests = rebuild_folder_manifests(pd.DataFrame(rows))
+    packages = number_package_versions(manifests, pd.DataFrame([_text_version("c1")]))
+    stored = _manifests_for_packages(manifests, packages)
+    assert _files_at(manifests, "c1") == {"cn/SKILL.md": "nested"}
+    assert list(stored["path"]) == ["cn/SKILL.md"]
+    assert list(stored["file_category"]) == ["reference"]
+    assert "SKILL.md" not in set(stored["path"])
+    assert int(packages.iloc[0]["file_count"]) == 1
+    assert bool(packages.iloc[0]["changed_other_files"]) is True
+    assert bool(packages.iloc[0]["changed_scripts"]) is False

@@ -7,7 +7,9 @@ Inputs: ``registry_history_changes.parquet``, ``registry_history_texts.parquet``
 ``registry_history_status.parquet`` under ``data_dir(dev)``, and
 ``registries.parquet`` in the full data folder.
 Outputs: ``lineages.parquet``, ``lineage_versions.parquet``,
-``lineage_changes.parquet`` and ``lineages_dropped.parquet`` in ``data_dir(dev)``.
+``lineage_changes.parquet``, ``lineages_dropped.parquet``,
+``lineage_package_versions.parquet`` and ``lineage_folder_manifests.parquet``
+in ``data_dir(dev)``.
 Run:
     python -m skill_genealogy.build_registry_lineages --dev
 """
@@ -22,7 +24,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from skill_genealogy.compare_texts import TextChange, compare_front_matter, compare_texts
+from skill_genealogy.compare_texts import (
+    TextChange,
+    compare_front_matter,
+    compare_texts,
+    file_category,
+    is_skipped_path,
+)
 from skill_genealogy.file_helpers import (
     build_arg_parser,
     check_inputs_exist,
@@ -54,6 +62,17 @@ SELECT sha, text
 FROM read_parquet(?)
 WHERE sha IN (SELECT unnest(?))
 """
+
+# Query Q4.3, see QUERIES.md
+LINEAGE_FOLDER_CHANGES_SQL = """
+SELECT *
+FROM read_parquet(?)
+WHERE history_role IN ('own', 'former_folder')
+  AND repo || '::' || skill_folder IN (SELECT unnest(?))
+"""
+
+# Deletes first, then renames, then adds. A same-commit replace keeps the new file.
+_APPLY_ORDER = {"D": 0, "R": 1, "T": 2, "A": 3, "C": 3, "M": 4}
 
 TEXT_CHANGE_FIELDS = [item.name for item in fields(TextChange)]
 FRONT_MATTER_FIELDS = [
@@ -106,7 +125,41 @@ OUTPUT_NAMES = (
     "lineage_versions.parquet",
     "lineage_changes.parquet",
     "lineages_dropped.parquet",
+    "lineage_package_versions.parquet",
+    "lineage_folder_manifests.parquet",
 )
+PACKAGE_COLUMNS = [
+    "lineage_id",
+    "package_version_seq",
+    "version_seq",
+    "commit",
+    "commit_date",
+    "changed_skill_md",
+    "changed_scripts",
+    "changed_other_files",
+    "file_count",
+    "script_count",
+]
+STORED_MANIFEST_COLUMNS = [
+    "lineage_id",
+    "package_version_seq",
+    "path",
+    "sha",
+    "mode",
+    "size",
+    "file_category",
+]
+COMMIT_MANIFEST_COLUMNS = [
+    "lineage_id",
+    "commit",
+    "commit_date",
+    "commit_seq",
+    "path",
+    "sha",
+    "mode",
+    "size",
+    "file_category",
+]
 
 
 def read_skill_md_changes(dev: bool) -> pd.DataFrame:
@@ -286,15 +339,99 @@ def compare_consecutive_versions(versions: pd.DataFrame, texts: dict[str, str]) 
     return pd.DataFrame(records).loc[:, CHANGE_COLUMNS]
 
 
+# Algorithm A21, see CODE_FLOW.md
+def rebuild_folder_manifests(folder_changes: pd.DataFrame) -> pd.DataFrame:
+    """Replay each lineage's folder changes into one manifest per commit.
+
+    Walk commits oldest first. ``A`` and ``M`` set ``path -> (sha, mode)``.
+    ``D`` removes that path. ``R`` moves the old path to the new path.
+    The root ``SKILL.md`` is not stored: it is the text version. A path
+    inside ``SKIPPED_FOLDERS`` is ignored. ``copy_source`` rows are ignored.
+    A file that never lived under this skill folder, or under a former
+    name of it, is ignored. A commit that leaves no package files still
+    has one row, and ``path`` is null, so the commit is not lost.
+
+    Inputs: change rows with ``lineage_id`` or ``repo`` and ``skill_folder``,
+    plus ``commit``, ``commit_date``, ``commit_seq``, ``status``,
+    ``file_path``, ``new_sha`` and ``new_mode``.
+    Outputs: one row per file per commit. ``size`` is null because the
+    history table does not store blob size.
+
+    Example:
+    >>> import pandas as pd
+    >>> rows = pd.DataFrame([
+    ...     _package_change("c1", 1, "A", "SKILL.md", "", "s", "100644"),
+    ...     _package_change("c2", 2, "A", "scripts/a.py", "", "p", "100644"),
+    ... ])
+    >>> found = rebuild_folder_manifests(rows)
+    >>> list(found.loc[found["path"].notna(), "path"])
+    ['scripts/a.py']
+    """
+    if folder_changes.empty:
+        return _empty_commit_manifests()
+    prepared = _prepare_folder_changes(folder_changes)
+    if prepared.empty:
+        return _empty_commit_manifests()
+    records: list[dict] = []
+    grouped = prepared.groupby("lineage_id", sort=False)
+    for lineage_id, group in grouped:
+        records.extend(_manifests_of_lineage(str(lineage_id), group))
+    return _commit_manifests_frame(records)
+
+
+# Algorithm A21, see CODE_FLOW.md
+def number_package_versions(manifests: pd.DataFrame, versions: pd.DataFrame) -> pd.DataFrame:
+    """Number a package version when the folder or the SKILL.md version changes.
+
+    ``version_seq`` is the text version in force after that commit.
+    ``changed_skill_md`` is true when this commit is the one that introduced
+    that text version. ``changed_scripts`` and ``changed_other_files`` come
+    from the manifest diff. ``file_category`` decides which flag. A commit
+    that only repeats the same text, or only touches a skipped folder, is
+    not a package version. ``package_version_seq`` starts at 1.
+
+    Inputs: ``manifests`` from ``rebuild_folder_manifests``.
+    ``versions`` — text versions with ``lineage_id``, ``version_seq`` and ``commit``.
+    Outputs: one row per package version.
+
+    Example:
+    >>> import pandas as pd
+    >>> rows = pd.DataFrame([
+    ...     _package_change("c1", 1, "A", "SKILL.md", "", "s", "100644"),
+    ...     _package_change("c2", 2, "A", "scripts/a.py", "", "p", "100644"),
+    ... ])
+    >>> manifests = rebuild_folder_manifests(rows)
+    >>> versions = pd.DataFrame([{
+    ...     "lineage_id": "acme/app::skills/a", "version_seq": 1,
+    ...     "commit": "c1", "commit_date": "2026-01-01T00:00:00Z",
+    ... }])
+    >>> packages = number_package_versions(manifests, versions)
+    >>> list(packages["package_version_seq"])
+    [1, 2]
+    >>> bool(packages.iloc[1]["changed_scripts"])
+    True
+    """
+    if not versions.empty:
+        _require(versions, ["lineage_id", "version_seq", "commit"], "versions")
+    if manifests.empty and versions.empty:
+        return _empty_packages()
+    records: list[dict] = []
+    for lineage_id in _package_lineage_ids(manifests, versions):
+        manifest_group = _group_for(manifests, lineage_id)
+        version_group = _group_for(versions, lineage_id)
+        records.extend(_packages_of_lineage(lineage_id, manifest_group, version_group))
+    return _packages_frame(records)
+
+
 def main() -> None:
-    """Build lineage tables from registry SKILL.md history.
+    """Build lineage tables and package versions from registry history.
 
     ``--dev`` reads and writes the dev data folder. ``--force`` rebuilds
-    the four parquet files when they already exist. Without ``--force``,
+    the six parquet files when they already exist. Without ``--force``,
     a second run prints the saved counts and does not rewrite them.
 
     Inputs: command-line flags and the stage 3 history tables.
-    Outputs: the four parquet files. Nothing is returned.
+    Outputs: the six parquet files. Nothing is returned.
     """
     args = build_arg_parser("Build one lineage per registry skill folder.").parse_args()
     paths = _output_paths(args.dev)
@@ -337,6 +474,41 @@ def main() -> None:
         elapsed,
         copied_from_not_kept,
     )
+    # Step 8: Rebuild folder manifests (algorithm A21)
+    folder_changes = _read_lineage_folder_changes(args.dev, lineages)
+    print(f"Step 8: rebuild folder manifests from {len(folder_changes)} changes", flush=True)
+    manifests = rebuild_folder_manifests(folder_changes)
+    # Step 9: Number package versions
+    print(f"Step 9: number package versions for {len(lineages)} lineages", flush=True)
+    packages = number_package_versions(manifests, kept)
+    # Step 10: Save package tables and print the summary
+    stored = _manifests_for_packages(manifests, packages)
+    _save_packages(args.dev, packages, stored)
+    _print_package_report(lineages, packages, stored, time.perf_counter() - started)
+
+
+def _package_change(
+    commit: str,
+    commit_seq: int,
+    status: str,
+    file_path: str,
+    old_file_path: str,
+    new_sha: str,
+    new_mode: str,
+) -> dict[str, object]:
+    """One folder-change row for the package-version doctests."""
+    return {
+        "lineage_id": "acme/app::skills/a",
+        "commit": commit,
+        "commit_date": f"2026-01-0{commit_seq}T00:00:00Z",
+        "commit_seq": commit_seq,
+        "status": status,
+        "file_path": file_path,
+        "old_file_path": old_file_path,
+        "new_sha": new_sha,
+        "new_mode": new_mode,
+        "history_role": "own",
+    }
 
 
 def _version_row(sha: str, commit_seq: int, commit_date: str) -> dict[str, object]:
@@ -890,7 +1062,7 @@ def _history_dir(dev: bool) -> Path:
 
 
 def _output_paths(dev: bool) -> list[Path]:
-    """The four lineage parquet files for this mode."""
+    """The six lineage and package parquet files for this mode."""
     folder = data_dir(dev)
     return [folder / name for name in OUTPUT_NAMES]
 
@@ -953,6 +1125,8 @@ def _print_saved(dev: bool) -> None:
     versions = read_parquet(folder / OUTPUT_NAMES[1])
     version_changes = read_parquet(folder / OUTPUT_NAMES[2])
     dropped = read_parquet(folder / OUTPUT_NAMES[3])
+    packages = read_parquet(folder / OUTPUT_NAMES[4])
+    stored = read_parquet(folder / OUTPUT_NAMES[5])
     reasons = _reason_counts(dropped)
     removed = 0 if lineages.empty else int(lineages["registry_removed"].map(_is_true).sum())
     print_summary(
@@ -964,12 +1138,16 @@ def _print_saved(dev: bool) -> None:
             "removed": removed,
             "dropped_not_english": reasons.get("not_english", 0),
             "dropped_no_text": reasons.get("no_text", 0),
+            "package_versions": len(packages),
+            "manifest_files": len(stored),
         },
     )
     print_sample_records(lineages, "Sample lineages")
     print_sample_records(versions, "Sample lineage versions")
     print_sample_records(version_changes, "Sample lineage changes")
     print_sample_records(dropped, "Sample dropped lineages")
+    print_sample_records(packages, "Sample package versions")
+    print_sample_records(stored, "Sample folder manifests")
 
 
 def _per_registry_counts(lineages: pd.DataFrame, status: pd.DataFrame) -> list[int]:
@@ -1191,6 +1369,560 @@ def _empty_lineages() -> pd.DataFrame:
 def _empty_version_changes() -> pd.DataFrame:
     """A change table with every TextChange and front-matter column, and no rows."""
     return pd.DataFrame(columns=CHANGE_COLUMNS)
+
+
+def _read_lineage_folder_changes(dev: bool, lineages: pd.DataFrame) -> pd.DataFrame:
+    """Own and former-folder changes for the kept English lineages.
+
+    Query Q4.3. ``copy_source`` rows stay out: they are the source skill's
+    history, and that source has its own lineage. An empty lineage list
+    reads nothing.
+
+    Inputs: ``dev`` — which history folder. ``lineages`` — kept lineage ids.
+    Outputs: the matching change rows. Raises nothing when the list is empty.
+    """
+    if lineages.empty or "lineage_id" not in lineages.columns:
+        return _empty_folder_changes()
+    lineage_ids = [str(item) for item in lineages["lineage_id"]]
+    path = _history_dir(dev) / "registry_history_changes.parquet"
+    connection = connect_duckdb()
+    try:
+        return connection.execute(LINEAGE_FOLDER_CHANGES_SQL, [str(path), lineage_ids]).fetchdf()
+    finally:
+        connection.close()
+
+
+def _prepare_folder_changes(folder_changes: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows this lineage owns, and make sure ``lineage_id`` is set."""
+    needed = ["commit", "commit_date", "commit_seq", "status", "file_path", "new_sha", "new_mode"]
+    _require(folder_changes, needed, "folder_changes")
+    prepared = _ensure_lineage_id(folder_changes)
+    if "old_file_path" not in prepared.columns:
+        prepared = prepared.copy()
+        prepared["old_file_path"] = ""
+    return _own_folder_rows(prepared)
+
+
+def _ensure_lineage_id(frame: pd.DataFrame) -> pd.DataFrame:
+    """Use ``lineage_id`` when every row has one. Otherwise build ``repo::folder``."""
+    if "lineage_id" in frame.columns:
+        present = [_none_if_missing(value) for value in frame["lineage_id"]]
+        if all(item is not None for item in present):
+            return frame
+    _require(frame, ["repo", "skill_folder"], "folder_changes")
+    copied = frame.copy()
+    copied["lineage_id"] = [
+        f"{_clean(repo)}::{_clean(folder)}"
+        for repo, folder in zip(copied["repo"], copied["skill_folder"], strict=True)
+    ]
+    return copied
+
+
+def _own_folder_rows(changes: pd.DataFrame) -> pd.DataFrame:
+    """Drop ``copy_source`` rows. A blank role is kept, so a small test still runs."""
+    if "history_role" not in changes.columns:
+        return changes
+    role = changes["history_role"].map(_clean)
+    keep = role.isin(list(OWN_ROLES)) | role.eq("")
+    return changes.loc[keep].copy()
+
+
+def _manifests_of_lineage(lineage_id: str, group: pd.DataFrame) -> list[dict]:
+    """Apply one lineage's commits and record the folder after each commit."""
+    ordered = _ordered_folder_changes(group)
+    state: dict[str, tuple[str, str]] = {}
+    records: list[dict] = []
+    for commit, rows in _iter_commits(ordered):
+        _apply_change_rows(state, rows)
+        first = rows[0]
+        records.extend(
+            _snapshot_rows(
+                lineage_id,
+                commit,
+                _clean(first["commit_date"]),
+                _commit_seq(first["commit_seq"]),
+                state,
+            )
+        )
+    return records
+
+
+def _ordered_folder_changes(group: pd.DataFrame) -> pd.DataFrame:
+    """Commit date, then ``commit_seq``, then delete / rename / add."""
+    ordered = _with_sort_time(group)
+    status = ordered["status"].map(_clean).str[:1]
+    ordered["apply_rank"] = status.map(_APPLY_ORDER).fillna(5)
+    return ordered.sort_values(
+        ["sort_time", "commit_seq", "apply_rank", "file_path"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def _iter_commits(ordered: pd.DataFrame):
+    """Yield ``(commit, rows)`` in the order ``ordered`` already has."""
+    current = ""
+    bucket: list[dict] = []
+    for row in ordered.to_dict("records"):
+        commit = _clean(row["commit"])
+        if bucket and commit != current:
+            yield current, bucket
+            bucket = []
+        current = commit
+        bucket.append(row)
+    if bucket:
+        yield current, bucket
+
+
+def _apply_change_rows(state: dict[str, tuple[str, str]], rows: list[dict]) -> None:
+    """Apply every file change in one commit to ``state``."""
+    for row in rows:
+        _apply_one_change(state, row)
+
+
+def _apply_one_change(state: dict[str, tuple[str, str]], row: dict) -> None:
+    """One ``A``, ``M``, ``D`` or ``R`` against the running path map.
+
+    A rename that keeps the same skill-relative path (the folder was renamed)
+    updates sha and mode in place. A copy (``C``) adds the new path and
+    leaves the old path.
+    """
+    status = _clean(row.get("status"))[:1]
+    new_path = _manifest_path(row, "new")
+    old_path = _manifest_path(row, "old")
+    if status == "D":
+        path = new_path or old_path
+        if path:
+            state.pop(path, None)
+        return
+    if status == "R":
+        if old_path and old_path != new_path:
+            state.pop(old_path, None)
+        if new_path:
+            state[new_path] = (_clean(row.get("new_sha")), _clean(row.get("new_mode")))
+        return
+    if new_path and status in {"A", "M", "C", "T"}:
+        state[new_path] = (_clean(row.get("new_sha")), _clean(row.get("new_mode")))
+
+
+def _manifest_path(row: dict, side: str) -> str:
+    """Skill-relative path to store, or ``""`` when this side is not a package file."""
+    relative = _clean(row.get("file_path" if side == "new" else "old_file_path"))
+    repo_path = _clean(row.get("repo_path" if side == "new" else "old_repo_path"))
+    folder = _clean(row.get("skill_folder"))
+    if not relative or not _path_in_this_skill(repo_path, relative, folder):
+        return ""
+    if _is_root_skill_md(relative) or is_skipped_path(relative):
+        return ""
+    return relative
+
+
+def _path_in_this_skill(repo_path: str, relative: str, folder: str) -> bool:
+    """True when the file sits in this skill folder or in a former name of it.
+
+    A blank ``repo_path`` has no evidence the file is outside, so the row is
+    kept. Stage 3 leaves ``file_path`` equal to ``repo_path`` when the file
+    was never under a skill folder. Those rows are outside the package.
+    """
+    if not repo_path or folder in {"", "."}:
+        return True
+    if repo_path.startswith(folder.strip("/") + "/"):
+        return True
+    return bool(relative) and repo_path != relative and repo_path.endswith("/" + relative)
+
+
+def _is_root_skill_md(path: str) -> bool:
+    """True for ``SKILL.md`` at the skill-folder root, in any letter case."""
+    return "/" not in path and path.lower() == "skill.md"
+
+
+def _snapshot_rows(
+    lineage_id: str,
+    commit: str,
+    commit_date: str,
+    commit_seq: int,
+    state: dict[str, tuple[str, str]],
+) -> list[dict]:
+    """One manifest row per file. An empty folder still records the commit."""
+    base = {
+        "lineage_id": lineage_id,
+        "commit": commit,
+        "commit_date": commit_date,
+        "commit_seq": commit_seq,
+        "size": None,
+    }
+    if not state:
+        return [{**base, "path": None, "sha": None, "mode": None, "file_category": None}]
+    rows = []
+    for path in sorted(state):
+        sha, mode = state[path]
+        rows.append(
+            {
+                **base,
+                "path": path,
+                "sha": sha,
+                "mode": mode,
+                "file_category": file_category(path, mode),
+            }
+        )
+    return rows
+
+
+def _commit_manifests_frame(records: list[dict]) -> pd.DataFrame:
+    """The per-commit manifest table. ``size`` stays a nullable integer."""
+    if not records:
+        return _empty_commit_manifests()
+    frame = pd.DataFrame(records, columns=COMMIT_MANIFEST_COLUMNS)
+    frame["commit_seq"] = frame["commit_seq"].astype("int64")
+    frame["size"] = pd.array([None] * len(frame), dtype="Int64")
+    return frame
+
+
+def _empty_commit_manifests() -> pd.DataFrame:
+    """A per-commit manifest table with the right columns and no rows."""
+    frame = pd.DataFrame(columns=COMMIT_MANIFEST_COLUMNS)
+    frame["commit_seq"] = pd.Series(dtype="int64")
+    frame["size"] = pd.Series(dtype="Int64")
+    return frame
+
+
+def _empty_folder_changes() -> pd.DataFrame:
+    """A change table with no rows, used when no lineage was kept."""
+    return pd.DataFrame(columns=["lineage_id", "repo", "skill_folder", "history_role"])
+
+
+def _package_lineage_ids(manifests: pd.DataFrame, versions: pd.DataFrame) -> list[str]:
+    """Lineage ids that have a manifest commit or a text version, first-seen order."""
+    found: list[str] = []
+    for frame in (manifests, versions):
+        if frame.empty or "lineage_id" not in frame.columns:
+            continue
+        for value in frame["lineage_id"]:
+            lineage_id = _clean(value)
+            if lineage_id and lineage_id not in found:
+                found.append(lineage_id)
+    return found
+
+
+def _group_for(frame: pd.DataFrame, lineage_id: str) -> pd.DataFrame:
+    """Rows of one lineage, or an empty frame when that lineage is absent."""
+    if frame.empty or "lineage_id" not in frame.columns:
+        return frame.iloc[0:0]
+    return frame.loc[frame["lineage_id"].map(_clean) == lineage_id]
+
+
+def _packages_of_lineage(
+    lineage_id: str,
+    manifest_group: pd.DataFrame,
+    version_group: pd.DataFrame,
+) -> list[dict]:
+    """Package versions of one lineage, oldest commit first."""
+    commits = _package_commits(manifest_group, version_group)
+    if commits.empty:
+        return []
+    files = _files_by_commit(manifest_group)
+    introduced = _versions_by_commit(version_group)
+    state: dict[str, tuple[str, str]] = {}
+    running: int | None = None
+    sequence = 0
+    records: list[dict] = []
+    for row in commits.to_dict("records"):
+        commit = _clean(row["commit"])
+        after = files[commit] if commit in files else state
+        new_version = introduced.get(commit)
+        skill_changed = new_version is not None and new_version != running
+        scripts_changed, others_changed = _folder_change_flags(state, after)
+        if skill_changed or scripts_changed or others_changed:
+            sequence += 1
+            current = new_version if new_version is not None else running
+            records.append(
+                _package_record(
+                    lineage_id,
+                    sequence,
+                    current,
+                    commit,
+                    _clean(row["commit_date"]),
+                    skill_changed,
+                    scripts_changed,
+                    others_changed,
+                    after,
+                )
+            )
+        if new_version is not None:
+            running = new_version
+        state = after
+    return records
+
+
+def _package_commits(manifest_group: pd.DataFrame, version_group: pd.DataFrame) -> pd.DataFrame:
+    """Every commit that can change the package, ordered by date then ``commit_seq``."""
+    rows: list[dict] = []
+    seen: set[str] = set()
+    rows.extend(_commit_keys(manifest_group, seen))
+    rows.extend(_commit_keys(version_group, seen))
+    if not rows:
+        return pd.DataFrame(columns=["commit", "commit_date", "commit_seq"])
+    return _with_sort_time(pd.DataFrame(rows))
+
+
+def _commit_keys(frame: pd.DataFrame, seen: set[str]) -> list[dict]:
+    """One row per commit not already in ``seen``. ``seen`` is updated."""
+    if frame.empty or "commit" not in frame.columns:
+        return []
+    rows: list[dict] = []
+    for record in frame.to_dict("records"):
+        commit = _clean(record.get("commit"))
+        if not commit or commit in seen:
+            continue
+        seen.add(commit)
+        rows.append(
+            {
+                "commit": commit,
+                "commit_date": _clean(record.get("commit_date")),
+                "commit_seq": _commit_seq(record.get("commit_seq")),
+            }
+        )
+    return rows
+
+
+def _files_by_commit(group: pd.DataFrame) -> dict[str, dict[str, tuple[str, str]]]:
+    """Commit to the path map after that commit. A null path means an empty folder."""
+    found: dict[str, dict[str, tuple[str, str]]] = {}
+    if group.empty or "commit" not in group.columns:
+        return found
+    for record in group.to_dict("records"):
+        commit = _clean(record.get("commit"))
+        files = found.setdefault(commit, {})
+        path = _none_if_missing(record.get("path"))
+        if path is None:
+            continue
+        files[path] = (_clean(record.get("sha")), _clean(record.get("mode")))
+    return found
+
+
+def _versions_by_commit(versions: pd.DataFrame) -> dict[str, int]:
+    """Commit to the text ``version_seq`` that commit introduced."""
+    if versions.empty or "commit" not in versions.columns:
+        return {}
+    found: dict[str, int] = {}
+    ordered = versions.sort_values("version_seq", kind="mergesort")
+    for record in ordered.to_dict("records"):
+        number = _optional_int(record.get("version_seq"))
+        commit = _clean(record.get("commit"))
+        if number is None or not commit:
+            continue
+        found[commit] = number
+    return found
+
+
+def _folder_change_flags(
+    before: dict[str, tuple[str, str]],
+    after: dict[str, tuple[str, str]],
+) -> tuple[bool, bool]:
+    """Whether any script changed, and whether any other package file changed."""
+    scripts = False
+    others = False
+    for path in set(before) | set(after):
+        if before.get(path) == after.get(path):
+            continue
+        stored = after.get(path) or before[path]
+        if file_category(path, stored[1]) == "script":
+            scripts = True
+        else:
+            others = True
+    return scripts, others
+
+
+def _package_record(
+    lineage_id: str,
+    sequence: int,
+    version_seq: int | None,
+    commit: str,
+    commit_date: str,
+    skill_changed: bool,
+    scripts_changed: bool,
+    others_changed: bool,
+    files: dict[str, tuple[str, str]],
+) -> dict:
+    """One package-version row. ``version_seq`` is null when no text exists yet."""
+    return {
+        "lineage_id": lineage_id,
+        "package_version_seq": sequence,
+        "version_seq": version_seq,
+        "commit": commit,
+        "commit_date": commit_date,
+        "changed_skill_md": skill_changed,
+        "changed_scripts": scripts_changed,
+        "changed_other_files": others_changed,
+        "file_count": len(files),
+        "script_count": _script_count(files),
+    }
+
+
+def _script_count(files: dict[str, tuple[str, str]]) -> int:
+    """How many manifest files ``file_category`` calls a script."""
+    return sum(file_category(path, mode) == "script" for path, (_, mode) in files.items())
+
+
+def _packages_frame(records: list[dict]) -> pd.DataFrame:
+    """The package-version table. ``version_seq`` stays nullable."""
+    if not records:
+        return _empty_packages()
+    frame = pd.DataFrame(records, columns=PACKAGE_COLUMNS)
+    frame["package_version_seq"] = frame["package_version_seq"].astype("int64")
+    frame["version_seq"] = pd.array(
+        [_optional_int(value) for value in frame["version_seq"]],
+        dtype="Int64",
+    )
+    frame["file_count"] = frame["file_count"].astype("int64")
+    frame["script_count"] = frame["script_count"].astype("int64")
+    for name in ("changed_skill_md", "changed_scripts", "changed_other_files"):
+        frame[name] = frame[name].astype(bool)
+    return frame
+
+
+def _empty_packages() -> pd.DataFrame:
+    """A package-version table with the right columns and no rows."""
+    frame = pd.DataFrame(columns=PACKAGE_COLUMNS)
+    frame["package_version_seq"] = pd.Series(dtype="int64")
+    frame["version_seq"] = pd.Series(dtype="Int64")
+    frame["file_count"] = pd.Series(dtype="int64")
+    frame["script_count"] = pd.Series(dtype="int64")
+    frame["changed_skill_md"] = pd.Series(dtype="bool")
+    frame["changed_scripts"] = pd.Series(dtype="bool")
+    frame["changed_other_files"] = pd.Series(dtype="bool")
+    return frame
+
+
+def _manifests_for_packages(manifests: pd.DataFrame, packages: pd.DataFrame) -> pd.DataFrame:
+    """Folder files at package versions only. Empty packages have no file rows."""
+    if manifests.empty or packages.empty or "path" not in manifests.columns:
+        return _empty_stored_manifests()
+    files = manifests.loc[manifests["path"].map(_none_if_missing).notna()].copy()
+    if files.empty:
+        return _empty_stored_manifests()
+    keys = packages.loc[:, ["lineage_id", "commit", "package_version_seq"]]
+    merged = files.merge(keys, on=["lineage_id", "commit"], how="inner")
+    merged["size"] = pd.array([None] * len(merged), dtype="Int64")
+    return merged.loc[:, STORED_MANIFEST_COLUMNS]
+
+
+def _empty_stored_manifests() -> pd.DataFrame:
+    """A stored manifest table with the right columns and no rows."""
+    frame = pd.DataFrame(columns=STORED_MANIFEST_COLUMNS)
+    frame["package_version_seq"] = pd.Series(dtype="int64")
+    frame["size"] = pd.Series(dtype="Int64")
+    return frame
+
+
+def _save_packages(dev: bool, packages: pd.DataFrame, stored: pd.DataFrame) -> None:
+    """Write the two package tables under ``data_dir(dev)``."""
+    folder = data_dir(dev)
+    write_parquet(
+        packages.loc[:, PACKAGE_COLUMNS],
+        folder / OUTPUT_NAMES[4],
+        ["lineage_id", "package_version_seq"],
+    )
+    write_parquet(
+        stored.loc[:, STORED_MANIFEST_COLUMNS],
+        folder / OUTPUT_NAMES[5],
+        ["lineage_id", "package_version_seq", "path"],
+    )
+
+
+def _print_package_report(
+    lineages: pd.DataFrame,
+    packages: pd.DataFrame,
+    stored: pd.DataFrame,
+    elapsed: float,
+) -> None:
+    """Print package counts and two rows of each package table."""
+    ordered_packages = packages
+    ordered_stored = stored
+    if not packages.empty:
+        ordered_packages = packages.sort_values(
+            ["lineage_id", "package_version_seq"], kind="mergesort"
+        )
+    if not stored.empty:
+        ordered_stored = stored.sort_values(
+            ["lineage_id", "package_version_seq", "path"], kind="mergesort"
+        )
+    print_summary("Package versions", _package_summary(lineages, packages, stored, elapsed))
+    print_sample_records(ordered_packages, "Sample package versions")
+    print_sample_records(ordered_stored, "Sample folder manifests")
+
+
+def _package_summary(
+    lineages: pd.DataFrame,
+    packages: pd.DataFrame,
+    stored: pd.DataFrame,
+    elapsed: float,
+) -> dict[str, object]:
+    """Counts for step 10. Shares use the kept English lineages as the base."""
+    lineage_count = 0 if lineages.empty else len(lineages)
+    with_files, with_scripts = _lineages_with_files(stored)
+    per_package = _counts_per_lineage(packages)
+    per_text = _version_counts(lineages)
+    ahead = _packages_ahead_of_text(lineages, packages)
+    return {
+        "seconds": round(elapsed, 1),
+        "lineages": lineage_count,
+        "lineages_with_folder_files": with_files,
+        "lineages_with_folder_files_share": _share(with_files, lineage_count),
+        "lineages_with_scripts": with_scripts,
+        "lineages_with_scripts_share": _share(with_scripts, lineage_count),
+        "package_versions": len(packages),
+        "manifest_files": len(stored),
+        "package_versions_per_lineage_median": _show_number(_median(per_package)),
+        "package_versions_per_lineage_max": _show_max(per_package),
+        "skill_md_versions_per_lineage_median": _show_number(_median(per_text)),
+        "skill_md_versions_per_lineage_max": _show_max(per_text),
+        "lineages_with_more_package_than_text_versions": ahead,
+    }
+
+
+def _lineages_with_files(stored: pd.DataFrame) -> tuple[int, int]:
+    """How many lineages have any package file, and how many have a script."""
+    if stored.empty or "lineage_id" not in stored.columns:
+        return 0, 0
+    with_files = stored["lineage_id"].nunique()
+    scripts = stored.loc[stored["file_category"] == "script", "lineage_id"]
+    return int(with_files), int(scripts.nunique())
+
+
+def _counts_per_lineage(packages: pd.DataFrame) -> list[int]:
+    """How many rows each lineage has. A lineage with no rows is left out."""
+    if packages.empty or "lineage_id" not in packages.columns:
+        return []
+    return [int(size) for size in packages.groupby("lineage_id").size()]
+
+
+def _packages_ahead_of_text(lineages: pd.DataFrame, packages: pd.DataFrame) -> int:
+    """Lineages whose package-version count is higher than the text-version count."""
+    if lineages.empty or packages.empty:
+        return 0
+    package_counts = packages.groupby("lineage_id").size()
+    ahead = 0
+    for lineage_id, version_count in zip(
+        lineages["lineage_id"], lineages["version_count"], strict=True
+    ):
+        package_count = int(package_counts.get(lineage_id, 0))
+        text_count = _optional_int(version_count) or 0
+        if package_count > text_count:
+            ahead += 1
+    return ahead
+
+
+def _share(part: int, whole: int) -> float:
+    """``part / whole``, or 0 when ``whole`` is 0. Rounded to 4 decimal places."""
+    if whole == 0:
+        return 0.0
+    return round(part / whole, 4)
+
+
+def _commit_seq(value: object) -> int:
+    """``commit_seq`` as an int. A missing value sorts as 0."""
+    number = _optional_int(value)
+    return 0 if number is None else number
 
 
 if __name__ == "__main__":
