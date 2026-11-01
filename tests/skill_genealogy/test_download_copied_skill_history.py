@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -15,11 +16,13 @@ import pandas as pd
 from skill_genealogy.download_copied_skill_history import (
     _CHANGE_COLUMNS,
     _dev_seconds_per_repo,
+    _folder_bytes,
     _print_plan,
     _print_report,
     _repos_still_to_mine,
     export_history_store,
     group_targets_by_repo,
+    main,
     mine_copied_skills,
     open_history_store,
     pick_download_targets,
@@ -28,6 +31,7 @@ from skill_genealogy.download_copied_skill_history import (
 from skill_genealogy.file_helpers import write_parquet
 from skill_genealogy.git_history import _CHANGE_COLUMNS as _GIT_CHANGE_COLUMNS
 from skill_genealogy.git_history import RepoResult
+from skill_genealogy.git_history import mine_one_repo as _real_mine
 
 _EMAIL = "Tester@Example.com"
 
@@ -287,6 +291,76 @@ def test_mine_copied_skills_keeps_only_named_folders(tmp_path: Path) -> None:
     assert "echo keep" in bodies
     skill_rows = changes[changes["file_path"] == "SKILL.md"]
     assert len(skill_rows) >= 2
+
+
+def test_main_removes_the_work_folder(tmp_path: Path, monkeypatch) -> None:
+    """After a file:// run, work/ is gone before disk_bytes is counted."""
+    fake = _use_tmp_data(monkeypatch, tmp_path)
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    keep = origin / "skills" / "keep"
+    keep.mkdir(parents=True)
+    (keep / "SKILL.md").write_text("# keep\n")
+    _commit(origin, "add keep", "2026-04-01T00:00:00+00:00")
+    dev = fake(True)
+    write_parquet(
+        _copies([("acme/copy", "skills/keep/SKILL.md", False)]),
+        dev / "copy_candidates.parquet",
+    )
+    work_present: list[bool] = []
+    real_bytes = _folder_bytes
+
+    def bytes_after_cleanup(folder: Path) -> int:
+        work_present.append((folder / "work").exists())
+        return real_bytes(folder)
+
+    def mine_local(repo, work_dir, folders, timeout_seconds, url=None):
+        stale = Path(work_dir) / "sQVe__dotfiles"
+        stale.mkdir(parents=True, exist_ok=True)
+        (stale / "blob").write_bytes(b"x" * 200_000)
+        return _real_mine(repo, work_dir, folders, timeout_seconds, origin.as_uri())
+
+    monkeypatch.setattr(
+        "skill_genealogy.download_copied_skill_history.mine_one_repo",
+        mine_local,
+    )
+    monkeypatch.setattr(
+        "skill_genealogy.download_copied_skill_history._folder_bytes",
+        bytes_after_cleanup,
+    )
+    monkeypatch.setattr(sys, "argv", ["download_copied_skill_history", "--dev"])
+    main()
+    history = dev / "copied_skill_history"
+    assert work_present == [False]
+    assert not (history / "work").exists()
+
+
+def test_keyerror_from_the_miner_is_saved_as_error(tmp_path: Path, monkeypatch) -> None:
+    """A KeyError from the miner is status error and names KeyError."""
+    sha = "4fd78c9e85695eefe9a4d30f5315ca7b6201fb3d"
+
+    def boom(*_args, **_kwargs):
+        raise KeyError(sha)
+
+    monkeypatch.setattr(
+        "skill_genealogy.download_copied_skill_history.mine_one_repo",
+        boom,
+    )
+    connection = open_history_store(tmp_path / "copied_skill_history.duckdb")
+    try:
+        status = mine_copied_skills(
+            {"acme/copy": ["skills/keep"]},
+            connection,
+            tmp_path / "work",
+            1,
+        )
+        saved = connection.execute("SELECT status, message FROM status").fetchone()
+    finally:
+        connection.close()
+    expected = f"KeyError: {sha} (commit missing from the mined history)"
+    assert list(status["status"]) == ["error"]
+    assert status["message"].iloc[0] == expected
+    assert saved == ("error", expected)
 
 
 def _change_frame(repo: str, folder: str, sha: str) -> pd.DataFrame:

@@ -118,6 +118,10 @@ MIN_VERIFIED_LINE_SHARE = 0.50
 # A27: pass a lineage only through s2_clusters rows at this threshold.
 # The file also has 0.60 clusters. Those group looser neighbours and are not used.
 CLUSTER_LINK_THRESHOLD = 0.80
+# Stage 7 DuckDB joins. The memory cap keeps the English artifact join from
+# loading file content. The temp cap is the spill folder under data_dir(dev).
+DUCKDB_MEMORY_LIMIT = "8GB"
+DUCKDB_TEMP_LIMIT = "40GB"
 # A22: a line shared by this many GitHub owners is template text.
 # G12 keeps 50 unless the top 30 lines are real skill content (see PROGRESS).
 BOILERPLATE_MIN_OWNERS = 50

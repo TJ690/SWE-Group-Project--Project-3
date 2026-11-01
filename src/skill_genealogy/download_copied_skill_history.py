@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
@@ -521,7 +522,7 @@ def main() -> None:
                 "skip: copied skill history already exists (pass --force to export again)",
                 flush=True,
             )
-            _print_report(connection, chosen_targets, history, None)
+            _finish_run(connection, chosen_targets, history, work_dir, None)
             return
         _print_plan(chosen, pending, args.dev)
         _require_yes(len(pending), args.dev, args.yes)
@@ -537,8 +538,9 @@ def main() -> None:
         # Step 4: Export the store
         print("Step 4: export the store", flush=True)
         export_history_store(connection, history)
-        # Step 5: Summary
-        _print_report(connection, chosen_targets, history, time.perf_counter() - started)
+        # Step 5: Remove leftover clones, then print the summary
+        elapsed = time.perf_counter() - started
+        _finish_run(connection, chosen_targets, history, work_dir, elapsed)
     finally:
         connection.close()
 
@@ -810,9 +812,11 @@ def _save_mined_repo(
     try:
         result, changes, texts = future.result()
     except Exception as error:
-        result = RepoResult(repo, "error", _last_line(str(error)), None, 0.0, False)
+        result = RepoResult(repo, "error", _error_message(error), None, 0.0, False)
         changes = _empty_change_frame()
         texts = _empty_text_frame()
+    if result.status == "error":
+        result.message = _name_missing_commit(result.message or "")
     folder_count = 0 if changes.empty else int(changes["skill_folder"].nunique())
     change_count = 0 if changes.empty else len(changes)
     status_name, message, saved_changes, saved_folders = _commit_repo(
@@ -946,6 +950,68 @@ def _last_line(text: str) -> str:
     return lines[-1]
 
 
+def _error_message(error: BaseException) -> str:
+    """One line for a miner exception.
+
+    ``str(KeyError)`` is only the quoted sha. The stored text uses
+    ``type(error).__name__`` and says that commit is missing from the
+    mined history. Other exceptions keep their last line.
+    """
+    text = _last_line(str(error))
+    if isinstance(error, KeyError):
+        sha = text.strip("'\"")
+        return (
+            f"{type(error).__name__}: {sha} "
+            "(commit missing from the mined history)"
+        )
+    return text
+
+
+def _name_missing_commit(message: str) -> str:
+    """Replace a bare quoted sha with the KeyError text.
+
+    ``mine_one_repo`` catches ``KeyError`` and keeps only ``str(exc)``.
+    A message that is already readable is returned unchanged.
+    """
+    text = message.strip()
+    if len(text) != 42 or not text.startswith("'") or not text.endswith("'"):
+        return message
+    sha = text[1:-1]
+    if len(sha) == 40 and all(char in "0123456789abcdef" for char in sha):
+        return f"KeyError: {sha} (commit missing from the mined history)"
+    return message
+
+
+def _finish_run(
+    connection: duckdb.DuckDBPyConnection,
+    targets: pd.DataFrame,
+    history_dir: Path,
+    work_dir: Path,
+    elapsed: float | None,
+) -> None:
+    """Delete leftover clones, then print the summary.
+
+    ``disk_bytes`` is measured after ``work`` is gone, so a timed-out
+    clone is not counted. The history folder itself stays.
+
+    Inputs: the open store, this run's targets, the history folder,
+    the ``work`` path, and seconds since the run started (or None).
+    Outputs: lines on standard output. ``work`` is removed when it exists.
+    """
+    _remove_work_dir(work_dir)
+    _print_report(connection, targets, history_dir, elapsed)
+
+
+def _remove_work_dir(work_dir: Path) -> None:
+    """Delete ``copied_skill_history/work`` when it exists.
+
+    A finished clone is already removed. A timeout can leave the folder
+    behind. Removing the folder itself keeps it out of ``disk_bytes``.
+    """
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+
+
 def _print_report(
     connection: duckdb.DuckDBPyConnection,
     targets: pd.DataFrame,
@@ -956,7 +1022,8 @@ def _print_report(
 
     Status, version and change counts use those repos only, so a ``--limit``
     run does not report the rest of the store. The parquet files still hold
-    every saved repo. Disk bytes are the whole history folder.
+    every saved repo. Disk bytes are the history folder. The caller removes
+    ``work`` first, so a leftover clone is not included.
     """
     _register_report_repos(connection, targets)
     try:
