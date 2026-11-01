@@ -486,10 +486,9 @@ def _split_rows_by_folder(folders: list[str], rows: list[dict]) -> list[tuple[st
 
 def _changes_frame(repo: str, grouped: list[tuple[str, list[dict]]]) -> pd.DataFrame:
     """Build the changes table. ``commit_seq`` 1 is the oldest kept commit in that folder."""
-    all_folders = [folder for folder, _rows in grouped]
     records: list[dict] = []
     for folder, rows in grouped:
-        prefixes = _prefixes(folder, rows, all_folders)
+        prefixes = _prefixes(folder, rows)
         visible = _rows_kept_for_skill(rows, prefixes)
         sequence = _commit_sequence(visible)
         for row in visible:
@@ -644,9 +643,10 @@ def _keep_skill_life(
 ) -> list[dict]:
     """Drop rows that belong to a different skill that reused a folder name.
 
-    An old folder's rows stay only through the commit that renamed SKILL.md
-    out of it. A later add at that path is a new skill. A plain delete is not
-    a cut: restoring SKILL.md keeps the older commits, including other files.
+    An old folder's rows stay only through the commit that renamed or copied
+    SKILL.md out of it. Later commits of a copy that still exists at the old
+    path belong to that other skill. A plain delete is not a cut: restoring
+    SKILL.md keeps the older commits, including other files.
     """
     if not rows:
         return rows
@@ -678,11 +678,15 @@ def _commit_index(rows: list[dict]) -> dict[str, int]:
 
 
 def _rename_out_commits(folder: str, follow_rows: list[dict]) -> dict[str, str]:
-    """Old folder name to the commit that renamed the followed SKILL.md out of it."""
+    """Old folder name to the commit that renamed or copied SKILL.md out of it.
+
+    Status ``C`` is a copy: the old path still exists. Status ``R`` is a move.
+    Rows are newest first, so the first jump away from a folder is the cut.
+    """
     left: dict[str, str] = {}
     known = {folder}
     for row in follow_rows:
-        if row["status"] != "R" or not row["old_path"] or not _is_skill_md_name(row["path"]):
+        if not _moved_skill_md(row):
             continue
         new_folder = _parent_folder(row["path"])
         old_folder = _parent_folder(row["old_path"])
@@ -1314,17 +1318,17 @@ def _commit_sequence(rows: list[dict]) -> dict[str, int]:
     return {commit: total - index for index, commit in enumerate(seen)}
 
 
-def _prefixes(folder: str, rows: list[dict], folders: list[str]) -> list[str]:
+def _prefixes(folder: str, rows: list[dict]) -> list[str]:
     """Folder names used to strip a repo path down to a skill-relative path.
 
-    Parents of another chosen skill's SKILL.md are left out, so a root skill
-    does not treat ``skills/y/SKILL.md`` as its own ``SKILL.md``. A folder this
-    skill was renamed away from is still stripped, even when a new skill uses it.
+    Only a folder this skill was renamed or copied from is stripped, so a
+    nested ``cn/SKILL.md`` stays ``cn/SKILL.md``. A root skill does not treat
+    ``skills/y/SKILL.md`` as its own file: that row is dropped earlier.
+    A folder this skill left is still stripped, even when a new skill uses it.
     """
     found: list[str] = []
     if folder not in {"", "."}:
         found.append(folder.strip("/"))
-    others = _other_skill_folders(folder, folders)
     historical = _historical_skill_folders(folder, rows)
     for row in rows:
         for key in ("path", "old_path"):
@@ -1332,12 +1336,30 @@ def _prefixes(folder: str, rows: list[dict], folders: list[str]) -> list[str]:
             if not path or not _is_skill_md_name(path):
                 continue
             parent = _parent_folder(path)
-            if parent in {"", "."} or parent in found:
-                continue
-            if parent not in historical and _parent_is_other_skill(parent, others):
+            if parent in {"", "."} or parent in found or parent not in historical:
                 continue
             found.append(parent)
     return found
+
+
+def _moved_skill_md(row: dict) -> bool:
+    """True when this row renames or copies SKILL.md into a different folder.
+
+    ``C`` means the old file is still there. ``R`` means it was moved.
+
+    Example:
+    >>> _moved_skill_md({"status": "C", "old_path": "a/SKILL.md", "path": "b/SKILL.md"})
+    True
+    >>> _moved_skill_md({"status": "R", "old_path": "a/SKILL.md", "path": "b/README.md"})
+    True
+    >>> _moved_skill_md({"status": "M", "old_path": "", "path": "b/SKILL.md"})
+    False
+    """
+    if row["status"] not in {"R", "C"} or not row["old_path"]:
+        return False
+    if not _is_skill_md_name(row["path"]) and not _is_skill_md_name(row["old_path"]):
+        return False
+    return _parent_folder(row["path"]) != _parent_folder(row["old_path"])
 
 
 def _historical_skill_folders(folder: str, rows: list[dict]) -> set[str]:
@@ -1345,7 +1367,7 @@ def _historical_skill_folders(folder: str, rows: list[dict]) -> set[str]:
     current = "" if folder in {"", "."} else folder.strip("/")
     names: set[str] = set()
     for row in rows:
-        if row["status"] != "R" or not row["old_path"] or not _is_skill_md_name(row["path"]):
+        if not _moved_skill_md(row):
             continue
         new_parent = _parent_folder(row["path"])
         old_parent = _parent_folder(row["old_path"])
@@ -1354,26 +1376,6 @@ def _historical_skill_folders(folder: str, rows: list[dict]) -> set[str]:
         if old_parent not in {"", "."}:
             names.add(old_parent)
     return names
-
-
-def _other_skill_folders(folder: str, folders: list[str]) -> set[str]:
-    """Chosen skill folders other than ``folder``, without the root."""
-    current = "" if folder in {"", "."} else folder.strip("/")
-    others: set[str] = set()
-    for name in folders:
-        if name in {"", "."}:
-            continue
-        cleaned = name.strip("/")
-        if cleaned != current:
-            others.add(cleaned)
-    return others
-
-
-def _parent_is_other_skill(parent: str, others: set[str]) -> bool:
-    """True when ``parent`` is another skill folder, or sits inside one."""
-    if parent in others:
-        return True
-    return any(parent.startswith(other + "/") for other in others)
 
 
 def _drop_deeper_skill_rows(

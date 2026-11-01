@@ -362,6 +362,58 @@ def test_edited_file_rename_keeps_later_commits(tmp_path: Path) -> None:
     assert int(changes["commit_seq"].min()) == 1
 
 
+def test_copied_skill_keeps_each_folders_own_blobs(tmp_path: Path) -> None:
+    """A copied SKILL.md that both folders keep editing stays one row per commit.
+
+    The copy is git status C. Later edits of the source must not be stored as
+    the destination's SKILL.md, and a nested SKILL.md stays nested.
+    """
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    source = origin / "skills" / "src"
+    source.mkdir(parents=True)
+    body = "".join(f"line {index}\n" for index in range(30))
+    (source / "SKILL.md").write_text(body)
+    _commit(origin, "add src", "2026-04-01T00:00:00+00:00")
+    destination = origin / "skills" / "dst"
+    destination.mkdir()
+    (destination / "SKILL.md").write_text(body)
+    nested = destination / "nested"
+    nested.mkdir()
+    (nested / "SKILL.md").write_text("# nested\n")
+    _commit(origin, "copy skill", "2026-04-02T00:00:00+00:00")
+    (source / "SKILL.md").write_text(body + "src only\n")
+    _commit(origin, "edit src", "2026-04-03T00:00:00+00:00")
+    (destination / "SKILL.md").write_text(body + "dst only\n")
+    (nested / "SKILL.md").unlink()
+    nested.rmdir()
+    _commit(origin, "edit dst", "2026-04-04T00:00:00+00:00")
+    (source / "SKILL.md").write_text(body + "src only\nboth\n")
+    (destination / "SKILL.md").write_text(body + "dst only\nboth\n")
+    _commit(origin, "edit both", "2026-04-05T00:00:00+00:00")
+
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/copy")
+    assert result.status == "ok"
+    keys = ["skill_folder", "commit", "file_path"]
+    assert int(changes.groupby(keys).size().max()) == 1
+    source_rows = changes[changes["skill_folder"] == "skills/src"]
+    dest_rows = changes[changes["skill_folder"] == "skills/dst"]
+    source_edit = source_rows[source_rows["subject"] == "edit src"]
+    dest_edit = dest_rows[dest_rows["subject"] == "edit dst"]
+    dest_copy = dest_rows[dest_rows["subject"] == "copy skill"]
+    assert list(source_edit["file_path"]) == ["SKILL.md"]
+    assert set(dest_edit["file_path"]) == {"SKILL.md", "nested/SKILL.md"}
+    assert set(dest_copy["file_path"]) == {"SKILL.md", "nested/SKILL.md"}
+    dest_skill = dest_edit[dest_edit["file_path"] == "SKILL.md"].iloc[0]
+    assert source_edit.iloc[0]["new_sha"] != dest_skill["new_sha"]
+    assert source_rows[source_rows["subject"] == "edit dst"].empty
+    assert dest_rows[dest_rows["subject"] == "edit src"].empty
+    both = changes[changes["subject"] == "edit both"]
+    assert set(both["skill_folder"]) == {"skills/src", "skills/dst"}
+    assert int(both.groupby("skill_folder").size().max()) == 1
+    assert both["new_sha"].nunique() == 2
+
+
 def test_root_skill_does_not_absorb_nested_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
