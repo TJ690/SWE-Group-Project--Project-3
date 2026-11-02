@@ -134,6 +134,9 @@ SUBSTANTIVE_BODY_CHANGE_PCT = 5
 SECTION_KEPT_MIN_SHARE = 0.9
 # Same as rq2.grace_days.
 STALE_AFTER_DAYS = 30
+# A52: the copy-chain walk stops after this many nodes, counting the skill.
+# A family tree can be deeper than one terminal line should print.
+MAX_CHAIN_STEPS = 50
 # Parent search cap.
 TREE_MAX_EARLIER_MEMBERS = 2000
 # Parallel clones.
