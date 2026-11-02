@@ -1,0 +1,8 @@
+registry_role,flag,copies,share
+registry,any,801,0.025
+registry,deletes_files,255,0.008
+registry,installs_packages,279,0.009
+registry,network,466,0.015
+registry,obfuscated,1,0.0
+registry,reads_secrets,410,0.013
+registry,runs_commands,92,0.003

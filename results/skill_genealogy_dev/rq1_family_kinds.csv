@@ -1,0 +1,4 @@
+family_kind,registry_role,families,texts,texts_share,files,files_share,repos,repos_share,files_without_forks,files_without_forks_share,repos_without_forks,repos_without_forks_share
+independent,none,117648,547184,0.335,1864168,0.54,1196531,0.469,1864166,0.54,1196529,0.469
+singleton,none,1077032,1077032,0.659,1536485,0.445,1320388,0.518,1536479,0.445,1320384,0.518
+source,registry,400,9069,0.006,48593,0.014,33659,0.013,48522,0.014,33613,0.013

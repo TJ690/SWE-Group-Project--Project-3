@@ -1,0 +1,3 @@
+registry_role,copy_repo_role,event_kind,events,share,lag_days_median,versions_skipped_max
+registry,repository,copy,14159,0.912,10.0,0
+registry,repository,update,1371,0.088,0.0,4

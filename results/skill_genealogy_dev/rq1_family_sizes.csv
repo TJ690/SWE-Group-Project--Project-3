@@ -1,0 +1,4 @@
+family_kind,registry_role,families,texts_median,texts_p90,texts_max,repos_median,repos_p90,repos_max,depth_median,depth_p90,depth_max
+independent,none,117648,2.0,5.0,59851,3.0,15.0,1951,1.0,1.0,22
+singleton,none,1077032,1.0,1.0,1,1.0,2.0,398,0.0,0.0,0
+source,registry,400,1.0,24.3,694,1.0,83.3,2714,0.0,3.0,12

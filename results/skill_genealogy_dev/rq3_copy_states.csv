@@ -1,0 +1,7 @@
+registry_role,as_of_basis,copy_repo_role,copy_state,files,texts,share,stale_after_days
+registry,dataset_capture,repository,up_to_date,138,120,0.021,90
+registry,dataset_capture,repository,behind,2912,433,0.434,90
+registry,dataset_capture,repository,stale,3661,1228,0.546,90
+registry,registry_snapshot,repository,up_to_date,10109,2423,0.241,90
+registry,registry_snapshot,repository,behind,2869,723,0.069,90
+registry,registry_snapshot,repository,stale,28904,5596,0.69,90

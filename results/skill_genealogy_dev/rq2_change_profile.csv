@@ -1,0 +1,5 @@
+population,registry_role,changes,share_substantive,share_headings_added,share_commands_added,share_network_added,share_scripts_added,share_permissions_changed
+registry_update,registry,1751,0.6,0.269,0.136,0.058,0.061,0.019
+copy_local_edit,registry,11003,0.373,0.252,0.08,0.068,0.041,0.012
+copy_sync,registry,2214,0.645,0.349,0.141,0.04,0.035,0.011
+copy_vs_origin,registry,31742,0.359,0.213,0.132,0.039,0.06,0.01

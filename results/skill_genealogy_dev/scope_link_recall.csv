@@ -1,0 +1,6 @@
+registry_role,method,proven_pairs,found,recall,recall_without_forks
+registry,exact,1741,145,0.083,0.083
+registry,minhash_jaccard,1741,873,0.501,0.501
+registry,containment,1741,1244,0.715,0.715
+registry,line_check,1741,1674,0.962,0.962
+registry,any_text_method,1741,1674,0.962,0.962

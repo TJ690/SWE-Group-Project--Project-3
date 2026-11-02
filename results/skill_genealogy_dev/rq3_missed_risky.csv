@@ -1,0 +1,6 @@
+registry_role,copy_repo_role,kind,copies,events,share
+registry,repository,risky,11802,19019,0.243
+registry,repository,commands,6924,36665,0.142
+registry,repository,network,1241,4656,0.026
+registry,repository,scripts,3361,7918,0.069
+registry,repository,substantive,27804,76371,0.572
