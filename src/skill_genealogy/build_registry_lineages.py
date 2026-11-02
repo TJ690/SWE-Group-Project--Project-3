@@ -12,17 +12,40 @@ Outputs: ``lineages.parquet``, ``lineage_versions.parquet``,
 in ``data_dir(dev)``.
 Run:
     python -m skill_genealogy.build_registry_lineages --dev
+
+Repo-root skills (decided 2026-11-02, keep this note when results change):
+a lineage whose SKILL.md sits at the repository root (skill folder ``.``)
+treats the whole repository as its folder. On the full data 62 such
+lineages (for example ``vitorpamplona/amethyst``, 21,632 files over 17,390
+commits) held about 1.2 billion of the 1.25 billion possible folder-manifest
+rows, and step 8 reached 25 GB on a 16 GB machine. For these lineages only,
+the folder package keeps the files that some version of the SKILL.md names
+(``skill_md_named_paths``): paths with a file extension and markdown link
+targets. Every other file is the surrounding project, not the skill. The
+SKILL.md text versions are not affected. A file reached only through
+another file (SKILL.md names ``references/index.md``, which links on) is
+missed, and a root skill that names no file has no folder files. See
+"Limits to report with the results" in docs/skill_genealogy/ARCHITECTURE_DECISIONS.md.
+
+Steps 3, 5 and 6, and steps 8 to 10, run one batch of whole lineages at a
+time. When the four lineage tables exist and the two package tables do not,
+a run without ``--force`` reuses the lineage tables and builds only the
+package tables.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 import statistics
 import time
+from collections.abc import Iterable
 from dataclasses import fields
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from skill_genealogy.compare_texts import (
     TextChange,
@@ -48,6 +71,15 @@ SKILL_MD = "SKILL.md"
 OWN_ROLES = frozenset({"own", "former_folder"})
 KNOWN_ROLES = frozenset({"own", "former_folder", "copy_source"})
 ENGLISH_CODES = frozenset({"en", "unknown"})
+# Steps 8 to 10 replay about this many folder-change rows at a time. The full
+# registry history has 3,947,982 own and former-folder rows.
+PACKAGE_CHANGE_BATCH = 200_000
+# A skill folder of "." or "" is the repository root. See the module docstring.
+ROOT_FOLDERS = frozenset({"", "."})
+# A path with a file extension, as SKILL.md text names it ("scripts/run.py").
+_NAMED_FILE = re.compile(r"[\w.\-/]+\.[A-Za-z0-9]{1,6}")
+# A markdown link target: [text](target).
+_LINK_TARGET = re.compile(r"\]\(([^)#\s]+)\)")
 
 # Query Q4.1, see QUERIES.md
 SKILL_MD_CHANGES_SQL = """
@@ -69,6 +101,14 @@ SELECT *
 FROM read_parquet(?)
 WHERE history_role IN ('own', 'former_folder')
   AND repo || '::' || skill_folder IN (SELECT unnest(?))
+"""
+
+# Query Q4.4, see QUERIES.md
+FOLDER_CHANGE_COUNTS_SQL = """
+SELECT repo || '::' || skill_folder AS lineage_id, count(*) AS changes
+FROM read_parquet(?)
+WHERE history_role IN ('own', 'former_folder')
+GROUP BY repo || '::' || skill_folder
 """
 
 # Deletes first, then renames, then adds. A same-commit replace keeps the new file.
@@ -340,7 +380,54 @@ def compare_consecutive_versions(versions: pd.DataFrame, texts: dict[str, str]) 
 
 
 # Algorithm A21, see CODE_FLOW.md
-def rebuild_folder_manifests(folder_changes: pd.DataFrame) -> pd.DataFrame:
+# Algorithm A21b, see CODE_FLOW.md
+def skill_md_named_paths(texts: Iterable[str]) -> frozenset[str]:
+    """Paths that SKILL.md texts name: files with an extension and link targets.
+
+    Used only for repo-root skills, whose folder is the whole repository
+    (see the module docstring). A leading ``./`` or ``/`` is dropped. A URL
+    is not a path. A link target that ends in ``/`` names a folder, and
+    every file under it counts as named.
+
+    Inputs: SKILL.md texts, usually every version of one lineage.
+    Outputs: the named paths, relative to the repository root.
+
+    Example:
+    >>> text = "Run `scripts/build.sh`. See [notes](./docs/) and https://x.io/a.md"
+    >>> sorted(skill_md_named_paths([text]))
+    ['docs/', 'scripts/build.sh']
+    """
+    found: set[str] = set()
+    for text in texts:
+        body = text if isinstance(text, str) else ""
+        urls = [word for word in body.split() if "://" in word]
+        candidates = set(_NAMED_FILE.findall(body)) | set(_LINK_TARGET.findall(body))
+        for candidate in candidates:
+            if "://" in candidate or candidate.startswith(("www.", "mailto:")):
+                continue
+            if any(candidate in url for url in urls):
+                continue
+            path = candidate
+            while path.startswith(("./", "/")):
+                path = path[1:] if path.startswith("/") else path[2:]
+            if path:
+                found.add(path)
+    return frozenset(found)
+
+
+def _is_named_path(path: str, named: frozenset[str]) -> bool:
+    """True when ``path`` is named, or sits under a named folder."""
+    if not path:
+        return False
+    if path in named:
+        return True
+    return any(item.endswith("/") and path.startswith(item) for item in named)
+
+
+def rebuild_folder_manifests(
+    folder_changes: pd.DataFrame,
+    named_paths: dict[str, frozenset[str]] | None = None,
+) -> pd.DataFrame:
     """Replay each lineage's folder changes into one manifest per commit.
 
     Walk commits oldest first. ``A`` and ``M`` set ``path -> (sha, mode)``.
@@ -350,6 +437,8 @@ def rebuild_folder_manifests(folder_changes: pd.DataFrame) -> pd.DataFrame:
     A file that never lived under this skill folder, or under a former
     name of it, is ignored. A commit that leaves no package files still
     has one row, and ``path`` is null, so the commit is not lost.
+    ``named_paths`` maps a repo-root lineage to the paths its SKILL.md
+    names; for that lineage every other path is ignored.
 
     Inputs: change rows with ``lineage_id`` or ``repo`` and ``skill_folder``,
     plus ``commit``, ``commit_date``, ``commit_seq``, ``status``,
@@ -374,8 +463,11 @@ def rebuild_folder_manifests(folder_changes: pd.DataFrame) -> pd.DataFrame:
         return _empty_commit_manifests()
     records: list[dict] = []
     grouped = prepared.groupby("lineage_id", sort=False)
+    named = named_paths or {}
     for lineage_id, group in grouped:
-        records.extend(_manifests_of_lineage(str(lineage_id), group))
+        records.extend(
+            _manifests_of_lineage(str(lineage_id), group, named.get(str(lineage_id)))
+        )
     return _commit_manifests_frame(records)
 
 
@@ -416,9 +508,13 @@ def number_package_versions(manifests: pd.DataFrame, versions: pd.DataFrame) -> 
     if manifests.empty and versions.empty:
         return _empty_packages()
     records: list[dict] = []
+    manifest_groups = _groups_by_lineage(manifests)
+    version_groups = _groups_by_lineage(versions)
+    empty_manifests = manifests.iloc[0:0]
+    empty_versions = versions.iloc[0:0]
     for lineage_id in _package_lineage_ids(manifests, versions):
-        manifest_group = _group_for(manifests, lineage_id)
-        version_group = _group_for(versions, lineage_id)
+        manifest_group = manifest_groups.get(lineage_id, empty_manifests)
+        version_group = version_groups.get(lineage_id, empty_versions)
         records.extend(_packages_of_lineage(lineage_id, manifest_group, version_group))
     return _packages_frame(records)
 
@@ -428,7 +524,9 @@ def main() -> None:
 
     ``--dev`` reads and writes the dev data folder. ``--force`` rebuilds
     the six parquet files when they already exist. Without ``--force``,
-    a second run prints the saved counts and does not rewrite them.
+    a second run prints the saved counts and does not rewrite them. When
+    only the four lineage tables exist, steps 1 to 7 are skipped and the
+    package tables are built from the saved lineages.
 
     Inputs: command-line flags and the stage 3 history tables.
     Outputs: the six parquet files. Nothing is returned.
@@ -442,6 +540,12 @@ def main() -> None:
         return
     started = time.perf_counter()
     _check_inputs(args.dev)
+    if outputs_exist(paths[:4]) and not args.force:
+        print("reuse: lineage tables exist; building the package tables only", flush=True)
+        lineages = read_parquet(paths[0])
+        kept = read_parquet(paths[1])
+        _build_package_tables(args.dev, lineages, kept, started)
+        return
     changes = read_skill_md_changes(args.dev)
     status = _read_status(args.dev)
     registries = _read_registry_names()
@@ -468,17 +572,146 @@ def main() -> None:
         elapsed,
         copied_from_not_kept,
     )
-    # Step 8: Rebuild folder manifests (algorithm A21)
-    folder_changes = _read_lineage_folder_changes(args.dev, lineages)
-    print(f"Step 8: rebuild folder manifests from {len(folder_changes)} changes", flush=True)
-    manifests = rebuild_folder_manifests(folder_changes)
-    # Step 9: Number package versions
-    print(f"Step 9: number package versions for {len(lineages)} lineages", flush=True)
-    packages = number_package_versions(manifests, kept)
+    # Steps 8 to 10 run one batch of lineages at a time
+    _build_package_tables(args.dev, lineages, kept, started)
+
+
+def _build_package_tables(
+    dev: bool,
+    lineages: pd.DataFrame,
+    versions: pd.DataFrame,
+    started: float,
+) -> None:
+    """Steps 8 to 10, one batch of whole lineages at a time.
+
+    Batches follow sorted ``lineage_id`` and hold about
+    ``PACKAGE_CHANGE_BATCH`` folder-change rows. Each batch's stored
+    manifests are sorted and appended to the parquet file, so the whole
+    table is never in memory and the file has the same order as one sorted
+    write. Repo-root lineages keep only the paths their SKILL.md names (see
+    the module docstring).
+    """
+    named = _root_named_paths(dev, lineages, versions)
+    batches = _package_batches(dev, lineages, PACKAGE_CHANGE_BATCH)
+    folder = data_dir(dev)
+    target = folder / OUTPUT_NAMES[5]
+    partial = folder / f".{target.stem}.tmp.parquet"
+    writer = pq.ParquetWriter(partial, _stored_manifest_schema(), compression="zstd")
+    package_parts: list[pd.DataFrame] = []
+    try:
+        for number, ids in enumerate(batches, start=1):
+            # Step 8: Rebuild folder manifests (algorithm A21)
+            folder_changes = _read_lineage_folder_changes(dev, pd.DataFrame({"lineage_id": ids}))
+            print(
+                f"Package batch {number}/{len(batches)}: {len(ids)} lineages, "
+                f"{len(folder_changes)} folder changes",
+                flush=True,
+            )
+            manifests = rebuild_folder_manifests(folder_changes, named)
+            del folder_changes
+            # Step 9: Number package versions
+            wanted = set(ids)
+            batch_versions = versions.loc[versions["lineage_id"].astype(str).isin(wanted)]
+            packages = number_package_versions(manifests, batch_versions)
+            stored = _manifests_for_packages(manifests, packages)
+            del manifests
+            _append_stored(writer, stored)
+            package_parts.append(packages)
+    finally:
+        writer.close()
     # Step 10: Save package tables and print the summary
-    stored = _manifests_for_packages(manifests, packages)
-    _save_packages(args.dev, packages, stored)
-    _print_package_report(lineages, packages, stored, time.perf_counter() - started)
+    filled = [part for part in package_parts if not part.empty]
+    packages = pd.concat(filled, ignore_index=True) if filled else _empty_packages()
+    write_parquet(
+        packages.loc[:, PACKAGE_COLUMNS],
+        folder / OUTPUT_NAMES[4],
+        ["lineage_id", "package_version_seq"],
+    )
+    partial.replace(target)
+    _print_package_report(lineages, packages, target, time.perf_counter() - started, named)
+
+
+def _root_named_paths(
+    dev: bool, lineages: pd.DataFrame, versions: pd.DataFrame
+) -> dict[str, frozenset[str]]:
+    """For each repo-root lineage, the paths any of its SKILL.md versions names."""
+    if lineages.empty or versions.empty:
+        return {}
+    roots = [
+        str(lineage_id)
+        for lineage_id in lineages["lineage_id"]
+        if _split_lineage_id(str(lineage_id))[1] in ROOT_FOLDERS
+    ]
+    if not roots:
+        return {}
+    wanted = set(roots)
+    rows = versions.loc[versions["lineage_id"].astype(str).isin(wanted), ["lineage_id", "blob"]]
+    texts = _read_skill_texts(dev, pd.DataFrame({"new_sha": rows["blob"].map(_clean)}))
+    named: dict[str, frozenset[str]] = {lineage_id: frozenset() for lineage_id in roots}
+    for lineage_id, group in rows.groupby("lineage_id", sort=False):
+        bodies = [_lookup_text(texts, _clean(blob)) or "" for blob in group["blob"]]
+        named[str(lineage_id)] = skill_md_named_paths(bodies)
+    return named
+
+
+def _package_batches(dev: bool, lineages: pd.DataFrame, limit: int) -> list[list[str]]:
+    """Sorted lineage ids cut into runs of about ``limit`` folder-change rows.
+
+    A lineage counts its change rows plus one, so lineages with no folder
+    change still fill a batch. One lineage larger than ``limit`` is its own
+    batch. Query Q4.4.
+    """
+    if lineages.empty or "lineage_id" not in lineages.columns:
+        return []
+    path = _history_dir(dev) / "registry_history_changes.parquet"
+    connection = connect_duckdb()
+    try:
+        counts = connection.execute(FOLDER_CHANGE_COUNTS_SQL, [str(path)]).fetchall()
+    finally:
+        connection.close()
+    rows_of = {str(lineage_id): int(count) for lineage_id, count in counts}
+    batches: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for lineage_id in sorted({str(item) for item in lineages["lineage_id"]}):
+        weight = rows_of.get(lineage_id, 0) + 1
+        if current and size + weight > limit:
+            batches.append(current)
+            current, size = [], 0
+        current.append(lineage_id)
+        size += weight
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _stored_manifest_schema() -> pa.Schema:
+    """The parquet schema of ``lineage_folder_manifests``, with pandas types kept."""
+    template = _empty_stored_manifests().loc[:, STORED_MANIFEST_COLUMNS]
+    columns = [
+        pa.field("lineage_id", pa.string()),
+        pa.field("package_version_seq", pa.int64()),
+        pa.field("path", pa.string()),
+        pa.field("sha", pa.string()),
+        pa.field("mode", pa.string()),
+        pa.field("size", pa.int64()),
+        pa.field("file_category", pa.string()),
+    ]
+    metadata = pa.Schema.from_pandas(template, preserve_index=False).metadata
+    return pa.schema(columns, metadata=metadata)
+
+
+def _append_stored(writer: pq.ParquetWriter, stored: pd.DataFrame) -> None:
+    """Sort one batch of stored manifests and append it to the open file."""
+    if stored.empty:
+        return
+    ordered = stored.loc[:, STORED_MANIFEST_COLUMNS].sort_values(
+        ["lineage_id", "package_version_seq", "path"], kind="mergesort"
+    )
+    table = pa.Table.from_pandas(
+        ordered.reset_index(drop=True), schema=writer.schema, preserve_index=False
+    )
+    writer.write_table(table)
 
 
 def _package_change(
@@ -1191,7 +1424,7 @@ def _print_saved(dev: bool) -> None:
     version_changes = read_parquet(folder / OUTPUT_NAMES[2])
     dropped = read_parquet(folder / OUTPUT_NAMES[3])
     packages = read_parquet(folder / OUTPUT_NAMES[4])
-    stored = read_parquet(folder / OUTPUT_NAMES[5])
+    stored = _stored_manifest_facts(folder / OUTPUT_NAMES[5])
     reasons = _reason_counts(dropped)
     removed = 0 if lineages.empty else int(lineages["registry_removed"].map(_is_true).sum())
     print_summary(
@@ -1204,7 +1437,7 @@ def _print_saved(dev: bool) -> None:
             "dropped_not_english": reasons.get("not_english", 0),
             "dropped_no_text": reasons.get("no_text", 0),
             "package_versions": len(packages),
-            "manifest_files": len(stored),
+            "manifest_files": stored["rows"],
         },
     )
     print_sample_records(lineages, "Sample lineages")
@@ -1212,7 +1445,7 @@ def _print_saved(dev: bool) -> None:
     print_sample_records(version_changes, "Sample lineage changes")
     print_sample_records(dropped, "Sample dropped lineages")
     print_sample_records(packages, "Sample package versions")
-    print_sample_records(stored, "Sample folder manifests")
+    print_sample_records(stored["sample"], "Sample folder manifests")
 
 
 def _per_registry_counts(lineages: pd.DataFrame, status: pd.DataFrame) -> list[int]:
@@ -1492,13 +1725,15 @@ def _own_folder_rows(changes: pd.DataFrame) -> pd.DataFrame:
     return changes.loc[keep].copy()
 
 
-def _manifests_of_lineage(lineage_id: str, group: pd.DataFrame) -> list[dict]:
+def _manifests_of_lineage(
+    lineage_id: str, group: pd.DataFrame, named: frozenset[str] | None = None
+) -> list[dict]:
     """Apply one lineage's commits and record the folder after each commit."""
     ordered = _ordered_folder_changes(group)
     state: dict[str, tuple[str, str]] = {}
     records: list[dict] = []
     for commit, rows in _iter_commits(ordered):
-        _apply_change_rows(state, rows)
+        _apply_change_rows(state, rows, named)
         first = rows[0]
         records.extend(
             _snapshot_rows(
@@ -1538,22 +1773,34 @@ def _iter_commits(ordered: pd.DataFrame):
         yield current, bucket
 
 
-def _apply_change_rows(state: dict[str, tuple[str, str]], rows: list[dict]) -> None:
+def _apply_change_rows(
+    state: dict[str, tuple[str, str]],
+    rows: list[dict],
+    named: frozenset[str] | None = None,
+) -> None:
     """Apply every file change in one commit to ``state``."""
     for row in rows:
-        _apply_one_change(state, row)
+        _apply_one_change(state, row, named)
 
 
-def _apply_one_change(state: dict[str, tuple[str, str]], row: dict) -> None:
+def _apply_one_change(
+    state: dict[str, tuple[str, str]],
+    row: dict,
+    named: frozenset[str] | None = None,
+) -> None:
     """One ``A``, ``M``, ``D`` or ``R`` against the running path map.
 
     A rename that keeps the same skill-relative path (the folder was renamed)
     updates sha and mode in place. A copy (``C``) adds the new path and
-    leaves the old path.
+    leaves the old path. With ``named`` (a repo-root skill), a path that the
+    SKILL.md does not name is treated as outside the package.
     """
     status = _clean(row.get("status"))[:1]
     new_path = _manifest_path(row, "new")
     old_path = _manifest_path(row, "old")
+    if named is not None:
+        new_path = new_path if _is_named_path(new_path, named) else ""
+        old_path = old_path if _is_named_path(old_path, named) else ""
     if status == "D":
         path = new_path or old_path
         if path:
@@ -1657,22 +1904,27 @@ def _empty_folder_changes() -> pd.DataFrame:
 
 def _package_lineage_ids(manifests: pd.DataFrame, versions: pd.DataFrame) -> list[str]:
     """Lineage ids that have a manifest commit or a text version, first-seen order."""
-    found: list[str] = []
+    found: dict[str, None] = {}
     for frame in (manifests, versions):
         if frame.empty or "lineage_id" not in frame.columns:
             continue
         for value in frame["lineage_id"]:
             lineage_id = _clean(value)
-            if lineage_id and lineage_id not in found:
-                found.append(lineage_id)
-    return found
+            if lineage_id:
+                found.setdefault(lineage_id, None)
+    return list(found)
 
 
-def _group_for(frame: pd.DataFrame, lineage_id: str) -> pd.DataFrame:
-    """Rows of one lineage, or an empty frame when that lineage is absent."""
+def _groups_by_lineage(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Rows of each lineage, keyed by the cleaned ``lineage_id``, in row order.
+
+    One pass over the frame. Filtering the whole frame once per lineage was
+    quadratic: 209,412 lineages times millions of manifest rows.
+    """
     if frame.empty or "lineage_id" not in frame.columns:
-        return frame.iloc[0:0]
-    return frame.loc[frame["lineage_id"].map(_clean) == lineage_id]
+        return {}
+    keys = frame["lineage_id"].map(_clean)
+    return {str(key): group for key, group in frame.groupby(keys, sort=False) if key}
 
 
 def _packages_of_lineage(
@@ -1879,52 +2131,71 @@ def _empty_stored_manifests() -> pd.DataFrame:
     return frame
 
 
-def _save_packages(dev: bool, packages: pd.DataFrame, stored: pd.DataFrame) -> None:
-    """Write the two package tables under ``data_dir(dev)``."""
-    folder = data_dir(dev)
-    write_parquet(
-        packages.loc[:, PACKAGE_COLUMNS],
-        folder / OUTPUT_NAMES[4],
-        ["lineage_id", "package_version_seq"],
-    )
-    write_parquet(
-        stored.loc[:, STORED_MANIFEST_COLUMNS],
-        folder / OUTPUT_NAMES[5],
-        ["lineage_id", "package_version_seq", "path"],
-    )
-
-
 def _print_package_report(
     lineages: pd.DataFrame,
     packages: pd.DataFrame,
-    stored: pd.DataFrame,
+    stored_path: Path,
     elapsed: float,
+    named: dict[str, frozenset[str]],
 ) -> None:
     """Print package counts and two rows of each package table."""
     ordered_packages = packages
-    ordered_stored = stored
     if not packages.empty:
         ordered_packages = packages.sort_values(
             ["lineage_id", "package_version_seq"], kind="mergesort"
         )
-    if not stored.empty:
-        ordered_stored = stored.sort_values(
-            ["lineage_id", "package_version_seq", "path"], kind="mergesort"
-        )
-    print_summary("Package versions", _package_summary(lineages, packages, stored, elapsed))
+    facts = _stored_manifest_facts(stored_path)
+    summary = _package_summary(lineages, packages, facts, elapsed)
+    summary.update(_root_summary(named))
+    print_summary("Package versions", summary)
     print_sample_records(ordered_packages, "Sample package versions")
-    print_sample_records(ordered_stored, "Sample folder manifests")
+    print_sample_records(facts["sample"], "Sample folder manifests")
+
+
+def _stored_manifest_facts(path: Path) -> dict[str, object]:
+    """Row count, lineages with files or scripts, and the first two rows.
+
+    Read with DuckDB, so the manifest table does not have to fit in memory.
+    """
+    quoted = "'" + str(path).replace("'", "''") + "'"
+    connection = connect_duckdb()
+    try:
+        rows, with_files, with_scripts = connection.execute(
+            f"""
+            SELECT count(*), count(DISTINCT lineage_id),
+                   count(DISTINCT lineage_id) FILTER (WHERE file_category = 'script')
+            FROM read_parquet({quoted})
+            """
+        ).fetchone()
+        sample = connection.execute(f"SELECT * FROM read_parquet({quoted}) LIMIT 2").df()
+    finally:
+        connection.close()
+    return {
+        "rows": int(rows),
+        "with_files": int(with_files),
+        "with_scripts": int(with_scripts),
+        "sample": sample,
+    }
+
+
+def _root_summary(named: dict[str, frozenset[str]]) -> dict[str, object]:
+    """Counts for the repo-root rule in the module docstring."""
+    return {
+        "root_lineages": len(named),
+        "root_lineages_naming_no_file": sum(1 for paths in named.values() if not paths),
+        "root_named_paths": sum(len(paths) for paths in named.values()),
+    }
 
 
 def _package_summary(
     lineages: pd.DataFrame,
     packages: pd.DataFrame,
-    stored: pd.DataFrame,
+    facts: dict[str, object],
     elapsed: float,
 ) -> dict[str, object]:
     """Counts for step 10. Shares use the kept English lineages as the base."""
     lineage_count = 0 if lineages.empty else len(lineages)
-    with_files, with_scripts = _lineages_with_files(stored)
+    with_files, with_scripts = int(facts["with_files"]), int(facts["with_scripts"])
     per_package = _counts_per_lineage(packages)
     per_text = _version_counts(lineages)
     ahead = _packages_ahead_of_text(lineages, packages)
@@ -1936,22 +2207,13 @@ def _package_summary(
         "lineages_with_scripts": with_scripts,
         "lineages_with_scripts_share": _share(with_scripts, lineage_count),
         "package_versions": len(packages),
-        "manifest_files": len(stored),
+        "manifest_files": int(facts["rows"]),
         "package_versions_per_lineage_median": _show_number(_median(per_package)),
         "package_versions_per_lineage_max": _show_max(per_package),
         "skill_md_versions_per_lineage_median": _show_number(_median(per_text)),
         "skill_md_versions_per_lineage_max": _show_max(per_text),
         "lineages_with_more_package_than_text_versions": ahead,
     }
-
-
-def _lineages_with_files(stored: pd.DataFrame) -> tuple[int, int]:
-    """How many lineages have any package file, and how many have a script."""
-    if stored.empty or "lineage_id" not in stored.columns:
-        return 0, 0
-    with_files = stored["lineage_id"].nunique()
-    scripts = stored.loc[stored["file_category"] == "script", "lineage_id"]
-    return int(with_files), int(scripts.nunique())
 
 
 def _counts_per_lineage(packages: pd.DataFrame) -> list[int]:

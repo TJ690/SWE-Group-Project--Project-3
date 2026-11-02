@@ -5,6 +5,11 @@ Inputs: family, copy, staleness and scope parquet files under data_dir.
     when they exist, and are never written.
 Outputs: one CSV per table in results_dir(dev).
 How to run: python -m skill_genealogy.summarize_results [--dev] [--force]
+
+These tables inherit method limits that must be reported with them, for
+example that repo-root skills keep only the files their SKILL.md names. The
+list is "Limits to report with the results" in
+docs/skill_genealogy/ARCHITECTURE_DECISIONS.md. Keep it when the numbers change.
 """
 
 from __future__ import annotations

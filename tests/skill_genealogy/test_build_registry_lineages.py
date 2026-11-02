@@ -26,6 +26,7 @@ from skill_genealogy.build_registry_lineages import (
     number_text_versions,
     read_skill_md_changes,
     rebuild_folder_manifests,
+    skill_md_named_paths,
 )
 from skill_genealogy.compare_texts import TextChange, compare_front_matter
 
@@ -884,3 +885,55 @@ def test_batches_give_the_same_tables_as_one_batch(monkeypatch) -> None:
         ordered(want_changes, ["lineage_id", "from_seq"]),
     )
     assert list(dropped["reason"]) == list(want_dropped["reason"]) == ["not_english"]
+
+
+def test_root_skill_keeps_only_files_its_skill_md_names() -> None:
+    """A repo-root skill keeps named files and files under a named folder.
+
+    ``app/Main.kt`` is project code and is left out. A rename of a named
+    file to an unnamed path removes it from the package.
+    """
+    text = "Run `scripts/run.sh`. See [docs](./references/)."
+    named = skill_md_named_paths([text, "Old text names tools/old.py"])
+    assert named == frozenset({"scripts/run.sh", "references/", "tools/old.py"})
+
+    def change(commit: str, seq: int, status: str, path: str, old: str = "") -> dict:
+        return {
+            "lineage_id": "acme/app::.",
+            "skill_folder": ".",
+            "commit": commit,
+            "commit_date": f"2026-01-0{seq}T00:00:00Z",
+            "commit_seq": seq,
+            "status": status,
+            "file_path": path,
+            "old_file_path": old,
+            "repo_path": path,
+            "old_repo_path": old,
+            "new_sha": f"sha-{path}",
+            "new_mode": "100644",
+            "history_role": "own",
+        }
+
+    rows = pd.DataFrame(
+        [
+            change("c1", 1, "A", "scripts/run.sh"),
+            change("c1", 1, "A", "app/Main.kt"),
+            change("c1", 1, "A", "references/api.md"),
+            change("c2", 2, "R", "app/old.py", "tools/old.py"),
+            change("c3", 3, "A", "tools/old.py"),
+            change("c4", 4, "R", "app/old.py", "tools/old.py"),
+        ]
+    )
+    manifests = rebuild_folder_manifests(rows, {"acme/app::.": named})
+    paths = manifests.dropna(subset=["path"]).groupby("commit")["path"].apply(sorted).to_dict()
+    assert paths["c1"] == ["references/api.md", "scripts/run.sh"]
+    assert paths["c3"] == ["references/api.md", "scripts/run.sh", "tools/old.py"]
+    assert paths["c4"] == ["references/api.md", "scripts/run.sh"]
+    everything = rebuild_folder_manifests(rows)
+    assert "app/Main.kt" in set(everything["path"].dropna())
+
+
+def test_named_paths_skip_urls_and_dot_prefixes() -> None:
+    """URLs are not paths. ``./`` and ``/`` are dropped."""
+    text = "Fetch https://example.com/setup.sh then run ./bin/setup.sh and /etc/x.conf"
+    assert skill_md_named_paths([text]) == frozenset({"bin/setup.sh", "etc/x.conf"})
