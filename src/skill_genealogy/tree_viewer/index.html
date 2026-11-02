@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Family trees</title>
+  <link rel="stylesheet" href="tree_viewer.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Family trees</h1>
+      <p class="lede">Repo roles are heuristic labels. They are not a claim about who wrote a file.</p>
+    </div>
+    <button type="button" id="theme-toggle">Dark theme</button>
+  </header>
+
+  <p id="load-error" class="error" hidden></p>
+
+  <section class="controls" aria-label="Search">
+    <label class="field">Family
+      <input id="family-search" type="search" placeholder="Type a family id" autocomplete="off">
+    </label>
+    <label class="field">Kind
+      <select id="kind-filter">
+        <option value="all">All kinds</option>
+      </select>
+    </label>
+    <label class="field">Role
+      <select id="role-filter">
+        <option value="all">All roles</option>
+        <option value="registry">Registry</option>
+        <option value="registry_hub">Registry hub</option>
+        <option value="hub">Hub</option>
+        <option value="repository">Repository</option>
+      </select>
+    </label>
+    <label class="field">Repo
+      <input id="repo-search" type="search" placeholder="owner/repo" autocomplete="off">
+    </label>
+  </section>
+
+  <p id="counts" class="counts"></p>
+  <section id="repo-card" class="repo-card" hidden></section>
+
+  <div class="layout">
+    <section class="tree-panel">
+      <div class="tree-bar">
+        <h2 id="tree-title">Choose a family</h2>
+        <button type="button" id="reset-view">Reset view</button>
+      </div>
+      <div id="tree"></div>
+    </section>
+    <aside id="details" class="details">
+      <h2>Node</h2>
+      <p>Click a node to see its repo, path, dates, link, change state, and staleness.</p>
+    </aside>
+  </div>
+
+  <section id="legend" class="legend" aria-label="Legend"></section>
+
+  <script>
+    window.addEventListener("error", function (event) {
+      if (window.d3) {
+        return;
+      }
+      var box = document.getElementById("load-error");
+      box.hidden = false;
+      box.textContent = "D3 did not load from cdnjs. Check the network and reload the page.";
+    });
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+  <script src="viewer_common.js"></script>
+  <script src="tree_viewer.js"></script>
+</body>
+</html>

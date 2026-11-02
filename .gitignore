@@ -16,6 +16,11 @@ src/data/genealogy_100/
 # skill_genealogy stage outputs (rebuilt by the stages; download stores are large)
 src/data/skill_genealogy/*
 src/data/skill_genealogy_dev/
+# viewer JSON can be large; the CSV tables stay tracked
+results/skill_genealogy*/tree_viewer/
+results/skill_genealogy*/staleness_viewer/
+results/skill_genealogy*/repo_explorer/
+results/skill_genealogy*/repo_reports/
 # the language check sheet holds the team's hand labels, so it stays in git
 !src/data/skill_genealogy/language_check_sample.csv
 src/data/derived/

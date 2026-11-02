@@ -44,6 +44,9 @@ skillsig = "skillsig.cli:main"
 where = ["src"]
 include = ["skillsig*", "skill_genealogy*"]
 
+[tool.setuptools.package-data]
+skill_genealogy = ["*.js", "tree_viewer/*", "staleness_viewer/*", "repo_explorer/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
