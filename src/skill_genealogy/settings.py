@@ -161,6 +161,10 @@ SCRIPT_EXTENSIONS: tuple[str, ...] = (
 MAX_SCRIPT_BYTES = 200_000
 # GIT8: blob ids per `git fetch`. 500 keeps one command line short.
 BLOB_FETCH_BATCH = 500
+# Stage 4 reads SKILL.md texts for whole lineages, about this many blobs at a time.
+# The full registry history has 6.7 GB of SKILL.md text, more than this machine's 16 GB
+# holds as Python strings. 40,000 blobs is about 0.5 GB.
+LINEAGE_TEXT_BATCH = 40_000
 # merge_shards writes text rows in groups of this size. One huge copy broke a file before.
 TEXT_ROW_GROUP = 1000
 # No design cap for SKILL.md. This is only the integer passed to read_blob_texts.

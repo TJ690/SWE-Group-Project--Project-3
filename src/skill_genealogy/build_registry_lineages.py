@@ -41,7 +41,7 @@ from skill_genealogy.file_helpers import (
     read_parquet,
     write_parquet,
 )
-from skill_genealogy.settings import data_dir
+from skill_genealogy.settings import LINEAGE_TEXT_BATCH, data_dir
 from skill_genealogy.text_helpers import detect_language, normalize_text
 
 SKILL_MD = "SKILL.md"
@@ -443,22 +443,16 @@ def main() -> None:
     started = time.perf_counter()
     _check_inputs(args.dev)
     changes = read_skill_md_changes(args.dev)
-    texts = _read_skill_texts(args.dev, changes)
     status = _read_status(args.dev)
     registries = _read_registry_names()
     # Step 2: Join renames and copies (algorithm A50)
     joined = join_renamed_folders(changes)
-    # Step 3: Number text versions (algorithm A20)
-    versions = number_text_versions(joined, texts)
     # Step 4: Mark removed lineages
     removed = mark_removed_lineages(joined)
-    # Step 5: Label language and drop non-English lineages
-    print(f"Step 5: label language for {len(versions)} versions", flush=True)
-    labeled = label_lineage_language(versions, texts)
+    # Steps 3, 5 and 6 run one batch of lineages at a time
+    labeled, version_changes = _versions_in_batches(args.dev, joined, LINEAGE_TEXT_BATCH)
     kept, dropped, lineages = _finish_lineages(joined, labeled, removed)
     copied_from_not_kept = _copied_from_not_kept(lineages)
-    # Step 6: Compare consecutive versions
-    version_changes = compare_consecutive_versions(kept, texts)
     # Step 7: Save and print the summary
     _save(args.dev, lineages, kept, version_changes, dropped)
     elapsed = time.perf_counter() - started
@@ -1001,6 +995,77 @@ def _require(frame: pd.DataFrame, columns: list[str], label: str) -> None:
     if missing:
         joined = ", ".join(missing)
         raise ValueError(f"{label} needs columns: {joined}")
+
+
+def _versions_in_batches(
+    dev: bool,
+    joined: pd.DataFrame,
+    limit: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Steps 3, 5 and 6 for whole lineages, with one batch of texts in memory.
+
+    Each batch reads only its own SKILL.md texts, numbers and labels its
+    versions, and compares the versions of its English lineages. Every
+    step works on one lineage at a time, so the result is the same as one
+    big batch.
+
+    Inputs: ``joined`` — rows from ``join_renamed_folders``.
+    ``limit`` — about this many distinct blobs per batch.
+    Outputs: labeled versions (every lineage) and version changes (kept lineages).
+    """
+    batches = _lineage_batches(joined, limit) or [joined]
+    labeled_parts: list[pd.DataFrame] = []
+    change_parts: list[pd.DataFrame] = []
+    for number, batch in enumerate(batches, start=1):
+        texts = _read_skill_texts(dev, batch)
+        # Step 3: Number text versions (algorithm A20)
+        versions = number_text_versions(batch, texts)
+        # Step 5: Label language and drop non-English lineages
+        print(
+            f"Batch {number}/{len(batches)}: label language for {len(versions)} versions",
+            flush=True,
+        )
+        labeled = label_lineage_language(versions, texts)
+        dropped_ids = set(_dropped_lineages(batch, labeled)["lineage_id"])
+        kept = labeled.loc[~labeled["lineage_id"].isin(dropped_ids)] if len(labeled) else labeled
+        # Step 6: Compare consecutive versions
+        change_parts.append(compare_consecutive_versions(kept, texts))
+        labeled_parts.append(labeled)
+        del texts
+    return _concat_parts(labeled_parts), _concat_parts(change_parts)
+
+
+def _lineage_batches(joined: pd.DataFrame, limit: int) -> list[pd.DataFrame]:
+    """Split ``joined`` into whole lineages with about ``limit`` distinct blobs each.
+
+    Lineages go in ``lineage_id`` order. One lineage larger than ``limit`` is
+    its own batch. Rows without a lineage id are left out; no step uses them.
+    """
+    if joined.empty or "lineage_id" not in joined.columns:
+        return []
+    counts = joined.groupby("lineage_id")["new_sha"].nunique().sort_index()
+    groups: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for lineage_id, count in counts.items():
+        if current and size + int(count) > limit:
+            groups.append(current)
+            current, size = [], 0
+        current.append(str(lineage_id))
+        size += int(count)
+    if current:
+        groups.append(current)
+    batch_of = {lineage_id: number for number, ids in enumerate(groups) for lineage_id in ids}
+    numbers = joined["lineage_id"].map(batch_of)
+    return [group for _, group in joined.groupby(numbers, sort=True)]
+
+
+def _concat_parts(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """Stack the batch results. Empty parts are skipped so column types stay."""
+    filled = [part for part in parts if not part.empty]
+    if not filled:
+        return parts[0]
+    return pd.concat(filled, ignore_index=True)
 
 
 def _read_skill_texts(dev: bool, changes: pd.DataFrame) -> dict[str, str]:

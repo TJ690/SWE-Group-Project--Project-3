@@ -15,7 +15,9 @@ from skill_genealogy.build_registry_lineages import (
     TEXT_CHANGE_FIELDS,
     _copied_from_not_kept,
     _finish_lineages,
+    _lineage_batches,
     _manifests_for_packages,
+    _versions_in_batches,
     compare_consecutive_versions,
     join_renamed_folders,
     label_lineage_language,
@@ -842,3 +844,43 @@ def test_nested_skill_md_stays_in_the_manifest_as_a_reference() -> None:
     assert int(packages.iloc[0]["file_count"]) == 1
     assert bool(packages.iloc[0]["changed_other_files"]) is True
     assert bool(packages.iloc[0]["changed_scripts"]) is False
+
+
+def test_batches_give_the_same_tables_as_one_batch(monkeypatch) -> None:
+    """A one-blob limit splits three lineages into batches and changes nothing."""
+    rows = [
+        _row(skill_folder="skills/a", repo_path="skills/a/SKILL.md", new_sha="a1", commit_seq=1),
+        _row(
+            skill_folder="skills/a",
+            repo_path="skills/a/SKILL.md",
+            new_sha="a2",
+            commit="c2",
+            commit_date="2026-01-02T00:00:00Z",
+            commit_seq=2,
+        ),
+        _row(skill_folder="skills/b", repo_path="skills/b/SKILL.md", new_sha="b1", commit_seq=3),
+        _row(skill_folder="skills/c", repo_path="skills/c/SKILL.md", new_sha="c1", commit_seq=4),
+    ]
+    texts = {"a1": V1, "a2": V2, "b1": CHINESE, "c1": V3}
+    monkeypatch.setattr(
+        "skill_genealogy.build_registry_lineages._read_skill_texts",
+        lambda dev, changes: {sha: texts[sha] for sha in changes["new_sha"]},
+    )
+    joined = join_renamed_folders(pd.DataFrame(rows))
+    assert len(_lineage_batches(joined, 1)) == 3
+    _, want_kept, want_changes, want_dropped = _build(rows, texts)
+    labeled, changes = _versions_in_batches(True, joined, 1)
+    kept, dropped, _ = _finish_lineages(joined, labeled, mark_removed_lineages(joined))
+
+    def ordered(frame: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+        return frame.sort_values(keys).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(
+        ordered(kept, ["lineage_id", "version_seq"]),
+        ordered(want_kept, ["lineage_id", "version_seq"]),
+    )
+    pd.testing.assert_frame_equal(
+        ordered(changes, ["lineage_id", "from_seq"]),
+        ordered(want_changes, ["lineage_id", "from_seq"]),
+    )
+    assert list(dropped["reason"]) == list(want_dropped["reason"]) == ["not_english"]
