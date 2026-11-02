@@ -13,11 +13,14 @@ import pandas as pd
 from skill_genealogy.file_helpers import connect_duckdb
 from skill_genealogy.find_copies import (
     _containment_array,
+    _links_by_version_batch,
     _sign_many,
+    band_mates,
+    build_band_index,
     build_boilerplate_set,
     build_dataset_signatures,
-    build_registry_lsh,
     build_registry_signatures,
+    build_value_index,
     compute_dated_hub_shares,
     count_owners_per_line,
     find_cluster_links,
@@ -29,6 +32,8 @@ from skill_genealogy.find_copies import (
     follow_to_root,
     list_copy_files,
     load_signatures,
+    shared_value_counts,
+    sign_registry_in_batches,
     signature_for_text,
     update_repo_roles,
     verify_links_with_line_diff,
@@ -834,13 +839,12 @@ def test_near_links_keep_high_jaccard_and_drop_half() -> None:
         _meta_row("Half", "2026-01-01", is_hub=False, size=100),
     ]
     bundle = _signature_bundle(["Hub#1", "Plain#1", "Half#1"], matrix, [100, 100, 100], meta)
-    index = build_registry_lsh(["Hub#1", "Plain#1", "Half#1"], matrix, NEAR_COPY_MIN_JACCARD)
     dataset = (
         ["near-copy", "half-copy"],
         np.vstack([copy_values, half_copy_values]),
         np.array([100, 200]),
     )
-    found = find_near_links(dataset, index, bundle)
+    found = find_near_links(dataset, bundle)
     assert list(found["file_sha"]) == ["near-copy"]
     assert found.loc[0, "lineage_id"] == "Plain"
     assert found.loc[0, "link"] == "near"
@@ -1085,12 +1089,151 @@ def test_registry_files_are_not_copies() -> None:
     assert bool(owned["has_wild_history"]) is False
 
 
-def test_registry_lsh_returns_a_copy_of_the_same_text() -> None:
-    """Two identical sketches meet a 0.80 index. An unrelated sketch does not."""
-    values = minhash_to_array(make_minhash({"alpha beta", "beta gamma"}))
-    other = minhash_to_array(make_minhash({"totally different words here", "nothing in common"}))
-    index = build_registry_lsh(["a#1", "b#1", "c#1"], np.vstack([values, values, other]), 0.8)
-    hits = set(index.query(minhash_from_array(values)))
-    assert hits == {"a#1", "b#1"}
-    empty = build_registry_lsh([], np.zeros((0, MINHASH_NUM_PERM), dtype=np.uint64), 0.8)
-    assert empty.query(minhash_from_array(values)) == []
+def test_value_index_counts_match_a_full_scan() -> None:
+    """Every pair that shares a value gets the same count a full scan gives."""
+    rng = np.random.default_rng(3)
+    registry = rng.integers(0, 6, size=(40, MINHASH_NUM_PERM)).astype(np.uint64)
+    queries = rng.integers(0, 6, size=(15, MINHASH_NUM_PERM)).astype(np.uint64)
+    queries[0] = 99
+    query, row, agree = shared_value_counts(queries, build_value_index(registry))
+    found = {(int(q), int(r)): int(a) for q, r, a in zip(query, row, agree, strict=True)}
+    expected = {
+        (q, r): int(np.count_nonzero(queries[q] == registry[r]))
+        for q in range(len(queries))
+        for r in range(len(registry))
+        if np.any(queries[q] == registry[r])
+    }
+    assert found == expected
+    assert not any(q == 0 for q, _r in found)
+    empty = build_value_index(np.zeros((0, MINHASH_NUM_PERM), dtype=np.uint64))
+    assert all(len(array) == 0 for array in shared_value_counts(queries, empty))
+
+
+def test_band_index_matches_a_datasketch_query() -> None:
+    """Band mates are the keys a datasketch LSH at the same threshold returns."""
+    from datasketch import MinHashLSH
+
+    base = _phrase_set("base", 40)
+    sets = [
+        base,
+        base | _phrase_set("more", 10),
+        set(list(base)[:20]) | _phrase_set("half", 20),
+        _phrase_set("other", 40),
+    ]
+    matrix = np.vstack([minhash_to_array(make_minhash(items)) for items in sets])
+    bands = build_band_index(matrix, 0.5)
+    lsh = MinHashLSH(threshold=0.5, num_perm=MINHASH_NUM_PERM)
+    for position, values in enumerate(matrix):
+        lsh.insert(position, minhash_from_array(values))
+    for position, values in enumerate(matrix):
+        assert band_mates(position, bands) == set(lsh.query(minhash_from_array(values)))
+    assert build_band_index(np.zeros((0, MINHASH_NUM_PERM), dtype=np.uint64), 0.5) == []
+
+
+def test_near_link_found_without_a_band_match() -> None:
+    """Jaccard 0.82 with no equal 13-value band is still a near link."""
+    registry = np.arange(MINHASH_NUM_PERM, dtype=np.uint64)
+    copy = registry.copy()
+    copy[np.arange(0, 117, 13)[:9] + 5] += 5000
+    copy[[120, 121, 122, 123, 124, 125, 126, 127, 119, 118, 117, 116, 115, 114]] += 7000
+    jaccard = np.count_nonzero(copy == registry) / MINHASH_NUM_PERM
+    assert NEAR_COPY_MIN_JACCARD <= jaccard < 0.83
+    bundle = _signature_bundle(
+        ["Reg#1"],
+        registry.reshape(1, -1),
+        [100],
+        [_meta_row("Reg", "2026-01-01", is_hub=False, size=100)],
+    )
+    found = find_near_links((["copy"], copy.reshape(1, -1), np.array([100])), bundle)
+    assert list(found["link"]) == ["near"]
+
+
+def test_weak_source_does_not_beat_a_strong_source() -> None:
+    """One shared value gives a tiny old text containment 1.0. The 60-value source wins.
+
+    Before the weak-source rule both scored 1.0 and the older ``Tiny`` won the tie.
+    """
+    copy = np.arange(MINHASH_NUM_PERM, dtype=np.uint64)
+    real = copy.copy()
+    real[60:] += 10_000
+    tiny = np.arange(MINHASH_NUM_PERM, dtype=np.uint64) + 20_000
+    tiny[127] = copy[127]
+    bundle = _signature_bundle(
+        ["Tiny#1", "Real#1"],
+        np.vstack([tiny, real]),
+        [1, 40],
+        [
+            _meta_row("Tiny", "2025-01-01", is_hub=False, size=1),
+            _meta_row("Real", "2026-01-01", is_hub=False, size=40),
+        ],
+    )
+    found = find_contained_links((["copy"], copy.reshape(1, -1), np.array([200])), bundle)
+    assert list(found["lineage_id"]) == ["Real"]
+    alone = _signature_bundle(
+        ["Tiny#1"],
+        tiny.reshape(1, -1),
+        [1],
+        [_meta_row("Tiny", "2025-01-01", is_hub=False, size=1)],
+    )
+    kept = find_contained_links((["copy"], copy.reshape(1, -1), np.array([200])), alone)
+    assert list(kept["lineage_id"]) == ["Tiny"]
+
+
+def test_rehost_skips_a_weak_source_when_a_strong_one_is_older() -> None:
+    """A one-value match does not make a lineage a re-host when a real source exists."""
+    rows = pd.DataFrame(
+        [
+            _version_row("B", "b/repo", "2026-05-01", "b1"),
+            _version_row(
+                "A", "a/repo", "2025-01-01", "a1", jaccard=1 / 128, containment=1.0
+            ),
+            _version_row("C", "c/repo", "2026-01-01", "c1", jaccard=0.5, containment=0.9),
+        ]
+    )
+    found = find_rehost_source("B", "B#1", rows)
+    assert found is not None
+    assert found["copied_from_lineage"] == "C"
+
+
+def test_registry_signing_in_batches_writes_the_same_file(tmp_path: Path, monkeypatch) -> None:
+    """One row per batch gives the same arrays as signing every row at once."""
+    versions = pd.DataFrame(
+        {
+            "lineage_id": ["a::s", "a::s", "b::t", "c::u"],
+            "version_seq": [1, 2, 1, 1],
+            "blob": ["one", "two", "three", "four"],
+        }
+    )
+    texts = {
+        "one": f"{BODY} zeta",
+        "two": "Please install the tool",
+        "three": f"{BODY} eta theta",
+        "four": "Please install the tool",
+    }
+    monkeypatch.setattr(
+        "skill_genealogy.find_copies._load_blob_texts",
+        lambda dev, blobs: {blob: texts[blob] for blob in blobs},
+    )
+    whole = tmp_path / "whole.npz"
+    batched = tmp_path / "batched.npz"
+    boilerplate = {BOILERPLATE_LINE}
+    assert build_registry_signatures(versions, texts, boilerplate, whole) == 2
+    assert sign_registry_in_batches(True, versions, boilerplate, batched, batch_rows=1) == 2
+    with np.load(whole) as left, np.load(batched) as right:
+        assert sorted(left.files) == sorted(right.files)
+        for name in left.files:
+            assert np.array_equal(left[name], right[name]), name
+        assert int(right["empty_count"][0]) == 2
+
+
+def test_line_check_batches_keep_each_version_together() -> None:
+    """Links of one version stay in one part. Parts hold at most two versions."""
+    links = pd.DataFrame(
+        {
+            "file_sha": ["f1", "f2", "f3", "f4"],
+            "lineage_id": ["A", "A", "A", "B"],
+            "version_seq": [1, 1, 2, 1],
+        }
+    )
+    parts = _links_by_version_batch(links, 2)
+    assert [sorted(part["file_sha"]) for part in parts] == [["f1", "f2", "f3"], ["f4"]]

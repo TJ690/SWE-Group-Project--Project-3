@@ -112,6 +112,13 @@ NEAR_COPY_MIN_CONTAINMENT = 0.80
 # Jaccard below 0.80, so those pairs are queried at 0.5. A copy that grew
 # much larger than the source can fall below 0.5 and be missed.
 REHOST_CONTAINMENT_LSH_THRESHOLD = 0.5
+# A26: a source that agrees on this many MinHash values or fewer (J <= 0.04) is
+# chance, not evidence. It is not picked when a strong source is also eligible.
+# A small registry text inside a large copy can reach containment 1.0 from one
+# shared value and then win the oldest-date tie.
+WEAK_MATCH_MAX_VALUES = 5
+# A26: a source that agrees on at least this many MinHash values (J >= 0.16).
+STRONG_MATCH_MIN_VALUES = 20
 # Line-diff check after a near match. A link below this share of registry
 # body lines is dropped. 0.50 keeps a copy that still has half the source lines.
 MIN_VERIFIED_LINE_SHARE = 0.50
@@ -161,7 +168,7 @@ SCRIPT_EXTENSIONS: tuple[str, ...] = (
 MAX_SCRIPT_BYTES = 200_000
 # GIT8: blob ids per `git fetch`. 500 keeps one command line short.
 BLOB_FETCH_BATCH = 500
-# Stage 4 reads SKILL.md texts for whole lineages, about this many blobs at a time.
+# Stages 4 and 5 read registry SKILL.md texts about this many blobs at a time.
 # The full registry history has 6.7 GB of SKILL.md text, more than this machine's 16 GB
 # holds as Python strings. 40,000 blobs is about 0.5 GB.
 LINEAGE_TEXT_BATCH = 40_000

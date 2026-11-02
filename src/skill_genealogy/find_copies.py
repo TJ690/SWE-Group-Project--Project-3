@@ -30,7 +30,7 @@ from pathlib import Path
 import duckdb
 import numpy as np
 import pandas as pd
-from datasketch import MinHash, MinHashLSH
+from datasketch import MinHashLSH
 
 import skill_genealogy.settings as settings
 from skill_genealogy.compare_texts import share_of_registry_lines_kept
@@ -47,11 +47,9 @@ from skill_genealogy.file_helpers import (
 from skill_genealogy.text_helpers import (
     body_lines,
     estimate_containment,
-    estimate_jaccard,
     has_comparable_text,
     make_minhash,
     make_word_shingles,
-    minhash_from_array,
     minhash_to_array,
     normalize_text,
     remove_boilerplate_lines,
@@ -932,15 +930,14 @@ def _load_blob_texts(dev: bool, blobs: list[str]) -> dict[str, str]:
     return found
 
 
-def _read_registry_versions(dev: bool) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Load lineage version rows and the blob text of each one."""
+def _read_registry_versions(dev: bool) -> pd.DataFrame:
+    """Load lineage version rows. Their texts are read later, one batch at a time."""
     versions = read_parquet(_versions_path(dev))
     needed = ["lineage_id", "version_seq", "blob"]
     missing = [name for name in needed if name not in versions.columns]
     if missing:
         raise ValueError(f"lineage_versions is missing columns: {', '.join(missing)}")
-    blobs = [_clean(value) for value in versions["blob"].tolist()]
-    return versions, _load_blob_texts(dev, blobs)
+    return versions
 
 
 def _text_for_blob(texts: dict[str, str], blob: object) -> str:
@@ -972,20 +969,9 @@ def build_registry_signatures(
     missing = [name for name in needed if name not in versions.columns]
     if missing:
         raise ValueError(f"versions is missing columns: {', '.join(missing)}")
-    identifiers: list[str] = []
-    bodies: list[str] = []
-    for row in versions.itertuples(index=False):
-        identifiers.append(f"{_clean(row.lineage_id)}#{int(row.version_seq)}")
-        bodies.append(_text_for_blob(texts, row.blob))
-    signed = _sign_many(bodies, boilerplate)
-    examples = [
-        f"{identifier} | {_preview(body)}"
-        for identifier, body, (_values, size) in zip(
-            identifiers, bodies, signed, strict=True
-        )
-        if size <= 0
-    ]
-    kept_ids, matrix, sizes, empty_count, _stored = _pack_signatures(identifiers, signed)
+    kept_ids, matrix, sizes, empty_count, examples = _sign_version_rows(
+        versions, texts, boilerplate
+    )
     _write_signature_file(
         out_path,
         kept_ids,
@@ -994,6 +980,79 @@ def build_registry_signatures(
         empty_count,
         examples[:EMPTY_EXAMPLE_COUNT],
     )
+    return len(kept_ids)
+
+
+def _sign_version_rows(
+    versions: pd.DataFrame,
+    texts: dict[str, str],
+    boilerplate: set[str],
+    pool: multiprocessing.pool.Pool | None = None,
+) -> tuple[list[str], np.ndarray, np.ndarray, int, list[str]]:
+    """Sign version rows. Return kept ids, matrix, sizes, empty count, empty examples."""
+    identifiers: list[str] = []
+    bodies: list[str] = []
+    for row in versions.itertuples(index=False):
+        identifiers.append(f"{_clean(row.lineage_id)}#{int(row.version_seq)}")
+        bodies.append(_text_for_blob(texts, row.blob))
+    signed = _sign_many(bodies, boilerplate, pool)
+    examples = [
+        f"{identifier} | {_preview(body)}"
+        for identifier, body, (_values, size) in zip(
+            identifiers, bodies, signed, strict=True
+        )
+        if size <= 0
+    ]
+    kept_ids, matrix, sizes, empty_count, _stored = _pack_signatures(identifiers, signed)
+    return kept_ids, matrix, sizes, empty_count, examples
+
+
+def sign_registry_in_batches(
+    dev: bool,
+    versions: pd.DataFrame,
+    boilerplate: set[str],
+    out_path: Path,
+    batch_rows: int = settings.LINEAGE_TEXT_BATCH,
+) -> int:
+    """Sign every lineage version with one batch of texts in memory at a time.
+
+    The same file as ``build_registry_signatures`` with every text loaded:
+    rows keep the order of ``versions``, and the empty count and examples
+    cover every batch. The full registry history has 6.7 GB of SKILL.md
+    text, so the texts are read ``batch_rows`` version rows at a time.
+
+    Inputs: version rows, the boilerplate set, the output path, batch size.
+    Outputs: one ``.npz`` file, and the number of stored signatures.
+    """
+    total = len(versions)
+    kept_ids: list[str] = []
+    blocks: list[np.ndarray] = []
+    size_blocks: list[np.ndarray] = []
+    empty_count = 0
+    examples: list[str] = []
+    pool = _open_sign_pool(boilerplate) if total >= POOL_MIN_TEXTS else None
+    try:
+        for start in range(0, total, batch_rows):
+            batch = versions.iloc[start : start + batch_rows]
+            texts = _load_blob_texts(dev, [_clean(value) for value in batch["blob"].tolist()])
+            ids, matrix, sizes, empty, found = _sign_version_rows(
+                batch, texts, boilerplate, pool
+            )
+            del texts
+            kept_ids.extend(ids)
+            blocks.append(matrix)
+            size_blocks.append(sizes)
+            empty_count += empty
+            examples.extend(found[: EMPTY_EXAMPLE_COUNT - len(examples)])
+            print(f"registry signatures: {start + len(batch)}/{total}", flush=True)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+    width = settings.MINHASH_NUM_PERM
+    matrix = np.vstack(blocks) if blocks else np.zeros((0, width), dtype=np.uint64)
+    sizes = np.concatenate(size_blocks) if size_blocks else np.zeros((0,), dtype=np.int32)
+    _write_signature_file(out_path, kept_ids, matrix, sizes, empty_count, examples)
     return len(kept_ids)
 
 
@@ -1178,9 +1237,9 @@ def _load_or_sign_registry(dev: bool, boilerplate: set[str]) -> int:
         print("skip: registry_signatures.npz already exists", flush=True)
         signed, _empty, _examples = _read_empty_report(path)
         return signed
-    versions, texts = _read_registry_versions(dev)
+    versions = _read_registry_versions(dev)
     print(f"registry versions to sign: {len(versions)}", flush=True)
-    return build_registry_signatures(versions, texts, boilerplate, path)
+    return sign_registry_in_batches(dev, versions, boilerplate, path)
 
 
 def _print_examples(title: str, examples: list[str]) -> None:
@@ -1348,51 +1407,132 @@ def _containment_of_source(jaccard: float, source_size: int, copy_size: int) -> 
     return estimate_containment(jaccard, source_size, copy_size)
 
 
-def _query_lsh(index: MinHashLSH, sketch: MinHash) -> list[str]:
-    """Return ids whose estimated Jaccard clears this index's threshold.
+def _signature_matrix(signatures: np.ndarray) -> np.ndarray:
+    """The signatures as a uint64 ``[n, 128]`` matrix. Another shape raises."""
+    matrix = np.asarray(signatures, dtype=np.uint64)
+    width = settings.MINHASH_NUM_PERM
+    if matrix.size == 0:
+        return np.zeros((0, width), dtype=np.uint64)
+    if matrix.ndim != 2 or matrix.shape[1] != width:
+        raise ValueError(f"signatures must have shape (n, {width}), got {matrix.shape}")
+    return matrix
 
-    datasketch checks bands, not every stored signature, so a true neighbour
-    can be missing. Callers still score the ids that come back.
+
+# Algorithm A25, see CODE_FLOW.md
+def build_value_index(signatures: np.ndarray) -> dict[str, np.ndarray]:
+    """Sort each MinHash position so a lookup finds every row that shares a value.
+
+    ``values[p]`` is position ``p`` of every row, sorted, and ``rows[p]`` is
+    the row each value came from. Two signatures agree at ``p`` when their
+    values there are equal, so lookups give exact agreement counts. An LSH
+    index only returns rows that match a whole band, and it missed 3.3% of
+    texts with a Jaccard 0.82–0.875 source on the full data.
+
+    Inputs: a uint64 matrix ``[n, 128]``.
+    Outputs: ``values`` uint64 ``[128, n]`` and ``rows`` int32 ``[128, n]``.
     """
-    return [str(key) for key in index.query(sketch)]
+    matrix = _signature_matrix(signatures)
+    width = settings.MINHASH_NUM_PERM
+    values = np.empty((width, matrix.shape[0]), dtype=np.uint64)
+    rows = np.empty((width, matrix.shape[0]), dtype=np.int32)
+    for position in range(width):
+        column = matrix[:, position]
+        order = np.argsort(column, kind="stable")
+        rows[position] = order
+        values[position] = column[order]
+    return {"values": values, "rows": rows}
 
 
-def build_registry_lsh(
-    registry_ids: list[str], signatures: np.ndarray, threshold: float
-) -> MinHashLSH:
-    """Index version signatures so a query can find near copies.
+def shared_value_counts(
+    queries: np.ndarray, index: dict[str, np.ndarray]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Count the MinHash positions where each query agrees with each indexed row.
 
-    datasketch ``MinHashLSH`` returns ids whose estimated Jaccard is about
-    ``threshold`` or higher. ``registry_ids[i]`` belongs to ``signatures[i]``.
-    Each row is a uint64 array of length 128. An empty id list returns an
-    empty index.
+    A pair that agrees nowhere is left out: its Jaccard is 0, so it is never
+    a near or contained link. Pairs come back sorted by query, then row.
+
+    Inputs: a uint64 matrix ``[q, 128]`` and the dict from ``build_value_index``.
+    Outputs: ``(query, row, agree)`` int64 arrays of the same length.
 
     Example:
-    >>> from skill_genealogy.text_helpers import make_minhash, minhash_to_array
-    >>> values = minhash_to_array(make_minhash({"alpha beta", "beta gamma"}))
-    >>> built = build_registry_lsh(["a#1", "b#1"], np.vstack([values, values]), 0.8)
-    >>> sorted(built.query(minhash_from_array(values)))
-    ['a#1', 'b#1']
+    >>> registry = np.arange(256, dtype=np.uint64).reshape(2, 128)
+    >>> query = registry[:1].copy()
+    >>> query[0, :28] = 999
+    >>> found = shared_value_counts(query, build_value_index(registry))
+    >>> [array.tolist() for array in found]
+    [[0], [0], [100]]
+    """
+    values, rows = index["values"], index["rows"]
+    block = _signature_matrix(queries)
+    query_parts: list[np.ndarray] = []
+    row_parts: list[np.ndarray] = []
+    for position in range(values.shape[0]):
+        column = values[position]
+        wanted = block[:, position]
+        low = np.searchsorted(column, wanted, side="left")
+        hits = np.searchsorted(column, wanted, side="right") - low
+        total = int(hits.sum())
+        if total == 0:
+            continue
+        query_parts.append(np.repeat(np.arange(len(block)), hits))
+        starts = np.repeat(low - (np.cumsum(hits) - hits), hits)
+        row_parts.append(rows[position][np.arange(total) + starts])
+    if not query_parts:
+        empty = np.zeros((0,), dtype=np.int64)
+        return empty, empty.copy(), empty.copy()
+    count = values.shape[1]
+    keys = np.concatenate(query_parts).astype(np.int64) * count
+    keys += np.concatenate(row_parts).astype(np.int64)
+    pairs, agree = np.unique(keys, return_counts=True)
+    return pairs // count, pairs % count, agree.astype(np.int64)
+
+
+# Algorithm A23, see CODE_FLOW.md
+def build_band_index(
+    signatures: np.ndarray, threshold: float
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Group rows that share one whole LSH band, with the bands datasketch uses.
+
+    ``MinHashLSH`` at ``threshold`` splits the 128 values into ``b`` bands of
+    ``r``. Two rows are candidates when every value of one band is equal.
+    This gives the same candidates as a datasketch query. It stores two int32
+    arrays per band instead of a dict entry per band and row, which took
+    about 7.8 KB per row at 0.5.
+
+    Inputs: a uint64 matrix ``[n, 128]`` and the LSH threshold.
+    Outputs: per band, the group of each row, the rows ordered by group, and
+    where each group starts in that order.
+
+    Example:
+    >>> rows = np.vstack([np.arange(128), np.arange(128), np.arange(128) + 500])
+    >>> sorted(band_mates(0, build_band_index(rows.astype(np.uint64), 0.5)))
+    [0, 1]
     """
     if not 0.0 < float(threshold) <= 1.0:
         raise ValueError(f"threshold must be between 0 and 1, got {threshold}")
-    matrix = np.asarray(signatures)
-    if matrix.ndim != 2 or matrix.shape[1] != settings.MINHASH_NUM_PERM:
-        width = settings.MINHASH_NUM_PERM
-        raise ValueError(f"signatures must have shape (n, {width}), got {matrix.shape}")
-    if matrix.shape[0] != len(registry_ids):
-        raise ValueError(
-            f"{len(registry_ids)} ids for {matrix.shape[0]} signatures"
-        )
-    seen: set[str] = set()
-    index = MinHashLSH(threshold=float(threshold), num_perm=settings.MINHASH_NUM_PERM)
-    for key, row in zip(registry_ids, matrix, strict=True):
-        name = str(key)
-        if name in seen:
-            raise ValueError(f"duplicate signature id {name}")
-        seen.add(name)
-        index.insert(name, minhash_from_array(row))
-    return index
+    matrix = _signature_matrix(signatures)
+    if matrix.shape[0] == 0:
+        return []
+    shape = MinHashLSH(threshold=float(threshold), num_perm=settings.MINHASH_NUM_PERM)
+    bands: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for band in range(shape.b):
+        block = np.ascontiguousarray(matrix[:, band * shape.r : (band + 1) * shape.r])
+        keys = block.view(np.dtype((np.void, block.dtype.itemsize * shape.r))).reshape(-1)
+        _unique, group = np.unique(keys, return_inverse=True)
+        group = group.reshape(-1).astype(np.int32)
+        order = np.argsort(group, kind="stable").astype(np.int32)
+        starts = np.searchsorted(group[order], np.arange(int(group.max()) + 2))
+        bands.append((group, order, starts))
+    return bands
+
+
+def band_mates(row: int, bands: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> set[int]:
+    """Rows that share at least one whole band with ``row``, including itself."""
+    found: set[int] = set()
+    for group, order, starts in bands:
+        key = int(group[row])
+        found.update(order[starts[key] : starts[key + 1]].tolist())
+    return found
 
 
 def _link_for_row(query_blob: str, row: object) -> tuple[str, float] | None:
@@ -1437,9 +1577,34 @@ def _scored_sources(query: pd.Series, candidates: pd.DataFrame) -> list[dict[str
                 "release_at": release_at,
                 "rehost_link": link[0],
                 "similarity": link[1],
+                "jaccard": 1.0 if link[0] == "exact" else _as_float(row.jaccard),
             }
         )
     return scored
+
+
+def _agreeing_values(jaccard: float) -> int:
+    """How many of the 128 MinHash values agree at this Jaccard."""
+    return int(round(float(jaccard) * settings.MINHASH_NUM_PERM))
+
+
+def _without_weak_sources(jaccards: list[float]) -> list[bool]:
+    """Keep flags: a weak source is left out when a strong one is eligible.
+
+    Weak agrees on ``WEAK_MATCH_MAX_VALUES`` values or fewer, strong on at
+    least ``STRONG_MATCH_MIN_VALUES``. Without a strong source every source
+    is kept, so the oldest-date rule still decides close cases.
+
+    Example:
+    >>> _without_weak_sources([1 / 128, 64 / 128])
+    [False, True]
+    >>> _without_weak_sources([1 / 128, 10 / 128])
+    [True, True]
+    """
+    counts = [_agreeing_values(value) for value in jaccards]
+    if not counts or max(counts) < settings.STRONG_MATCH_MIN_VALUES:
+        return [True] * len(counts)
+    return [count > settings.WEAK_MATCH_MAX_VALUES for count in counts]
 
 
 def _best_source(scored: list[dict[str, object]]) -> dict[str, object]:
@@ -1459,9 +1624,11 @@ def find_rehost_source(
     """Pick the older version this lineage's first text was copied from.
 
     ``candidates`` includes the query row (``version_id`` equals
-    ``first_version_id``) and the versions that share its blob or passed
-    the LSH check. A row counts only when its repo differs and its
-    ``release_date`` is strictly earlier. An exact blob match wins.
+    ``first_version_id``) and the versions that share its blob, are near
+    it, or share an LSH band with it. A row counts only when its repo
+    differs and its ``release_date`` is strictly earlier. A source that
+    agrees on a few MinHash values is left out when a strong source is also
+    eligible (``_without_weak_sources``). An exact blob match wins.
     Otherwise the highest similarity wins: Jaccard for a near link,
     containment for a near-contained link. Ties go to the oldest date,
     then ``lineage_id``. None means this first version has no source.
@@ -1490,6 +1657,8 @@ def find_rehost_source(
         for item in _scored_sources(matched.iloc[0], candidates)
         if str(item["lineage_id"]) != str(lineage_id)
     ]
+    keep = _without_weak_sources([float(item["jaccard"]) for item in scored])
+    scored = [item for item, kept in zip(scored, keep, strict=True) if kept]
     if not scored:
         return None
     best = _best_source(scored)
@@ -1667,13 +1836,6 @@ def _version_table(versions: pd.DataFrame, lineages: pd.DataFrame) -> pd.DataFra
     return merged
 
 
-def _sketches(ids: list[str], signatures: np.ndarray) -> dict[str, MinHash]:
-    """Rebuild one MinHash per stored signature, keyed by version id."""
-    return {
-        str(key): minhash_from_array(signatures[index]) for index, key in enumerate(ids)
-    }
-
-
 def _blob_groups(records: dict[str, dict[str, object]]) -> dict[str, list[str]]:
     """Map a blob sha to the version ids that store it."""
     grouped: dict[str, list[str]] = {}
@@ -1710,17 +1872,20 @@ def _rehost_fields(
 def _scored_candidate(
     query_id: str,
     other_id: str,
-    sketches: dict[str, MinHash],
-    sizes: dict[str, int],
+    index: dict[str, object],
     record: dict[str, object],
 ) -> dict[str, object]:
     """Add Jaccard and containment of ``other_id`` inside the query text."""
-    query_sketch = sketches.get(query_id)
-    other_sketch = sketches.get(other_id)
-    if query_sketch is None or other_sketch is None or other_id == query_id:
+    position: dict[str, int] = index["position"]
+    sizes: dict[str, int] = index["sizes"]
+    query_row = position.get(query_id)
+    other_row = position.get(other_id)
+    if query_row is None or other_row is None or other_id == query_id:
         jaccard, containment = 0.0, 0.0
     else:
-        jaccard = estimate_jaccard(query_sketch, other_sketch)
+        signatures: np.ndarray = index["signatures"]
+        agree = np.count_nonzero(signatures[query_row] == signatures[other_row])
+        jaccard = float(agree) / float(settings.MINHASH_NUM_PERM)
         containment = _containment_of_source(
             jaccard, sizes.get(other_id, 0), sizes.get(query_id, 0)
         )
@@ -1737,21 +1902,28 @@ def _scored_candidate(
 
 
 def _candidate_frame(record: dict[str, object], index: dict[str, object]) -> pd.DataFrame:
-    """The query version plus exact blob mates and both LSH hit lists."""
+    """The query version plus exact blob mates, every near version, and band mates.
+
+    Near versions (Jaccard at least 0.80) come from exact agreement counts.
+    Containment candidates share one whole band at the 0.5 LSH threshold.
+    """
     version_id = str(record["version_id"])
     found = {version_id}
     blob_key = _blob_key(record["blob"])
     blobs: dict[str, list[str]] = index["blobs"]
     if blob_key:
         found.update(blobs.get(blob_key, ()))
-    sketches: dict[str, MinHash] = index["sketches"]
-    sketch = sketches.get(version_id)
-    if sketch is not None:
-        found.update(_query_lsh(index["near"], sketch))
-        found.update(_query_lsh(index["wide"], sketch))
+    row = index["position"].get(version_id)
+    if row is not None:
+        ids: list[str] = index["ids"]
+        signatures: np.ndarray = index["signatures"]
+        _query, rows, agree = shared_value_counts(signatures[row : row + 1], index["values"])
+        near = rows[agree / settings.MINHASH_NUM_PERM >= settings.NEAR_COPY_MIN_JACCARD]
+        found.update(ids[int(other)] for other in near)
+        found.update(ids[other] for other in band_mates(row, index["bands"]))
     records: dict[str, dict[str, object]] = index["records"]
     rows = [
-        _scored_candidate(version_id, other_id, sketches, index["sizes"], records[other_id])
+        _scored_candidate(version_id, other_id, index, records[other_id])
         for other_id in found
         if other_id in records
     ]
@@ -1779,7 +1951,7 @@ def _search_index(
     signatures: np.ndarray,
     sizes: np.ndarray,
 ) -> dict[str, object]:
-    """Build the blob map, sketches and two LSH indexes used for every lineage."""
+    """Build the blob map, value index and band index used for every lineage."""
     table = _version_table(versions, lineages)
     records = {
         str(row["version_id"]): row for row in table.to_dict(orient="records")
@@ -1793,18 +1965,21 @@ def _search_index(
         for row in records.values()
         if int(row["version_seq"]) == 1
     }
-    sketches = _sketches(ids, signatures)
-    size_of = {str(key): int(sizes[index]) for index, key in enumerate(ids)}
+    names = [str(key) for key in ids]
+    if len(set(names)) != len(names):
+        raise ValueError("registry signatures repeat a version id")
+    matrix = _signature_matrix(signatures)
+    size_of = {name: int(sizes[index]) for index, name in enumerate(names)}
     return {
         "records": records,
         "first": first,
-        "sketches": sketches,
+        "ids": names,
+        "position": {name: index for index, name in enumerate(names)},
+        "signatures": matrix,
         "sizes": size_of,
         "blobs": _blob_groups(records),
-        "near": build_registry_lsh(ids, signatures, settings.NEAR_COPY_MIN_JACCARD),
-        "wide": build_registry_lsh(
-            ids, signatures, settings.REHOST_CONTAINMENT_LSH_THRESHOLD
-        ),
+        "values": build_value_index(matrix),
+        "bands": build_band_index(matrix, settings.REHOST_CONTAINMENT_LSH_THRESHOLD),
     }
 
 
@@ -2187,6 +2362,9 @@ _COPY_COLUMNS = (
 )
 # Line-diff texts fetched together. The artifact scan itself is one query.
 LINE_CHECK_BATCH_ROWS = 2_000
+# Dataset texts looked up together in the value index. A text that copies a
+# popular skill shares values with every version of it, so a block stays small.
+INDEX_QUERY_ROWS = 1_000
 
 # Query Q5.4, see QUERIES.md
 # English texts that appear outside a registry repo, joined to a version blob.
@@ -2698,7 +2876,7 @@ def _bundle_index(registry_sigs: dict) -> dict[str, object]:
 
     ``meta`` columns are ``version_id``, ``lineage_id``, ``version_seq``,
     ``release_date`` and ``is_hub``. A signature with no version row is left
-    out of the containment matrix. Near hits on that id are skipped.
+    out of the value index, so it is never a near or contained source.
     """
     cached = registry_sigs.get("index")
     if isinstance(cached, dict):
@@ -2732,21 +2910,13 @@ def _bundle_index(registry_sigs: dict) -> dict[str, object]:
         )
         keep.append(position)
     if keep:
-        kept_matrix = np.ascontiguousarray(matrix[np.asarray(keep, dtype=int)])
+        kept_matrix = matrix[np.asarray(keep, dtype=int)]
     else:
         kept_matrix = np.zeros((0, settings.MINHASH_NUM_PERM), dtype=np.uint64)
-    sketches = registry_sigs.get("sketches")
-    if not isinstance(sketches, dict):
-        sketches = {
-            record["version_id"]: minhash_from_array(matrix[keep[index]])
-            for index, record in enumerate(records)
-        }
     packed = {
-        "by_id": {str(record["version_id"]): record for record in records},
         "records": records,
-        "matrix": kept_matrix,
+        "values": build_value_index(kept_matrix),
         "sizes": np.asarray([int(record["size"]) for record in records], dtype=np.float64),
-        "sketches": sketches,
     }
     registry_sigs["index"] = packed
     return packed
@@ -2782,18 +2952,117 @@ def _best_scored(
     return best
 
 
-# Algorithm A25, see CODE_FLOW.md
-def find_near_links(dataset_sigs, registry_lsh, registry_sigs) -> pd.DataFrame:
+def _containment_array(
+    jaccard: np.ndarray, registry_sizes: np.ndarray, copy_size: int | np.ndarray
+) -> np.ndarray:
+    """Estimate containment of each registry text inside its copy.
+
+    Same formula as ``estimate_containment``: Jaccard times the sum of the
+    sizes, divided by ``(1 + Jaccard)`` times the registry size, clipped to
+    0..1. A Jaccard of 0 or an empty size is 0. ``copy_size`` is one size
+    for every row, or one size per row.
+
+    Example:
+    >>> _containment_array(np.array([0.5, 0.0]), np.array([4.0, 4.0]), 8).tolist()
+    [1.0, 0.0]
+    """
+    raw = np.zeros(jaccard.shape, dtype=np.float64)
+    copies = np.broadcast_to(np.asarray(copy_size, dtype=np.float64), jaccard.shape)
+    valid = (registry_sizes > 0) & (jaccard > 0) & (copies > 0)
+    if not bool(np.any(valid)):
+        return raw
+    jaccard_ok = jaccard[valid]
+    size_ok = registry_sizes[valid]
+    raw[valid] = jaccard_ok * (size_ok + copies[valid]) / ((1.0 + jaccard_ok) * size_ok)
+    np.clip(raw, 0.0, 1.0, out=raw)
+    return raw
+
+
+# Algorithm A25 and A26, see CODE_FLOW.md
+def _index_links(dataset_sigs, registry_sigs) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Best near source and best contained source of each text, from exact counts.
+
+    Texts are looked up ``INDEX_QUERY_ROWS`` at a time in the value index.
+    Every registry version that shares a MinHash value is scored; one that
+    shares none has Jaccard 0 and cannot be a source. A text can get both a
+    near and a contained row here; ``_search_signature_parts`` keeps near.
+
+    Inputs: ``(ids, signatures, sizes)`` and the registry dict.
+    Outputs: near rows and near-contained rows, in working-link columns.
+    """
+    ids, matrix, sizes = _unpack_dataset(dataset_sigs)
+    packed = _bundle_index(registry_sigs)
+    records: list[dict[str, object]] = packed["records"]
+    if not ids or not records:
+        return _empty_work_links(), _empty_work_links()
+    registry_sizes: np.ndarray = packed["sizes"]
+    near_rows: list[dict[str, object]] = []
+    contained_rows: list[dict[str, object]] = []
+    for start in range(0, len(ids), INDEX_QUERY_ROWS):
+        block_sizes = sizes[start : start + INDEX_QUERY_ROWS]
+        query, row, agree = shared_value_counts(
+            matrix[start : start + INDEX_QUERY_ROWS], packed["values"]
+        )
+        copy_sizes = block_sizes[query]
+        jaccard = agree / settings.MINHASH_NUM_PERM
+        containment = _containment_array(jaccard, registry_sizes[row], copy_sizes)
+        near = jaccard >= settings.NEAR_COPY_MIN_JACCARD
+        contained = ~near & (containment >= settings.NEAR_COPY_MIN_CONTAINMENT)
+        kept = np.flatnonzero((copy_sizes > 0) & (near | contained))
+        if not len(kept):
+            continue
+        groups = np.split(kept, np.flatnonzero(np.diff(query[kept])) + 1)
+        for group in groups:
+            position = int(query[group[0]])
+            file_sha = ids[start + position]
+            copy_size = int(block_sizes[position])
+            near_options = [
+                (
+                    records[int(row[pair])],
+                    float(jaccard[pair]),
+                    estimate_containment(
+                        float(jaccard[pair]), int(records[int(row[pair])]["size"]), copy_size
+                    ),
+                )
+                for pair in group
+                if near[pair]
+            ]
+            chosen = _best_scored(near_options, 1)
+            if chosen is not None:
+                near_rows.append(_work_row(file_sha, chosen, "near"))
+            contained_options = [
+                (records[int(row[pair])], float(jaccard[pair]), float(containment[pair]))
+                for pair in group
+                if contained[pair]
+            ]
+            chosen = _best_scored(_drop_weak_options(contained_options), 2)
+            if chosen is not None:
+                contained_rows.append(_work_row(file_sha, chosen, "near_contained"))
+    return _work_links(near_rows), _work_links(contained_rows)
+
+
+def _drop_weak_options(
+    options: list[tuple[dict[str, object], float, float]],
+) -> list[tuple[dict[str, object], float, float]]:
+    """Leave out sources that agree on a few values when a strong source is eligible.
+
+    A small registry text inside a large copy can reach containment 1.0 from
+    one shared MinHash value. It would then tie with the real source and
+    could win on the older date. See ``_without_weak_sources``.
+    """
+    keep = _without_weak_sources([jaccard for _record, jaccard, _containment in options])
+    return [option for option, kept in zip(options, keep, strict=True) if kept]
+
+
+def find_near_links(dataset_sigs, registry_sigs) -> pd.DataFrame:
     """Link texts whose estimated Jaccard with a registry version is at least 0.80.
 
     ``dataset_sigs`` is ``(ids, signatures, sizes)`` from ``load_signatures``.
-    ``registry_lsh`` is a MinHashLSH built at ``NEAR_COPY_MIN_JACCARD``. Each
-    hit is scored with ``estimate_jaccard``. Hits under 0.80 are dropped, so
-    an LSH false positive does not become a link. The best remaining hit wins.
-    Ties: a non-hub, then the oldest ``release_date``.
-
     ``registry_sigs`` is a dict with ``ids``, ``signatures``, ``sizes`` and
-    ``meta`` (version id, lineage, sequence, release date, is_hub).
+    ``meta`` (version id, lineage, sequence, release date, is_hub). Every
+    version that agrees on at least 80% of the MinHash values is a source;
+    no LSH band has to match. The highest Jaccard wins. Ties: a non-hub,
+    then the oldest ``release_date``.
 
     Example:
     >>> from skill_genealogy.text_helpers import make_minhash, minhash_to_array
@@ -2807,99 +3076,29 @@ def find_near_links(dataset_sigs, registry_lsh, registry_sigs) -> pd.DataFrame:
     ...     "ids": ["A#1"], "signatures": np.vstack([values]),
     ...     "sizes": np.array([2]), "meta": meta,
     ... }
-    >>> index = build_registry_lsh(["A#1"], np.vstack([values]), 0.8)
-    >>> found = find_near_links(dataset, index, bundle)
+    >>> found = find_near_links(dataset, bundle)
     >>> (found.loc[0, "lineage_id"], found.loc[0, "link"])
     ('A', 'near')
     """
-    ids, matrix, sizes = _unpack_dataset(dataset_sigs)
-    if not ids:
-        return _empty_work_links()
-    packed = _bundle_index(registry_sigs)
-    by_id: dict[str, dict[str, object]] = packed["by_id"]
-    sketches: dict[str, MinHash] = packed["sketches"]
-    rows: list[dict[str, object]] = []
-    for position, file_sha in enumerate(ids):
-        copy_size = int(sizes[position])
-        if copy_size <= 0:
-            continue
-        sketch = minhash_from_array(matrix[position])
-        options: list[tuple[dict[str, object], float, float]] = []
-        for hit in _query_lsh(registry_lsh, sketch):
-            record = by_id.get(hit)
-            other = sketches.get(hit)
-            if record is None or other is None:
-                continue
-            jaccard = estimate_jaccard(sketch, other)
-            if jaccard < settings.NEAR_COPY_MIN_JACCARD:
-                continue
-            containment = estimate_containment(jaccard, int(record["size"]), copy_size)
-            options.append((record, jaccard, containment))
-        chosen = _best_scored(options, 1)
-        if chosen is not None:
-            rows.append(_work_row(file_sha, chosen, "near"))
-    return _work_links(rows)
+    return _index_links(dataset_sigs, registry_sigs)[0]
 
 
-def _containment_array(
-    jaccard: np.ndarray, registry_sizes: np.ndarray, copy_size: int
-) -> np.ndarray:
-    """Estimate containment of each registry text inside one copy.
-
-    Same formula as ``estimate_containment``: Jaccard times the sum of the
-    sizes, divided by ``(1 + Jaccard)`` times the registry size, clipped to
-    0..1. A Jaccard of 0 or an empty size is 0.
-
-    Example:
-    >>> _containment_array(np.array([0.5, 0.0]), np.array([4.0, 4.0]), 8).tolist()
-    [1.0, 0.0]
-    """
-    raw = np.zeros(jaccard.shape, dtype=np.float64)
-    if copy_size <= 0:
-        return raw
-    valid = (registry_sizes > 0) & (jaccard > 0)
-    if not bool(np.any(valid)):
-        return raw
-    jaccard_ok = jaccard[valid]
-    size_ok = registry_sizes[valid]
-    raw[valid] = jaccard_ok * (size_ok + copy_size) / ((1.0 + jaccard_ok) * size_ok)
-    np.clip(raw, 0.0, 1.0, out=raw)
-    return raw
-
-
-def _contained_options(
-    jaccard: np.ndarray,
-    containment: np.ndarray,
-    records: list[dict[str, object]],
-) -> list[tuple[dict[str, object], float, float]]:
-    """Registry rows with Jaccard under 0.80 and containment at least 0.80."""
-    mask = (jaccard < settings.NEAR_COPY_MIN_JACCARD) & (
-        containment >= settings.NEAR_COPY_MIN_CONTAINMENT
-    )
-    options: list[tuple[dict[str, object], float, float]] = []
-    for index in np.flatnonzero(mask):
-        position = int(index)
-        options.append(
-            (records[position], float(jaccard[position]), float(containment[position]))
-        )
-    return options
-
-
-# Algorithm A26, see CODE_FLOW.md
 def find_contained_links(dataset_sigs, registry_sigs) -> pd.DataFrame:
     """Link a text that kept a registry version and added its own lines.
 
     Containment is the share of the registry shingles found in the copy,
     estimated from Jaccard and the two shingle counts. A row is kept when
     that share is at least ``NEAR_COPY_MIN_CONTAINMENT`` and Jaccard is
-    below ``NEAR_COPY_MIN_JACCARD``. The best containment wins. Ties: a
-    non-hub, then the oldest release date.
+    below ``NEAR_COPY_MIN_JACCARD``. A source that agrees on a few values is
+    left out when a strong source is also eligible. The best containment
+    wins. Ties: a non-hub, then the oldest release date.
 
-    Every indexed registry version is scored. A 0.5 LSH misses the 40-line
-    registry text with 60 added lines (Jaccard about 0.37, containment about
-    0.95). LSH Ensemble missed that pair as well, so it is not used.
+    Every version that shares a MinHash value with the text is scored, the
+    same rows a scan of every version would score. A 0.5 LSH misses the
+    40-line registry text with 60 added lines (Jaccard about 0.37,
+    containment about 0.95). LSH Ensemble missed that pair as well.
 
-    Inputs: the same tuple and dict as ``find_near_links``, without an LSH.
+    Inputs: the same tuple and dict as ``find_near_links``.
     Outputs: working link rows with ``link`` ``near_contained``.
 
     Example:
@@ -2919,26 +3118,7 @@ def find_contained_links(dataset_sigs, registry_sigs) -> pd.DataFrame:
     >>> (found.loc[0, "link"], round(float(found.loc[0, "containment"]), 4))
     ('near_contained', 0.8333)
     """
-    ids, matrix, sizes = _unpack_dataset(dataset_sigs)
-    packed = _bundle_index(registry_sigs)
-    records: list[dict[str, object]] = packed["records"]
-    registry: np.ndarray = packed["matrix"]
-    if not ids or not records:
-        return _empty_work_links()
-    registry_sizes: np.ndarray = packed["sizes"]
-    rows: list[dict[str, object]] = []
-    for position, file_sha in enumerate(ids):
-        copy_size = int(sizes[position])
-        if copy_size <= 0:
-            continue
-        agree = np.count_nonzero(registry == matrix[position], axis=1)
-        jaccard = agree / settings.MINHASH_NUM_PERM
-        containment = _containment_array(jaccard, registry_sizes, copy_size)
-        chosen = _best_scored(_contained_options(jaccard, containment, records), 2)
-        if chosen is not None:
-            rows.append(_work_row(file_sha, chosen, "near_contained"))
-    return _work_links(rows)
-
+    return _index_links(dataset_sigs, registry_sigs)[1]
 
 # Algorithm A27, see CODE_FLOW.md
 def find_cluster_links(con: duckdb.DuckDBPyConnection, linked: pd.DataFrame) -> pd.DataFrame:
@@ -3092,26 +3272,17 @@ def _registry_meta(dev: bool) -> pd.DataFrame:
 
 
 def _load_copy_bundle(dev: bool) -> dict:
-    """Load registry signatures, version rows, and the 0.80 LSH."""
+    """Load registry signatures and version rows, and build the value index."""
     ids, signatures, sizes = load_signatures(_registry_path(dev))
     meta = _registry_meta(dev)
     known = set(meta["version_id"].astype(str))
     missing = sum(1 for key in ids if str(key) not in known)
     if missing:
         print(f"warning: {missing} registry signatures have no version row", flush=True)
-    near_lsh = build_registry_lsh(ids, signatures, settings.NEAR_COPY_MIN_JACCARD)
-    print(
-        f"registry index: {len(ids)} versions, "
-        f"near LSH at {settings.NEAR_COPY_MIN_JACCARD}",
-        flush=True,
-    )
-    return {
-        "ids": ids,
-        "signatures": signatures,
-        "sizes": sizes,
-        "meta": meta,
-        "near_lsh": near_lsh,
-    }
+    bundle = {"ids": ids, "signatures": signatures, "sizes": sizes, "meta": meta}
+    indexed = len(_bundle_index(bundle)["records"])
+    print(f"registry index: {indexed} versions, value index", flush=True)
+    return bundle
 
 
 def _part_dataset(
@@ -3142,11 +3313,11 @@ def _search_signature_parts(
         ids, matrix, sizes = load_signatures(path)
         positions = [index for index, sha in enumerate(ids) if sha not in linked]
         dataset = _part_dataset(ids, matrix, sizes, positions)
-        near = find_near_links(dataset, bundle["near_lsh"], bundle)
+        near, contained = _index_links(dataset, bundle)
         near_shas = set(near["file_sha"].astype(str)) if len(near) else set()
-        rest = [index for index, sha in enumerate(dataset[0]) if sha not in near_shas]
-        rest_dataset = _part_dataset(dataset[0], dataset[1], dataset[2], rest)
-        contained = find_contained_links(rest_dataset, bundle)
+        if len(contained):
+            contained = contained.loc[~contained["file_sha"].isin(near_shas)]
+            contained = contained.reset_index(drop=True)
         linked.update(near_shas)
         if len(contained):
             linked.update(contained["file_sha"].astype(str))
@@ -3247,8 +3418,25 @@ def _check_links(
     if others.empty:
         return exact_checked
     print(f"line check: {len(others)} fuzzy links", flush=True)
-    checked = _verify_from_artifacts(con, others, _version_texts(dev, others))
-    return pd.concat([exact_checked, checked], ignore_index=True)
+    batches = _links_by_version_batch(others, settings.LINEAGE_TEXT_BATCH)
+    parts = [exact_checked]
+    for number, batch in enumerate(batches, start=1):
+        print(f"line check batch {number}/{len(batches)}: {len(batch)} links", flush=True)
+        parts.append(_verify_from_artifacts(con, batch, _version_texts(dev, batch)))
+    return pd.concat(parts, ignore_index=True)
+
+
+def _links_by_version_batch(links: pd.DataFrame, limit: int) -> list[pd.DataFrame]:
+    """Split links so each part names about ``limit`` registry versions.
+
+    The line check holds the registry texts of one part at a time. Links of
+    one version stay in one part. Parts follow the sorted version ids.
+    """
+    keys = links["lineage_id"].astype(str) + "#" + links["version_seq"].astype(int).astype(str)
+    versions = sorted(set(keys))
+    part_of = {key: index // max(limit, 1) for index, key in enumerate(versions)}
+    numbers = keys.map(part_of)
+    return [part.reset_index(drop=True) for _, part in links.groupby(numbers, sort=True)]
 
 
 def _split_checked(checked: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
