@@ -35,6 +35,7 @@ from skill_genealogy.file_helpers import read_parquet, write_parquet
 from skill_genealogy.settings import (
     BLOB_FETCH_BATCH,
     DOWNLOAD_TIMEOUT_SECONDS,
+    GIT6_BATCH_FOLDERS,
     MANY_PATHS_LIMIT,
     MAX_SCRIPT_BYTES,
     SCRIPT_EXTENSIONS,
@@ -754,7 +755,8 @@ def _accept_one_pass(
     grew = False
     kept = rows
     for candidate in pending:
-        leave = _leave_toward_accepted(candidate, follow_rows, accepted)
+        visible = {row["commit"] for row in kept}
+        leave = _leave_toward_accepted(candidate, follow_rows, accepted, visible)
         if leave is None:
             waiting.append(candidate)
             continue
@@ -836,10 +838,18 @@ def _candidate_fate(
 
 
 def _leave_toward_accepted(
-    candidate: str, follow_rows: list[dict], accepted: set[str]
+    candidate: str, follow_rows: list[dict], accepted: set[str], visible: set[str]
 ) -> str | None:
-    """Newest commit where the candidate's SKILL.md left toward ``accepted``."""
+    """Newest commit in ``visible`` where the candidate's SKILL.md left toward ``accepted``.
+
+    GIT4 (``--follow``) walks every branch, but GIT5 simplifies history: a
+    merged branch whose net change to the pathspecs is nothing is pruned.
+    A move made and undone on such a branch is in GIT4 but not in GIT5, and
+    the leave commit must be a GIT5 commit.
+    """
     for row in follow_rows:
+        if row["commit"] not in visible:
+            continue
         moved = _skill_left_candidate(row, candidate)
         moved = moved and _path_in_accepted(row["path"], accepted)
         deleted = _deleted_skill(row, candidate)
@@ -1389,18 +1399,56 @@ def _containing_folder(path: str, folders: list[str]) -> str | None:
 def _read_folder_log_many(
     clone_dir: Path, folders: list[str], timeout_seconds: int
 ) -> list[dict]:
-    """GIT6: one log, many folders, no ``--follow``."""
+    """GIT6: one log per batch of folders, no ``--follow``.
+
+    The pathspecs go on standard input (``--stdin``). Tens of thousands of
+    folders are more than the 1 MB argument limit of macOS. Git's pathspec
+    matching grows about quadratically with the folder count, so more than
+    ``GIT6_BATCH_FOLDERS`` folders are logged in batches. A folder and the
+    folders inside it share a batch, so each folder's rows come from one log
+    in git's newest-first order. A rename between folders in two batches is
+    a ``D`` in one log and an ``A`` in the other.
+    """
     cleaned = [_clean_folder(folder) for folder in folders]
-    if not cleaned:
-        return []
-    # Git command GIT6, see CODE_FLOW.md
-    text = run_git(
-        _log_args(follow=False, pathspecs=[_pathspec(folder) for folder in cleaned]),
-        clone_dir,
-        timeout_seconds,
-        allow_lazy=True,
-    )
-    return parse_raw_log(text)
+    rows: list[dict] = []
+    for batch in _folder_batches(cleaned, GIT6_BATCH_FOLDERS):
+        pathspecs = [_pathspec(folder) for folder in batch]
+        payload = "".join(f"{spec}\n" for spec in ["--", *pathspecs]).encode("utf-8")
+        # Git command GIT6, see CODE_FLOW.md
+        data = _run_git_bytes(
+            _log_args(follow=False, pathspecs=[], stdin=True),
+            clone_dir,
+            timeout_seconds,
+            payload=payload,
+            allow_lazy=True,
+        )
+        rows.extend(parse_raw_log(data.decode("utf-8", "replace")))
+    return rows
+
+
+def _folder_batches(folders: list[str], size: int) -> list[list[str]]:
+    """Sorted folders in batches of about ``size``. Nested folders stay with their parent.
+
+    A batch can be larger than ``size`` when one folder holds many others.
+    The repo root holds every folder, so it puts all of them in one batch.
+    """
+    if "." in folders:
+        return [_unique(folders)] if folders else []
+    batches: list[list[str]] = []
+    current: list[str] = []
+    top = ""
+    # Sorting on "folder/" keeps a folder's subtree together ("a-b" sorts before "a/").
+    for folder in sorted(set(folders), key=lambda name: name + "/"):
+        nested = bool(top) and folder.startswith(top + "/")
+        if not nested:
+            if len(current) >= size:
+                batches.append(current)
+                current = []
+            top = folder
+        current.append(folder)
+    if current:
+        batches.append(current)
+    return batches
 
 
 def _skill_files_in_folder(clone_dir: Path, folder: str, timeout_seconds: int) -> list[str]:
@@ -1725,11 +1773,16 @@ def _octal_end(raw: str, index: int) -> int:
     return end
 
 
-def _log_args(follow: bool, pathspecs: list[str]) -> list[str]:
-    """Build GIT4 (with ``--follow``) or GIT5/GIT6 (without it)."""
+def _log_args(follow: bool, pathspecs: list[str], stdin: bool = False) -> list[str]:
+    """Build GIT4 (with ``--follow``) or GIT5/GIT6 (without it).
+
+    ``stdin`` reads the pathspecs from standard input, after a ``--`` line.
+    """
     args = ["log"]
     if follow:
         args.append("--follow")
+    if stdin:
+        args.append("--stdin")
     args.extend(
         [
             "--raw",
@@ -1737,10 +1790,10 @@ def _log_args(follow: bool, pathspecs: list[str]) -> list[str]:
             "--find-renames",
             "--date=iso-strict",
             f"--format={_LOG_FORMAT}",
-            "--",
-            *pathspecs,
         ]
     )
+    if not stdin:
+        args.extend(["--", *pathspecs])
     return args
 
 

@@ -30,6 +30,8 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import skill_genealogy.settings as settings
 from skill_genealogy.assign_families import _assemble_copy_histories
@@ -77,12 +79,11 @@ from skill_genealogy.text_helpers import (
     remove_boilerplate_lines,
 )
 
-# A literal IN list is what DuckDB pushes into a parquet scan. A join would
-# read every skill text. 200 shas stay under the query-size limit.
-_TEXT_SHA_BATCH = 200
-# How many copy files are scored before their texts are dropped.
-# 400 keeps one batch of skill texts in memory. It is not a research cutoff.
-_VERSION_FILE_BATCH = 400
+# How many copy files are scored before their texts are dropped. Each batch
+# reads every text store once, so the full data needs few, large batches:
+# one pass over the artifact files takes about 8 seconds. 20,000 files keep
+# one batch of skill texts well under 1 GB. It is not a research cutoff.
+_VERSION_FILE_BATCH = 20_000
 _SCORE_NAMES = (
     "jaccard",
     "containment",
@@ -211,6 +212,26 @@ FOLDER_CHANGE_COLUMNS = [
     "risk_flags",
     "new_risk_flags",
 ]
+# The stored types of copy_folder_changes.parquet. Batches are written with
+# these types, so a column that is empty in one batch keeps its type.
+FOLDER_CHANGE_SCHEMA = pa.schema(
+    [
+        ("repo", pa.large_string()),
+        ("path", pa.large_string()),
+        ("version_seq", pa.int64()),
+        ("target", pa.large_string()),
+        ("file_path", pa.large_string()),
+        ("old_file_path", pa.large_string()),
+        ("result", pa.large_string()),
+        ("old_sha", pa.large_string()),
+        ("new_sha", pa.large_string()),
+        ("mode_changed", pa.bool_()),
+        ("category", pa.large_string()),
+        ("size_change", pa.int64()),
+        ("risk_flags", pa.list_(pa.string())),
+        ("new_risk_flags", pa.list_(pa.string())),
+    ]
+)
 FOLDER_SUMMARY_COLUMNS = [
     "repo",
     "path",
@@ -408,6 +429,52 @@ FROM read_parquet({versions}) AS versions
 JOIN read_parquet({copies}) AS copies
   ON versions.repo = copies.repo
  AND versions.path = copies.path
+"""
+
+# Query Q9.13, see QUERIES.md
+# Registry package files of the lineages in one batch, in file order. The
+# file is sorted by lineage, so the scan skips the other row groups.
+BATCH_MANIFESTS_SQL = """
+SELECT * EXCLUDE (file_row_number)
+FROM read_parquet({path}, file_row_number = true)
+WHERE lineage_id IN (SELECT lineage_id FROM batch_lineages)
+ORDER BY file_row_number
+"""
+
+# Query Q9.14, see QUERIES.md
+# Every batch part of copy_folder_changes.parquet, in the stored order.
+FOLDER_MERGE_SQL = """
+SELECT * EXCLUDE (row_order)
+FROM read_parquet({parts})
+ORDER BY
+    repo NULLS LAST,
+    path NULLS LAST,
+    version_seq NULLS LAST,
+    target NULLS LAST,
+    file_path NULLS LAST,
+    row_order
+"""
+
+# Query Q9.15, see QUERIES.md
+# The saved file is printed from three small reads, not loaded whole.
+SAVED_ORIGIN_ROWS_SQL = """
+SELECT rows.*
+FROM read_parquet({path}) AS rows
+JOIN latest_versions USING (repo, path, version_seq)
+WHERE rows.target = 'origin'
+"""
+SAVED_HEAD_ROWS_SQL = """
+SELECT *
+FROM read_parquet({path}, file_row_number = true)
+WHERE file_row_number < 2
+ORDER BY file_row_number
+"""
+SAVED_RISKY_ROWS_SQL = """
+SELECT *
+FROM read_parquet({path}, file_row_number = true)
+WHERE len(new_risk_flags) > 0
+ORDER BY file_row_number
+LIMIT 20
 """
 
 
@@ -651,10 +718,12 @@ def list_copy_versions(copy_files, histories, dataset_texts) -> pd.DataFrame:
 # Algorithm A40, see CODE_FLOW.md
 def pick_comparison_targets(
     copy_version: dict,
-    lineage_versions: pd.DataFrame,
+    lineage_versions: pd.DataFrame | dict,
     origin_seq: int,
 ) -> dict:
     """Pick previous, origin, at-date and newest version numbers.
+
+    ``lineage_versions`` is the version table, or ``target_index`` of it.
 
     Previous is this copy's own earlier version. Version 1 has none.
     Origin is ``origin_seq``, the same for every version of this copy.
@@ -692,14 +761,50 @@ def pick_comparison_targets(
     """
     sequence = _as_int(copy_version.get("version_seq")) or 0
     previous = sequence - 1 if sequence > 1 else None
-    frame = _lineage_rows(copy_version, lineage_versions)
+    if isinstance(lineage_versions, dict):
+        lineage = copy_version.get("lineage_id")
+        key = None if _is_missing(lineage) or str(lineage) == "" else str(lineage)
+        newest, releases = lineage_versions.get(key, (None, []))
+    else:
+        frame = _lineage_rows(copy_version, lineage_versions)
+        newest, releases = _newest_seq(frame), _release_pairs(frame)
     origin = _as_int(origin_seq)
     return {
         "prev_seq": previous,
         "origin_seq": origin,
-        "at_date_seq": _at_date_seq(frame, copy_version.get("commit_date")),
-        "newest_seq": _newest_seq(frame),
+        "at_date_seq": _at_date_from_pairs(releases, copy_version.get("commit_date")),
+        "newest_seq": newest,
     }
+
+
+def target_index(
+    lineage_versions: pd.DataFrame,
+) -> dict[str | None, tuple[int | None, list[tuple[pd.Timestamp, int]]]]:
+    """Newest version and dated releases of every lineage, for the target picker.
+
+    ``pick_comparison_targets`` takes this in place of the version table.
+    It gives the same targets without scanning every lineage version for
+    each copy version. The key None holds the whole table, which is what a
+    copy with no lineage id is compared against.
+
+    Example:
+    >>> versions = pd.DataFrame([
+    ...     {"lineage_id": "reg::skill", "version_seq": 1, "release_date": "2026-01-10"},
+    ...     {"lineage_id": "reg::skill", "version_seq": 2, "release_date": "2026-03-01"},
+    ... ])
+    >>> c1 = {"version_seq": 1, "commit_date": "2026-02-01", "lineage_id": "reg::skill"}
+    >>> pick_comparison_targets(c1, target_index(versions), 1)
+    {'prev_seq': None, 'origin_seq': 1, 'at_date_seq': 1, 'newest_seq': 2}
+    """
+    frame = _as_frame(lineage_versions)
+    index: dict[str | None, tuple[int | None, list[tuple[pd.Timestamp, int]]]] = {
+        None: (_newest_seq(frame), _release_pairs(frame))
+    }
+    if frame.empty or "lineage_id" not in frame.columns:
+        return index
+    for lineage, rows in frame.groupby(frame["lineage_id"].astype(str), sort=False):
+        index[str(lineage)] = (_newest_seq(rows), _release_pairs(rows))
+    return index
 
 
 def score_pair(old_text: str, new_text: str) -> dict:
@@ -925,7 +1030,7 @@ def compare_copy_folders(
     copy_manifests: pd.DataFrame,
     package_versions: pd.DataFrame,
     registry_manifests: pd.DataFrame,
-    lineage_versions: pd.DataFrame,
+    lineage_versions: pd.DataFrame | dict,
     texts: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Diff each copy version's folder against the four targets.
@@ -967,7 +1072,7 @@ def compare_copy_folders(
     if version_frame.empty:
         return _empty_folder_changes()
     indexed = _index_copy_manifests(_as_frame(copy_manifests))
-    releases = _release_index(_as_frame(lineage_versions))
+    releases = _as_release_index(lineage_versions)
     packages = _as_package_index(package_versions)
     registry_files = _as_registry_index(registry_manifests)
     records: list[dict] = []
@@ -1140,22 +1245,18 @@ def _run_origin(dev: bool, force: bool) -> None:
         print("Step 2: copy histories", flush=True)
         histories = _read_histories(connection, copies, dev)
         print(f"history rows {len(histories)}", flush=True)
+        # Steps 3–5 run per batch of copy files, so only one batch of texts is held.
         # Step 3: Load origin texts and current texts (queries Q9.5–Q9.8).
-        print("Step 3: load texts", flush=True)
-        needed = _needed_shas(copies, versions, histories)
-        texts = _load_texts(connection, needed, dev)
-        print(f"texts loaded {len(texts)} of {len(needed)}", flush=True)
+        # Step 4: Compare each copy with its origin (algorithm A38).
+        # Step 5: Classify history edits (algorithm A39).
+        print("Steps 3-5: load texts, compare with origin, classify edits", flush=True)
+        changes, edits = _compare_origin_batches(
+            connection, copies, histories, versions, registry_changes, dev
+        )
     finally:
         connection.close()
         _remove_tree(temp_dir)
-    # Step 4: Compare each copy with its origin (algorithm A38).
-    print("Step 4: compare copies with origin", flush=True)
-    changes = compare_copy_with_origin(copies, histories, texts, versions, registry_changes)
-    print(f"copy changes {len(changes)}", flush=True)
-    # Step 5: Classify history edits (algorithm A39).
-    print("Step 5: classify history edits", flush=True)
-    edits = classify_history_edits(_attach_text(histories, texts), versions)
-    print(f"history edits {len(edits)}", flush=True)
+    print(f"copy changes {len(changes)} history edits {len(edits)}", flush=True)
     # Step 6: Build the change profile.
     print("Step 6: change profile", flush=True)
     profile = build_change_profile(registry_changes, edits, changes)
@@ -1163,6 +1264,65 @@ def _run_origin(dev: bool, force: bool) -> None:
     print("Step 7: save", flush=True)
     save_outputs(changes, edits, profile, dev)
     _print_run_summary(changes, edits, profile, time.perf_counter() - started)
+
+
+def _compare_origin_batches(
+    connection: duckdb.DuckDBPyConnection,
+    copies: pd.DataFrame,
+    histories: pd.DataFrame,
+    versions: pd.DataFrame,
+    registry_changes: pd.DataFrame,
+    dev: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Stage 9a steps 3–5 for batches of copy files.
+
+    Every comparison and every history edit belongs to one copy file, so
+    a batch gives the same rows as the whole table at once. The count of
+    pairs skipped for a missing text is summed over the batches.
+    """
+    change_parts: list[pd.DataFrame] = []
+    edit_parts: list[pd.DataFrame] = []
+    skipped = 0
+    loaded = 0
+    asked = 0
+    files = copies[["repo", "path"]].drop_duplicates()
+    for start in range(0, len(files), _VERSION_FILE_BATCH):
+        batch_files = files.iloc[start : start + _VERSION_FILE_BATCH]
+        batch = copies.merge(batch_files, on=["repo", "path"], how="inner")
+        batch_histories = (
+            histories.merge(batch_files, on=["repo", "path"], how="inner")
+            if not histories.empty
+            else histories
+        )
+        needed = _needed_shas(batch, versions, batch_histories)
+        texts = _load_texts(connection, needed, dev, quiet=True)
+        loaded += len(texts)
+        asked += len(needed)
+        change_parts.append(
+            compare_copy_with_origin(batch, batch_histories, texts, versions, registry_changes)
+        )
+        edits = classify_history_edits(_attach_text(batch_histories, texts), versions)
+        skipped += int(edits.attrs.get("skipped_missing_text", 0))
+        edit_parts.append(edits)
+        batch_no = start // _VERSION_FILE_BATCH + 1
+        print(f"batch {batch_no} files {len(batch_files)} texts {len(texts)}", flush=True)
+    print(f"texts loaded {loaded} of {asked}", flush=True)
+    changes = _concat_or_empty(change_parts, COPY_CHANGE_COLUMNS)
+    edits = _concat_or_empty(edit_parts, HISTORY_COLUMNS)
+    edits.attrs["skipped_missing_text"] = skipped
+    return changes, edits
+
+
+def _concat_or_empty(parts: list[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
+    """Rows of every part, or an empty frame with ``columns``.
+
+    The frame is built from the row dicts, as a single call would build it,
+    so a column that is empty in one batch does not change its type.
+    """
+    rows = [row for part in parts for row in part.to_dict("records")]
+    if not rows:
+        return _empty_frame(columns)
+    return pd.DataFrame(rows).reindex(columns=columns)
 
 
 def _run_versions(dev: bool, force: bool) -> None:
@@ -1204,7 +1364,6 @@ def _run_folders(dev: bool, force: bool) -> None:
         _check_folder_inputs(dev)
         versions = _read_folder_versions(connection, dev)
         packages = read_parquet(_folder_input_paths(dev)["package_versions"])
-        registry = read_parquet(_folder_input_paths(dev)["folder_manifests"])
         releases = read_parquet(_folder_input_paths(dev)["lineage_versions"])
         print(f"copy versions {len(versions)} package versions {len(packages)}", flush=True)
         # Step 2: Rebuild copy manifests (algorithm A42, queries Q9.10 and Q9.11).
@@ -1215,21 +1374,32 @@ def _run_folders(dev: bool, force: bool) -> None:
         manifests = assemble_copy_folder_manifests(versions, changes, siblings)
         print(f"manifest rows {len(manifests)}", flush=True)
         # Step 3: Compare each version with the four targets (A43, A15, A16).
+        # Registry manifests are read per batch (Q9.13). File rows go to part files.
         print("Step 3: compare folders", flush=True)
-        folder_rows, notes = _compare_folder_batches(
-            connection, versions, manifests, packages, registry, releases, dev
+        result = _compare_folder_batches(
+            connection, versions, manifests, packages, releases, dev, temp_dir / "parts"
         )
-        print(f"folder change rows {len(folder_rows)}", flush=True)
+        print(f"folder change rows {result['file_rows']}", flush=True)
+        # Step 4: Summarize counts, mentions and empty comparisons (A17).
+        print("Step 4: summarize folder changes", flush=True)
+        summary = _complete_folder_summary(
+            result["summary"], result["notes"], versions, packages, releases
+        )
+        # Step 5: Save and print counts and two sample records.
+        print("Step 5: save", flush=True)
+        _save_folder_outputs(result["parts"], summary, dev, connection)
     finally:
         connection.close()
         _remove_tree(temp_dir)
-    # Step 4: Summarize counts, mentions and empty comparisons (A17).
-    print("Step 4: summarize folder changes", flush=True)
-    summary = _complete_folder_summary(folder_rows, notes, versions, packages, releases)
-    # Step 5: Save and print counts and two sample records.
-    print("Step 5: save", flush=True)
-    _save_folder_outputs(folder_rows, summary, dev)
-    _print_folder_summary(folder_rows, summary, versions, time.perf_counter() - started)
+    _print_folder_summary(
+        result["origin_rows"],
+        summary,
+        versions,
+        time.perf_counter() - started,
+        file_rows=result["file_rows"],
+        head=result["head"],
+        risky=result["risky"],
+    )
 
 
 def _one_copy_row(
@@ -1541,14 +1711,24 @@ def _load_missing(
     shas: list[str],
     found: dict[str, str],
 ) -> None:
-    """Add texts for shas that are not already in ``found``."""
-    missing = [sha for sha in dict.fromkeys(shas) if sha and sha not in found]
-    for start in range(0, len(missing), _TEXT_SHA_BATCH):
-        sha_list = _sql_sha_list(missing[start : start + _TEXT_SHA_BATCH])
-        if not sha_list:
-            continue
-        query = sql.format(path=_quote_path(str(path)), sha_list=sha_list)
+    """Add texts for shas that are not already in ``found``.
+
+    The shas go in as one registered table, so each store is read once
+    per call, not once per 200 shas. Only lowercase hex shas are asked for.
+    """
+    missing = [
+        sha
+        for sha in dict.fromkeys(shas)
+        if sha and sha not in found and all(character in "0123456789abcdef" for character in sha)
+    ]
+    if not missing:
+        return
+    connection.register("wanted_shas", pd.DataFrame({"sha": missing}))
+    try:
+        query = sql.format(path=_quote_path(str(path)), sha_list="SELECT sha FROM wanted_shas")
         found.update(_texts_from_frame(_fetch(connection, query)))
+    finally:
+        connection.unregister("wanted_shas")
 
 
 def _needed_shas(
@@ -1865,15 +2045,6 @@ def _as_frame(value) -> pd.DataFrame:
 def _empty_frame(columns: list[str]) -> pd.DataFrame:
     """A frame with ``columns`` and no rows."""
     return pd.DataFrame(columns=columns)
-
-
-def _sql_sha_list(shas: list[str]) -> str:
-    """Comma-separated quoted hex shas. Anything else is left out of the SQL."""
-    quoted = []
-    for sha in shas:
-        if sha and all(character in "0123456789abcdef" for character in sha):
-            quoted.append("'" + sha + "'")
-    return ", ".join(quoted)
 
 
 def _quote_path(path: str) -> str:
@@ -2221,21 +2392,35 @@ def _newest_seq(frame: pd.DataFrame) -> int | None:
     return max(numbers)
 
 
-def _at_date_seq(frame: pd.DataFrame, commit_date: object) -> int | None:
+def _release_pairs(frame: pd.DataFrame) -> list[tuple[pd.Timestamp, int]]:
+    """``(release time, version_seq)`` for every version with both values."""
+    if frame.empty or "version_seq" not in frame.columns:
+        return []
+    pairs = []
+    for record in frame.to_dict("records"):
+        sequence = _as_int(record.get("version_seq"))
+        released = _parse_time(record.get("release_date"))
+        if sequence is not None and released is not None:
+            pairs.append((released, sequence))
+    return pairs
+
+
+def _at_date_from_pairs(
+    releases: list[tuple[pd.Timestamp, int]],
+    commit_date: object,
+) -> int | None:
     """Newest lineage version released on or before ``commit_date``.
 
     The same release date keeps the higher ``version_seq``. A missing copy
     date, or a date before every release, returns None.
     """
     stamp = _parse_time(commit_date)
-    if stamp is None or frame.empty or "version_seq" not in frame.columns:
+    if stamp is None:
         return None
     best_seq = None
     best_time = None
-    for record in frame.to_dict("records"):
-        sequence = _as_int(record.get("version_seq"))
-        released = _parse_time(record.get("release_date"))
-        if sequence is None or released is None or released > stamp:
+    for released, sequence in releases:
+        if released > stamp:
             continue
         later = best_time is None or released > best_time
         tied = released == best_time and sequence > best_seq
@@ -2429,49 +2614,47 @@ def _score_in_batches(
     versions: pd.DataFrame,
     dev: bool,
 ) -> pd.DataFrame:
-    """Score copy files in batches. Registry texts stay. Copy texts do not."""
+    """Score copy files in batches. Each batch loads its own texts and drops them.
+
+    The registry target texts are loaded per batch too, so the full data
+    never holds every lineage text at once. The score caches only save
+    work, so they are also dropped with the batch.
+    """
     if listed.empty:
         return _empty_similarity()
-    lineage_shas = list(dict.fromkeys(_version_blobs(versions).values()))
-    registry_texts = _load_texts(connection, lineage_shas, dev)
-    score_cache: dict[tuple[str, str], dict] = {}
-    note_cache: dict[tuple[str, str, str, str], str] = {}
+    lookups = _version_lookups(versions)
     files = listed[["repo", "path"]].drop_duplicates()
     pieces = []
     total = len(files)
     for start in range(0, total, _VERSION_FILE_BATCH):
         batch_files = files.iloc[start : start + _VERSION_FILE_BATCH]
         chunk = listed.merge(batch_files, on=["repo", "path"], how="inner")
-        texts = _text_map(registry_texts)
-        texts.update(_batch_copy_texts(connection, chunk, versions, texts, dev))
+        texts = _load_texts(connection, _chunk_shas(chunk, lookups), dev, quiet=True)
         batch_no = start // _VERSION_FILE_BATCH + 1
         print(
             f"batch {batch_no} files {len(batch_files)} versions {len(chunk)} texts {len(texts)}",
             flush=True,
         )
-        pieces.append(_score_version_table(chunk, versions, texts, score_cache, note_cache))
+        pieces.append(_score_version_table(chunk, versions, texts, {}, {}, lookups))
     return _cast_similarity(pd.concat(pieces, ignore_index=True))
 
 
-def _batch_copy_texts(
-    connection: duckdb.DuckDBPyConnection,
-    chunk: pd.DataFrame,
-    versions: pd.DataFrame,
-    already: dict[str, str],
-    dev: bool,
-) -> dict[str, str]:
-    """Texts for this batch that are not already loaded."""
-    missing = [sha for sha in _chunk_shas(chunk, versions) if sha not in already]
-    return _load_texts(connection, missing, dev, quiet=True)
+def _version_lookups(versions: pd.DataFrame) -> dict[str, dict]:
+    """Blob, lineage and target lookups, built once for every batch."""
+    return {
+        "blobs": _version_blobs(versions),
+        "by_blob": _lineages_by_blob(versions),
+        "targets": target_index(versions),
+    }
 
 
-def _chunk_shas(chunk: pd.DataFrame, versions: pd.DataFrame) -> list[str]:
+def _chunk_shas(chunk: pd.DataFrame, lookups: dict[str, dict]) -> list[str]:
     """Copy blobs and the lineage blobs the four targets point at."""
-    blobs = _version_blobs(versions)
+    blobs = lookups["blobs"]
     shas = [_sha_key(blob) for blob in chunk["blob"].tolist()]
     for record in chunk.to_dict("records"):
         origin = _as_int(record.get("origin_seq")) or 0
-        targets = pick_comparison_targets(record, versions, origin)
+        targets = pick_comparison_targets(record, lookups["targets"], origin)
         lineage = str(record.get("lineage_id") or "")
         for sequence in (targets["origin_seq"], targets["at_date_seq"], targets["newest_seq"]):
             if sequence is None:
@@ -2486,15 +2669,21 @@ def _score_version_table(
     texts: dict[str, str],
     score_cache: dict[tuple[str, str], dict] | None = None,
     note_cache: dict[tuple[str, str, str, str], str] | None = None,
+    lookups: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
-    """Similarity rows for ``listed``. Missing texts leave that target null."""
+    """Similarity rows for ``listed``. Missing texts leave that target null.
+
+    ``lookups`` is ``_version_lookups(lineage_versions)``. A caller that
+    scores many batches builds it once. Without it, it is built here.
+    """
     frame = _as_frame(listed)
     if frame.empty:
         return _empty_similarity()
     scores = {} if score_cache is None else score_cache
     notes = {} if note_cache is None else note_cache
-    blobs = _version_blobs(lineage_versions)
-    by_blob = _lineages_by_blob(lineage_versions)
+    found = _version_lookups(lineage_versions) if lookups is None else lookups
+    blobs = found["blobs"]
+    by_blob = found["by_blob"]
     text_map = _text_map(texts)
     previous = _rows_by_seq(frame)
     rows = []
@@ -2502,7 +2691,7 @@ def _score_version_table(
         rows.append(
             _one_similarity_row(
                 record,
-                lineage_versions,
+                found["targets"],
                 blobs,
                 by_blob,
                 text_map,
@@ -2528,7 +2717,7 @@ def _rows_by_seq(frame: pd.DataFrame) -> dict[tuple[str, str, int], dict]:
 
 def _one_similarity_row(
     record: dict,
-    lineage_versions: pd.DataFrame,
+    lineage_versions: pd.DataFrame | dict,
     blobs: dict[tuple[str, int], str],
     by_blob: dict[str, set[str]],
     texts: dict[str, str],
@@ -3459,6 +3648,13 @@ def _index_copy_manifests(manifests: pd.DataFrame) -> dict[tuple[str, str, int],
     return found
 
 
+def _as_release_index(versions) -> dict[tuple[str, int], object]:
+    """``(lineage_id, version_seq)`` to ``release_date``. A dict is already that index."""
+    if isinstance(versions, dict):
+        return versions
+    return _release_index(_as_frame(versions))
+
+
 def _release_index(versions: pd.DataFrame) -> dict[tuple[str, int], object]:
     """``(lineage_id, version_seq)`` to ``release_date``."""
     found: dict[tuple[str, int], object] = {}
@@ -3794,32 +3990,113 @@ def _compare_folder_batches(
     versions: pd.DataFrame,
     manifests: pd.DataFrame,
     packages: pd.DataFrame,
-    registry: pd.DataFrame,
     releases: pd.DataFrame,
     dev: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compare in file batches so script texts are not all loaded at once."""
+    parts_dir: Path,
+) -> dict[str, object]:
+    """Compare in file batches. Texts, registry files and file rows stay per batch.
+
+    Each batch reads the registry files of its own lineages (Q9.13) and
+    writes its file rows to ``parts_dir``. The summary is built per batch,
+    because every summary key belongs to one copy file. Kept in memory:
+    the summary, the notes, the origin rows of each copy's latest version
+    (for the printed shares), and the first rows and first risky rows (for
+    the printed samples).
+    """
     package_index = _package_index(packages)
-    registry_index = _registry_file_index(registry)
+    release_index = _release_index(releases)
     manifest_groups = _manifest_groups(manifests)
-    cache: dict[str, str] = {}
-    tried: set[str] = set()
-    frames: list[pd.DataFrame] = []
+    latest = _latest_keys(versions)
+    registry_path = _folder_input_paths(dev)["folder_manifests"]
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    summary_records: list[dict] = []
     note_rows: list[dict] = []
+    origin_frames: list[pd.DataFrame] = []
+    head_frames: list[pd.DataFrame] = []
+    risky_frames: list[pd.DataFrame] = []
+    file_rows = 0
     batches = _file_batches(versions, _VERSION_FILE_BATCH)
     for number, batch in enumerate(batches, start=1):
         batch_manifests = _manifests_for_batch(batch, manifest_groups)
-        rows = compare_copy_folders(
-            batch, batch_manifests, package_index, registry_index, releases, texts=None
+        registry_index = _registry_file_index(
+            _batch_registry_manifests(connection, batch, registry_path)
         )
-        _load_folder_texts(connection, _folder_text_shas(rows, batch), cache, tried, dev)
+        rows = compare_copy_folders(
+            batch, batch_manifests, package_index, registry_index, release_index, texts=None
+        )
+        cache: dict[str, str] = {}
+        _load_folder_texts(connection, _folder_text_shas(rows, batch), cache, set(), dev)
         rows = _fill_risk_flags(rows, cache)
         note_rows.extend(_note_rows(batch, _index_copy_manifests(batch_manifests), cache))
-        frames.append(rows)
-        print(f"folder batch {number} of {len(batches)}", flush=True)
-    folder_rows = pd.concat(frames, ignore_index=True) if frames else _empty_folder_changes()
-    notes = pd.DataFrame(note_rows)
-    return folder_rows, notes
+        summary_records.extend(summarize_folder_changes(rows).to_dict("records"))
+        if not rows.empty:
+            part_path = parts_dir / f"part_{number:05d}.parquet"
+            parts.append(_write_folder_part(rows, file_rows, part_path))
+            origin_frames.append(_latest_origin_rows(rows, latest))
+            if sum(len(frame) for frame in head_frames) < 2:
+                head_frames.append(rows.head(2))
+            if sum(len(frame) for frame in risky_frames) < 2:
+                risky_frames.append(_risky_rows(rows).head(2))
+        file_rows += len(rows)
+        print(f"folder batch {number} of {len(batches)} file rows {len(rows)}", flush=True)
+    return {
+        "parts": parts,
+        "summary": _folder_summary_frame(summary_records),
+        "notes": pd.DataFrame(note_rows),
+        "origin_rows": _frames_or_empty(origin_frames),
+        "head": _frames_or_empty(head_frames).head(2),
+        "risky": _frames_or_empty(risky_frames).head(2),
+        "file_rows": file_rows,
+    }
+
+
+def _frames_or_empty(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """The non-empty frames stacked, or an empty folder-change table."""
+    kept = [frame for frame in frames if not frame.empty]
+    return pd.concat(kept, ignore_index=True) if kept else _empty_folder_changes()
+
+
+def _batch_registry_manifests(
+    connection: duckdb.DuckDBPyConnection,
+    batch: pd.DataFrame,
+    path: Path | str,
+) -> pd.DataFrame:
+    """Registry package files of the lineages in ``batch``. Query Q9.13."""
+    lineages = pd.DataFrame(
+        {"lineage_id": sorted({str(item) for item in batch["lineage_id"].dropna()})}
+    )
+    connection.register("batch_lineages", lineages)
+    try:
+        return _fetch(connection, BATCH_MANIFESTS_SQL.format(path=_quote_path(str(path))))
+    finally:
+        connection.unregister("batch_lineages")
+
+
+def _write_folder_part(rows: pd.DataFrame, first_row: int, path: Path) -> Path:
+    """Write one batch of file rows with the stored types and a running row number.
+
+    ``row_order`` keeps the batch order, so the merged file breaks sort
+    ties the way one stable sort of every row would.
+    """
+    stored = rows.reindex(columns=FOLDER_CHANGE_COLUMNS)
+    table = pa.Table.from_pandas(stored, schema=FOLDER_CHANGE_SCHEMA, preserve_index=False)
+    order = pa.array(range(first_row, first_row + len(stored)), type=pa.int64())
+    pq.write_table(table.append_column("row_order", order), path, compression="zstd")
+    return path
+
+
+def _latest_origin_rows(rows: pd.DataFrame, latest: set[tuple[str, str, int]]) -> pd.DataFrame:
+    """File rows of the origin target, for the latest version of each copy."""
+    if rows.empty or "target" not in rows.columns:
+        return rows.iloc[0:0]
+    mask = [
+        target == "origin" and (str(repo), str(path), int(seq or 0)) in latest
+        for repo, path, seq, target in zip(
+            rows["repo"], rows["path"], rows["version_seq"], rows["target"], strict=True
+        )
+    ]
+    return rows.loc[mask]
 
 
 def _manifest_groups(manifests: pd.DataFrame) -> dict[tuple[str, str], pd.DataFrame]:
@@ -3939,14 +4216,17 @@ def _note_rows(
 
 
 def _complete_folder_summary(
-    folder_rows: pd.DataFrame,
+    summary: pd.DataFrame,
     notes: pd.DataFrame,
     versions: pd.DataFrame,
     packages: pd.DataFrame,
     releases: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Summary rows, with a zero row where the folders were compared and matched nothing."""
-    summary = summarize_folder_changes(folder_rows)
+    """Summary rows, with a zero row where the folders were compared and matched nothing.
+
+    ``summary`` is ``summarize_folder_changes`` of every file row. The
+    batches build it, because the file rows are not kept in memory.
+    """
     summary = _overlay_notes(summary, notes)
     package_index = _package_index(packages)
     release_index = _release_index(releases)
@@ -4083,15 +4363,19 @@ def _note_key(record: dict) -> tuple:
     )
 
 
-def _save_folder_outputs(rows: pd.DataFrame, summary: pd.DataFrame, dev: bool) -> None:
-    """Write the file diffs and the per-version summary."""
+def _save_folder_outputs(
+    parts: list[Path],
+    summary: pd.DataFrame,
+    dev: bool,
+    connection: duckdb.DuckDBPyConnection,
+) -> None:
+    """Write the file diffs from the batch parts, and the per-version summary."""
     folder = data_dir(dev)
-    stored = rows.reindex(columns=FOLDER_CHANGE_COLUMNS)
-    write_parquet(
-        stored,
-        folder / "copy_folder_changes.parquet",
-        ["repo", "path", "version_seq", "target", "file_path"],
-    )
+    target = folder / "copy_folder_changes.parquet"
+    if parts:
+        _merge_folder_parts(connection, parts, target)
+    else:
+        write_parquet(_empty_folder_changes().reindex(columns=FOLDER_CHANGE_COLUMNS), target)
     write_parquet(
         summary.reindex(columns=FOLDER_SUMMARY_COLUMNS),
         folder / "copy_version_folder_summary.parquet",
@@ -4100,12 +4384,55 @@ def _save_folder_outputs(rows: pd.DataFrame, summary: pd.DataFrame, dev: bool) -
 
 
 def _print_saved_folder_summary(dev: bool) -> None:
-    """Print counts from the two folder files already on disk."""
+    """Print counts from the two folder files already on disk.
+
+    Only the origin rows of each copy's latest version, the first rows and
+    the first risky rows are read. The full-data file is too large for memory.
+    """
     folder = data_dir(dev)
-    rows = read_parquet(folder / "copy_folder_changes.parquet")
+    path = _quote_path(str(folder / "copy_folder_changes.parquet"))
     summary = read_parquet(folder / "copy_version_folder_summary.parquet")
     versions = summary.loc[:, ["repo", "path", "version_seq"]].drop_duplicates()
-    _print_folder_summary(rows, summary, versions, 0.0)
+    latest = pd.DataFrame(sorted(_latest_keys(versions)), columns=["repo", "path", "version_seq"])
+    connection = connect_duckdb()
+    try:
+        connection.register("latest_versions", latest)
+        file_rows = connection.execute(f"SELECT count(*) FROM read_parquet({path})").fetchone()[0]
+        origin_rows = _fetch(connection, SAVED_ORIGIN_ROWS_SQL.format(path=path))
+        head = _fetch(connection, SAVED_HEAD_ROWS_SQL.format(path=path))
+        risky = _fetch(connection, SAVED_RISKY_ROWS_SQL.format(path=path))
+        head = head.drop(columns=["file_row_number"], errors="ignore")
+        risky = _risky_rows(risky.drop(columns=["file_row_number"], errors="ignore")).head(2)
+    finally:
+        connection.close()
+    _print_folder_summary(
+        origin_rows, summary, versions, 0.0, file_rows=int(file_rows), head=head, risky=risky
+    )
+
+
+def _merge_folder_parts(
+    connection: duckdb.DuckDBPyConnection,
+    parts: list[Path],
+    target: Path,
+) -> None:
+    """Sort every batch part into one file, streaming, with the part schema.
+
+    The order is repo, path, version_seq, target, file_path, then the batch
+    row order, with nulls last. That is the stable pandas sort the file
+    used before, so the rows come out in the same order. DuckDB spills the
+    sort to its temp folder, so the rows never sit in memory at once.
+    """
+    listed = "[" + ", ".join(_quote_path(str(path)) for path in parts) + "]"
+    query = FOLDER_MERGE_SQL.format(parts=listed)
+    schema = pq.read_schema(parts[0])
+    schema = schema.remove(schema.get_field_index("row_order"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # A relation keeps ORDER BY in the stream. execute() does not when
+    # preserve_insertion_order is off, and it copies every row first.
+    reader = connection.sql(query).to_arrow_reader(100_000)
+    with pq.ParquetWriter(target, schema, compression="zstd") as writer:
+        for batch in reader:
+            writer.write_table(pa.Table.from_batches([batch]).cast(schema))
 
 
 def _print_folder_summary(
@@ -4113,12 +4440,23 @@ def _print_folder_summary(
     summary: pd.DataFrame,
     versions: pd.DataFrame,
     elapsed: float,
+    file_rows: int | None = None,
+    head: pd.DataFrame | None = None,
+    risky: pd.DataFrame | None = None,
 ) -> None:
-    """Print folder shares, flag counts, and two sample rows of each table."""
-    print_summary("copy folders", _folder_numbers(rows, summary, versions, elapsed))
-    print_sample_records(rows, "folder changes sample")
+    """Print folder shares, flag counts, and two sample rows of each table.
+
+    ``rows`` needs only the origin rows of each copy's latest version.
+    ``file_rows``, ``head`` and ``risky`` replace the count and samples
+    taken from ``rows`` when the caller did not keep every file row.
+    """
+    numbers = _folder_numbers(rows, summary, versions, elapsed)
+    if file_rows is not None:
+        numbers["file_rows"] = file_rows
+    print_summary("copy folders", numbers)
+    print_sample_records(rows if head is None else head, "folder changes sample")
     print_sample_records(summary, "folder summary sample")
-    print_sample_records(_risky_rows(rows), "new risk sample")
+    print_sample_records(_risky_rows(rows) if risky is None else risky, "new risk sample")
 
 
 def _folder_numbers(

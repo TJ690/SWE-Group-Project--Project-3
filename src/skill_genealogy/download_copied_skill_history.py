@@ -33,6 +33,8 @@ from skill_genealogy.file_helpers import (
 from skill_genealogy.git_history import RepoResult, mine_one_repo
 from skill_genealogy.settings import (
     DOWNLOAD_TIMEOUT_SECONDS,
+    DUCKDB_MEMORY_LIMIT,
+    DUCKDB_TEMP_LIMIT,
     DOWNLOAD_WORKERS,
     TEXT_ROW_GROUP,
     data_dir,
@@ -359,6 +361,14 @@ def open_history_store(path: Path) -> duckdb.DuckDBPyConnection:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect(str(path))
+    # The texts export sorts every blob; without a limit it ran out of memory at 12.7 GiB.
+    temp_dir = path.parent / "duckdb_tmp"
+    temp_dir.mkdir(exist_ok=True)
+    connection.execute("SET preserve_insertion_order = false")
+    connection.execute("SET threads = 2")
+    connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+    connection.execute(f"SET max_temp_directory_size = '{DUCKDB_TEMP_LIMIT}'")
+    connection.execute(f"SET temp_directory = '{temp_dir}'")
     for statement in _CREATE_STORE_SQL:
         connection.execute(statement)
     return connection
@@ -496,13 +506,15 @@ def main() -> None:
     ``--limit N`` keeps the first N repo names. ``--include-wild`` also
     clones folders that already have wild history. ``--force`` exports
     again and does not re-clone a finished repo. ``--retry-failed``
-    re-clones ``timeout`` and ``error``. ``--merge-only`` only exports.
+    re-clones ``timeout`` and ``error``. ``--timeout`` sets the git limit
+    for this run. ``--merge-only`` only exports.
     A full run with more than 2,000 pending repos stops unless ``--yes``.
 
     Inputs: command-line flags and ``copy_candidates.parquet``.
     Outputs: the store and the parquet files. Nothing is returned.
     """
     args = _parser().parse_args()
+    timeout_seconds = _timeout_seconds(args.timeout)
     # Step 1: Pick download targets
     targets = pick_download_targets(args.dev, args.include_wild)
     grouped = group_targets_by_repo(targets)
@@ -534,7 +546,13 @@ def main() -> None:
                 f"Step 3: mine {len(pending)} repos with {DOWNLOAD_WORKERS} workers",
                 flush=True,
             )
-            mine_copied_skills(pending, connection, work_dir, DOWNLOAD_WORKERS)
+            mine_copied_skills(
+                pending,
+                connection,
+                work_dir,
+                DOWNLOAD_WORKERS,
+                timeout_seconds=timeout_seconds,
+            )
         # Step 4: Export the store
         print("Step 4: export the store", flush=True)
         export_history_store(connection, history)
@@ -546,7 +564,7 @@ def main() -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    """Parser for this stage: shared flags, plus limit, retry, merge and wild."""
+    """Parser for this stage: shared flags, plus limit, retry, merge, wild and timeout."""
     parser = build_arg_parser(
         "Download skill-folder history for dataset files that copied a registry."
     )
@@ -560,6 +578,16 @@ def _parser() -> argparse.ArgumentParser:
         "--retry-failed",
         action="store_true",
         help="mine repos whose status is timeout or error",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help=(
+            "seconds for each git command "
+            f"(default {DOWNLOAD_TIMEOUT_SECONDS}). "
+            "With --retry-failed, only timeout and error repos are mined again."
+        ),
     )
     parser.add_argument(
         "--merge-only",
@@ -580,6 +608,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _timeout_seconds(value: int | None) -> int:
+    """Use the flag when it is set, otherwise the settings default."""
+    if value is None:
+        return DOWNLOAD_TIMEOUT_SECONDS
+    if value <= 0:
+        raise SystemExit("--timeout must be a positive number of seconds")
+    return value
 
 
 def _history_dir(dev: bool) -> Path:

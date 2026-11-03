@@ -20,6 +20,7 @@ from skill_genealogy.git_history import (
     RepoResult,
     _changes_frame,
     _classify_folder_rows,
+    _split_rows_by_folder,
     clone_history_only,
     hash_author_email,
     head_commit,
@@ -30,6 +31,7 @@ from skill_genealogy.git_history import (
     parse_raw_log,
     read_blob_texts,
     read_folder_log,
+    read_folder_log_many,
     run_git,
     write_repo_shard,
 )
@@ -971,3 +973,76 @@ def test_run_git_raises_on_failure(tmp_path: Path) -> None:
     with pytest.raises(GitError):
         run_git(["rev-parse", "--verify", "HEAD"], tmp_path, 30)
     assert "git" in run_git(["--version"], None, 30).lower()
+
+
+def test_rename_undone_on_merged_branch_is_not_a_hop(tmp_path: Path) -> None:
+    """A rename and its undo on a merged branch do not break the miner.
+
+    GIT4 (``--follow``) sees both renames. GIT5 prunes the branch, because
+    its net change to the folder is nothing, so the leave commit is missing.
+    """
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    (origin / "a").mkdir()
+    (origin / "a" / "SKILL.md").write_text(_long_skill("same"))
+    _commit(origin, "add a", "2026-08-01T00:00:00+00:00")
+    _git(origin, ["checkout", "-b", "side"])
+    env = _git_env("2026-08-02T00:00:00+00:00")
+    _git(origin, ["mv", "a", "b"], env)
+    _git(origin, ["commit", "-m", "a to b"], env)
+    env = _git_env("2026-08-03T00:00:00+00:00")
+    _git(origin, ["mv", "b", "a"], env)
+    _git(origin, ["commit", "-m", "b to a"], env)
+    _git(origin, ["checkout", "main"])
+    (origin / "README.md").write_text("readme\n")
+    _commit(origin, "readme", "2026-08-04T00:00:00+00:00")
+    env = _git_env("2026-08-05T00:00:00+00:00")
+    _git(origin, ["merge", "--no-ff", "-m", "merge side", "side"], env)
+    result, changes, _texts = _mine(origin, tmp_path / "work", repo="acme/undo")
+    assert result.status == "ok", result.message
+    rows = changes[changes["skill_folder"] == "a"]
+    assert list(rows["subject"]) == ["add a"]
+    assert set(rows["history_role"]) == {"own"}
+
+
+def test_many_folder_log_is_not_limited_by_argument_size(tmp_path: Path) -> None:
+    """GIT6 reads its pathspecs from stdin, so 2 MB of folders still works."""
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    (origin / "skills" / "x").mkdir(parents=True)
+    (origin / "skills" / "x" / "SKILL.md").write_text("# x\n")
+    _commit(origin, "add x", "2026-09-01T00:00:00+00:00")
+    clone = tmp_path / "clone"
+    clone_history_only("acme/wide", clone, 60, url=origin.as_uri())
+    long_name = "/".join(["d" * 200] * 10)
+    folders = [f"{long_name}/{index}" for index in range(1000)] + ["skills/x"]
+    rows = read_folder_log_many(clone, folders)
+    assert [(row["status"], row["path"]) for row in rows] == [("A", "skills/x/SKILL.md")]
+
+
+def test_batched_folder_log_matches_one_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GIT6 in batches gives each folder the same rows as one log.
+
+    ``a`` and ``a/x`` share a batch although ``a-b`` sorts between them.
+    """
+    origin = tmp_path / "origin"
+    _init_repo(origin)
+    for index, name in enumerate(["a", "a-b", "a/x", "b", "c"]):
+        (origin / name).mkdir(parents=True, exist_ok=True)
+        (origin / name / "SKILL.md").write_text(f"# {name}\n")
+        _commit(origin, f"add {name}", f"2026-10-0{index + 1}T00:00:00+00:00")
+    (origin / "a" / "x" / "SKILL.md").write_text("# a/x\n\nedit\n")
+    (origin / "c" / "SKILL.md").write_text("# c\n\nedit\n")
+    _commit(origin, "edit a/x and c", "2026-10-09T00:00:00+00:00")
+    clone = tmp_path / "clone"
+    clone_history_only("acme/batch", clone, 60, url=origin.as_uri())
+    folders = ["a", "a-b", "a/x", "b", "c"]
+    one_rows = read_folder_log_many(clone, folders)
+    one = _changes_frame("acme/batch", _split_rows_by_folder(folders, one_rows))
+    monkeypatch.setattr("skill_genealogy.git_history.GIT6_BATCH_FOLDERS", 1)
+    batched_rows = read_folder_log_many(clone, folders)
+    batched = _changes_frame("acme/batch", _split_rows_by_folder(folders, batched_rows))
+    pd.testing.assert_frame_equal(one, batched)
+    assert len(batched_rows) == len(one_rows) == 7

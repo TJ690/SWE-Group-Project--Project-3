@@ -152,6 +152,8 @@ DOWNLOAD_WORKERS = 8
 DOWNLOAD_TIMEOUT_SECONDS = 600
 # Above this, one git log for all paths (no --follow).
 MANY_PATHS_LIMIT = 200
+# Folders per GIT6 log. Pathspec matching cost grows about quadratically.
+GIT6_BATCH_FOLDERS = 1000
 # Script files.
 SCRIPT_EXTENSIONS: tuple[str, ...] = (
     ".py",
