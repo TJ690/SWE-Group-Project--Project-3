@@ -519,6 +519,7 @@ def compare_copy_with_origin(
     texts: dict[str, str],
     registry_versions: pd.DataFrame,
     registry_changes: pd.DataFrame,
+    lookups: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
     """Compare each copy's current text with the origin version.
 
@@ -528,14 +529,17 @@ def compare_copy_with_origin(
     whose text was compared, or empty when that text was missing.
 
     Inputs: origin copies, history rows, sha-to-text, lineage versions and
-    lineage changes.
+    lineage changes. ``lookups`` (from ``_origin_lookups``) skips rebuilding
+    the version and heading indexes when the caller runs many batches.
     Outputs: one row per copy. Columns are ``COPY_CHANGE_COLUMNS``.
     """
     if copy_files.empty:
         return _empty_frame(COPY_CHANGE_COLUMNS)
     grouped = _rows_by_file(_as_frame(histories))
-    blobs = _version_blobs(registry_versions)
-    later = _later_heading_index(registry_changes)
+    if lookups is None:
+        lookups = _origin_lookups(registry_versions, registry_changes)
+    blobs = lookups["blobs"]
+    later = lookups["later"]
     text_map = _text_map(texts)
     body_cache: dict[tuple[str, str], dict] = {}
     name_cache: dict[tuple[str, str, str, str], dict] = {}
@@ -589,6 +593,7 @@ def heading_overlap_with_registry(
 def classify_history_edits(
     histories: pd.DataFrame,
     registry_versions: pd.DataFrame,
+    by_blob: dict[str, set[str]] | None = None,
 ) -> pd.DataFrame:
     """Label each non-inherited step sync, other_source or local.
 
@@ -599,6 +604,8 @@ def classify_history_edits(
     ``other_source`` when it is a version of a different lineage, and
     ``local`` otherwise. Each pair also stores a ``TextChange`` and
     ``permissions_changed`` from the two texts on the history rows.
+    ``by_blob`` (from ``_lineages_by_blob``) skips rebuilding that index
+    when the caller runs many batches.
 
     The G19 card called this A38. A38 is heading overlap.
 
@@ -617,7 +624,8 @@ def classify_history_edits(
     """
     if histories.empty:
         return _edits_frame([], 0)
-    by_blob = _lineages_by_blob(registry_versions)
+    if by_blob is None:
+        by_blob = _lineages_by_blob(registry_versions)
     body_cache: dict[tuple[str, str], dict] = {}
     name_cache: dict[tuple[str, str, str, str], dict] = {}
     front_cache: dict[tuple[str, str], dict] = {}
@@ -1279,7 +1287,9 @@ def _compare_origin_batches(
     Every comparison and every history edit belongs to one copy file, so
     a batch gives the same rows as the whole table at once. The count of
     pairs skipped for a missing text is summed over the batches.
+    The version and heading indexes are built once for every batch.
     """
+    lookups = _origin_lookups(versions, registry_changes)
     change_parts: list[pd.DataFrame] = []
     edit_parts: list[pd.DataFrame] = []
     skipped = 0
@@ -1294,14 +1304,18 @@ def _compare_origin_batches(
             if not histories.empty
             else histories
         )
-        needed = _needed_shas(batch, versions, batch_histories)
+        needed = _needed_shas(batch, versions, batch_histories, lookups["blobs"])
         texts = _load_texts(connection, needed, dev, quiet=True)
         loaded += len(texts)
         asked += len(needed)
         change_parts.append(
-            compare_copy_with_origin(batch, batch_histories, texts, versions, registry_changes)
+            compare_copy_with_origin(
+                batch, batch_histories, texts, versions, registry_changes, lookups
+            )
         )
-        edits = classify_history_edits(_attach_text(batch_histories, texts), versions)
+        edits = classify_history_edits(
+            _attach_text(batch_histories, texts), versions, lookups["by_blob"]
+        )
         skipped += int(edits.attrs.get("skipped_missing_text", 0))
         edit_parts.append(edits)
         batch_no = start // _VERSION_FILE_BATCH + 1
@@ -1311,6 +1325,15 @@ def _compare_origin_batches(
     edits = _concat_or_empty(edit_parts, HISTORY_COLUMNS)
     edits.attrs["skipped_missing_text"] = skipped
     return changes, edits
+
+
+def _origin_lookups(versions: pd.DataFrame, registry_changes: pd.DataFrame) -> dict[str, dict]:
+    """Blob, lineage and later-heading lookups, built once for every 9a batch."""
+    return {
+        "blobs": _version_blobs(versions),
+        "by_blob": _lineages_by_blob(versions),
+        "later": _later_heading_index(registry_changes),
+    }
 
 
 def _concat_or_empty(parts: list[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
@@ -1366,19 +1389,16 @@ def _run_folders(dev: bool, force: bool) -> None:
         packages = read_parquet(_folder_input_paths(dev)["package_versions"])
         releases = read_parquet(_folder_input_paths(dev)["lineage_versions"])
         print(f"copy versions {len(versions)} package versions {len(packages)}", flush=True)
+        # Steps 2-3 run per batch of copy files, so the 12M-row copied history
+        # and the manifests are never held whole.
         # Step 2: Rebuild copy manifests (algorithm A42, queries Q9.10 and Q9.11).
-        print("Step 2: copy folder manifests", flush=True)
-        changes = _read_folder_history(connection, versions, dev)
-        siblings = _read_sibling_files(connection, versions, changes, dev)
-        print(f"folder changes {len(changes)} sibling files {len(siblings)}", flush=True)
-        manifests = assemble_copy_folder_manifests(versions, changes, siblings)
-        print(f"manifest rows {len(manifests)}", flush=True)
         # Step 3: Compare each version with the four targets (A43, A15, A16).
         # Registry manifests are read per batch (Q9.13). File rows go to part files.
-        print("Step 3: compare folders", flush=True)
+        print("Steps 2-3: copy folder manifests and compare folders", flush=True)
         result = _compare_folder_batches(
-            connection, versions, manifests, packages, releases, dev, temp_dir / "parts"
+            connection, versions, packages, releases, dev, temp_dir / "parts"
         )
+        print(f"manifest rows {result['manifest_rows']}", flush=True)
         print(f"folder change rows {result['file_rows']}", flush=True)
         # Step 4: Summarize counts, mentions and empty comparisons (A17).
         print("Step 4: summarize folder changes", flush=True)
@@ -1735,9 +1755,11 @@ def _needed_shas(
     copies: pd.DataFrame,
     versions: pd.DataFrame,
     histories: pd.DataFrame,
+    blobs: dict[tuple[str, int], str] | None = None,
 ) -> list[str]:
     """Origin blobs, dataset file shas, and every history blob."""
-    blobs = _version_blobs(versions)
+    if blobs is None:
+        blobs = _version_blobs(versions)
     shas: list[str] = []
     for record in copies.to_dict("records"):
         origin_seq = _as_int(record.get("origin_seq")) or 0
@@ -3988,15 +4010,15 @@ def _empty_folder_summary() -> pd.DataFrame:
 def _compare_folder_batches(
     connection: duckdb.DuckDBPyConnection,
     versions: pd.DataFrame,
-    manifests: pd.DataFrame,
     packages: pd.DataFrame,
     releases: pd.DataFrame,
     dev: bool,
     parts_dir: Path,
 ) -> dict[str, object]:
-    """Compare in file batches. Texts, registry files and file rows stay per batch.
+    """Compare in file batches. Manifests, texts, registry files and file rows stay per batch.
 
-    Each batch reads the registry files of its own lineages (Q9.13) and
+    Each batch rebuilds the copy folder manifests of its own files (A42),
+    reads the registry files of its own lineages (Q9.13) and
     writes its file rows to ``parts_dir``. The summary is built per batch,
     because every summary key belongs to one copy file. Kept in memory:
     the summary, the notes, the origin rows of each copy's latest version
@@ -4005,8 +4027,8 @@ def _compare_folder_batches(
     """
     package_index = _package_index(packages)
     release_index = _release_index(releases)
-    manifest_groups = _manifest_groups(manifests)
     latest = _latest_keys(versions)
+    manifest_rows = 0
     registry_path = _folder_input_paths(dev)["folder_manifests"]
     parts_dir.mkdir(parents=True, exist_ok=True)
     parts: list[Path] = []
@@ -4018,7 +4040,8 @@ def _compare_folder_batches(
     file_rows = 0
     batches = _file_batches(versions, _VERSION_FILE_BATCH)
     for number, batch in enumerate(batches, start=1):
-        batch_manifests = _manifests_for_batch(batch, manifest_groups)
+        batch_manifests = _batch_copy_manifests(connection, batch, dev)
+        manifest_rows += len(batch_manifests)
         registry_index = _registry_file_index(
             _batch_registry_manifests(connection, batch, registry_path)
         )
@@ -4048,6 +4071,7 @@ def _compare_folder_batches(
         "head": _frames_or_empty(head_frames).head(2),
         "risky": _frames_or_empty(risky_frames).head(2),
         "file_rows": file_rows,
+        "manifest_rows": manifest_rows,
     }
 
 
@@ -4099,49 +4123,36 @@ def _latest_origin_rows(rows: pd.DataFrame, latest: set[tuple[str, str, int]]) -
     return rows.loc[mask]
 
 
-def _manifest_groups(manifests: pd.DataFrame) -> dict[tuple[str, str], pd.DataFrame]:
-    """``(repo, path)`` to that copy's manifest rows."""
-    if manifests.empty or "repo" not in manifests.columns:
-        return {}
-    grouped = manifests.groupby(["repo", "path"], sort=False)
-    return {key: group for key, group in grouped}
-
-
 def _file_batches(versions: pd.DataFrame, size: int) -> list[pd.DataFrame]:
-    """Slices of ``versions``, each covering at most ``size`` copy files."""
+    """Slices of ``versions``, each covering at most ``size`` copy files.
+
+    Each version row gets its file's batch number in one pass, so the cost
+    does not grow with the number of batches.
+    """
     if versions.empty:
         return []
-    keys = versions.loc[:, ["repo", "path"]].drop_duplicates().to_dict("records")
-    frames: list[pd.DataFrame] = []
-    for start in range(0, len(keys), size):
-        chunk = keys[start : start + size]
-        wanted = {(str(item["repo"]), str(item["path"])) for item in chunk}
-        mask = [
-            (str(repo), str(path)) in wanted
-            for repo, path in zip(versions["repo"], versions["path"], strict=True)
-        ]
-        frames.append(versions.loc[mask].copy())
-    return frames
+    keys = list(zip(versions["repo"].astype(str), versions["path"].astype(str), strict=True))
+    batch_of: dict[tuple[str, str], int] = {}
+    for key in keys:
+        if key not in batch_of:
+            batch_of[key] = len(batch_of) // size
+    numbers = pd.Series([batch_of[key] for key in keys], index=versions.index)
+    return [group.copy() for _, group in versions.groupby(numbers, sort=True)]
 
 
-def _manifests_for_batch(
+def _batch_copy_manifests(
+    connection: duckdb.DuckDBPyConnection,
     batch: pd.DataFrame,
-    groups: dict[tuple[str, str], pd.DataFrame],
+    dev: bool,
 ) -> pd.DataFrame:
-    """Manifest rows for the copies in this batch."""
-    frames = []
-    seen: set[tuple[str, str]] = set()
-    for repo, path in zip(batch["repo"], batch["path"], strict=True):
-        key = (str(repo), str(path))
-        if key in seen:
-            continue
-        seen.add(key)
-        group = groups.get(key)
-        if group is not None and not group.empty:
-            frames.append(group)
-    if not frames:
-        return _empty_copy_manifests()
-    return pd.concat(frames, ignore_index=True)
+    """Copy folder manifests for one batch of copy files (A42, Q9.10, Q9.11).
+
+    The history and sibling queries read only the folders of this batch.
+    A folder replays the same way in every batch it appears in.
+    """
+    changes = _read_folder_history(connection, batch, dev)
+    siblings = _read_sibling_files(connection, batch, changes, dev)
+    return assemble_copy_folder_manifests(batch, changes, siblings)
 
 
 def _folder_text_shas(rows: pd.DataFrame, versions: pd.DataFrame) -> list[str]:
