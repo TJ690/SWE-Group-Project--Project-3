@@ -35,7 +35,13 @@ from skill_genealogy.file_helpers import (
     read_parquet,
     write_parquet,
 )
-from skill_genealogy.find_copies import load_signatures, signature_for_text
+from skill_genealogy.find_copies import (
+    INDEX_QUERY_ROWS,
+    build_value_index,
+    load_signatures,
+    shared_value_counts,
+    signature_for_text,
+)
 from skill_genealogy.text_helpers import (
     estimate_containment,
     estimate_jaccard,
@@ -58,10 +64,10 @@ _STRONGER_THAN_HISTORY_NEAR = frozenset({"exact", "near", "near_contained"})
 _HISTORY_LINKS = frozenset({"history_exact", "history_near"})
 _ZERO_BLOB = "0" * 40
 _BOILERPLATE_CACHE: set[str] | None = None
-# A literal IN list is what DuckDB pushes into the parquet scan. A join
-# does not, and would read every skill text. 200 shas stay under the
-# query-size limit while still filtering the file.
-_TEXT_SHA_BATCH = 200
+# A literal IN list is what DuckDB pushes into the parquet scan. Each batch
+# reads the whole sha column once: on the full artifacts files 200 shas took
+# 7.4 seconds and 5,000 took 8.2, so a large batch means far fewer scans.
+_TEXT_SHA_BATCH = 5_000
 _TEXT_METHOD_FLAGS = (
     ("exact", "exact"),
     ("minhash_jaccard", "jaccard_found"),
@@ -1030,7 +1036,8 @@ def _jaccard_fast(
         return np.zeros(0, dtype=np.float64)
     if query_size <= 0:
         return np.zeros(matrix.shape[0], dtype=np.float64)
-    scores = np.asarray(matrix == np.asarray(query, dtype=np.uint64), dtype=np.float64).mean(axis=1)
+    agree = np.count_nonzero(matrix == np.asarray(query, dtype=np.uint64), axis=1)
+    scores = agree / matrix.shape[1]
     return np.where(np.asarray(sizes).reshape(-1) <= 0, 0.0, scores)
 
 
@@ -1220,29 +1227,39 @@ def _first_versions(histories: pd.DataFrame, unlinked_files: pd.DataFrame) -> pd
     return rows.drop_duplicates(["repo", "path"], keep="first")
 
 
-def _best_near_version(scores: np.ndarray, meta: pd.DataFrame) -> pd.Series | None:
-    """Return the best registry row at or above the near-copy Jaccard, or None."""
-    if meta.empty:
-        return None
-    scored = meta.copy()
-    scored["score"] = scores
-    scored = scored.loc[scored["score"] >= settings.NEAR_COPY_MIN_JACCARD]
-    if scored.empty:
-        return None
-    if "is_hub" not in scored.columns:
-        scored["is_hub"] = False
-    scored["is_hub"] = scored["is_hub"].map(_as_bool)
-    if "release_date" in scored.columns:
-        scored["release_ts"] = scored["release_date"].map(_parse_time)
-    else:
-        scored["release_ts"] = pd.NaT
+def _best_near_versions(
+    query: np.ndarray,
+    row: np.ndarray,
+    score: np.ndarray,
+    meta: pd.DataFrame,
+) -> pd.DataFrame:
+    """Return the best registry row per query at or above the near-copy Jaccard.
+
+    The best score wins, then a non-hub, then the oldest release, then the
+    lineage id, then the registry row order. ``meta`` already has ``is_hub``
+    as a bool and ``release_ts``.
+    """
+    kept = score >= settings.NEAR_COPY_MIN_JACCARD
+    if not kept.any():
+        return pd.DataFrame(columns=["query", "row", "score"])
+    rows = row[kept]
+    scored = pd.DataFrame(
+        {
+            "query": query[kept],
+            "row": rows,
+            "score": score[kept],
+            "is_hub": meta["is_hub"].to_numpy()[rows],
+            "release_ts": meta["release_ts"].to_numpy()[rows],
+            "lineage_id": meta["lineage_id"].to_numpy()[rows],
+        }
+    )
     scored = scored.sort_values(
-        ["score", "is_hub", "release_ts", "lineage_id"],
-        ascending=[False, True, True, True],
+        ["query", "score", "is_hub", "release_ts", "lineage_id", "row"],
+        ascending=[True, False, True, True, True, True],
         kind="mergesort",
         na_position="last",
     )
-    return scored.iloc[0]
+    return scored.drop_duplicates("query", keep="first")[["query", "row", "score"]]
 
 
 # Algorithm A31, see CODE_FLOW.md
@@ -1291,14 +1308,22 @@ def find_history_near_links(
     if meta.empty or matrix.shape[0] == 0:
         return _empty_links()
     meta = meta.drop_duplicates("version_id").set_index("version_id", drop=False)
-    ordered = [meta.loc[name] for name in ids if name in meta.index]
-    if len(ordered) != matrix.shape[0]:
-        keep = [index for index, name in enumerate(ids) if name in meta.index]
-        matrix = matrix[np.asarray(keep, dtype=np.int64)]
-        sizes = sizes[np.asarray(keep, dtype=np.int64)]
-    meta = pd.DataFrame(ordered).reset_index(drop=True)
+    present = pd.Index(ids).isin(meta.index)
+    if not present.all():
+        matrix = matrix[present]
+        sizes = sizes[present]
+    meta = meta.reindex([name for name, keep in zip(ids, present, strict=True) if keep])
+    meta = meta.reset_index(drop=True)
+    if "is_hub" not in meta.columns:
+        meta["is_hub"] = False
+    meta["is_hub"] = meta["is_hub"].map(_as_bool)
+    if "release_date" in meta.columns:
+        meta["release_ts"] = meta["release_date"].map(_parse_time)
+    else:
+        meta["release_ts"] = pd.NaT
     boilerplate = _boilerplate_lines()
-    rows: list[dict[str, object]] = []
+    records: list[pd.Series] = []
+    signatures: list[np.ndarray] = []
     text_column = first["text"] if "text" in first.columns else pd.Series("", index=first.index)
     for record, text in zip(first.itertuples(index=False), text_column.tolist(), strict=True):
         body = text if isinstance(text, str) else ""
@@ -1307,18 +1332,29 @@ def find_history_near_links(
         query, query_size = signature_for_text(body, boilerplate)
         if query_size <= 0:
             continue
-        scores = _jaccard_fast(query, query_size, matrix, sizes)
-        winner = _best_near_version(scores, meta)
-        if winner is None:
-            continue
-        rows.append(
-            _history_link_row(
-                pd.Series(record._asdict()),
-                winner,
-                "history_near",
-                float(winner["score"]),
+        records.append(pd.Series(record._asdict()))
+        signatures.append(np.asarray(query, dtype=np.uint64))
+    if not records or meta.empty:
+        return _empty_links()
+    # The value index gives the same agreement counts as comparing each query
+    # with the whole matrix, without scanning every registry row per query.
+    index = build_value_index(matrix)
+    queries = np.vstack(signatures)
+    rows: list[dict[str, object]] = []
+    for start in range(0, len(queries), INDEX_QUERY_ROWS):
+        query, row, agree = shared_value_counts(queries[start : start + INDEX_QUERY_ROWS], index)
+        score = agree / settings.MINHASH_NUM_PERM
+        score = np.where(sizes[row] <= 0, 0.0, score)
+        best = _best_near_versions(query, row, score, meta)
+        for item in best.itertuples(index=False):
+            rows.append(
+                _history_link_row(
+                    records[start + int(item.query)],
+                    meta.iloc[int(item.row)],
+                    "history_near",
+                    float(item.score),
+                )
             )
-        )
     if not rows:
         return _empty_links()
     return pd.DataFrame(rows, columns=_LINK_COLUMNS)
