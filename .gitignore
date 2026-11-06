@@ -17,6 +17,7 @@ results/export/*.parquet
 results/annotation/*/
 !results/annotation
 
+
 .cursor/
 # Python bytecode caches, rebuilt on every run.
 __pycache__/
@@ -25,3 +26,9 @@ __pycache__/
 # pipeline run logs
 logs/
 *SWE*
+docs/skill_genealogy/tasks/
+src/data/skill_genealogy/
+src/skillsig.egg-info/requires.txt
+src/skillsig.egg-info/SOURCES.txt
+src/skillsig.egg-info/PKG-INFO
+
