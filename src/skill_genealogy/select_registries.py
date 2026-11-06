@@ -17,6 +17,7 @@ Score a filled check sample with ``--score-language-check``.
 
 from __future__ import annotations
 
+import gc
 import multiprocessing
 import random
 import time
@@ -42,17 +43,21 @@ from skill_genealogy.file_helpers import (
 )
 from skill_genealogy.text_helpers import (
     build_language_detector,
-    detect_language,
+    classify_language_sample,
+    language_sample_and_size,
     normalize_text,
     split_front_matter,
 )
 
 # DuckDB hands rows to Python in vectors of this size. fetch_df_chunk counts vectors.
 DUCKDB_VECTOR_ROWS = 2048
-# Q2.1 reads this many hash slices. One slice holds about a quarter of the
-# distinct strings (about 1 GB) so a 16 GB machine is not asked to group every
-# text at once. hash(file_sha) % TEXT_READ_PARTS is 0 .. TEXT_READ_PARTS-1.
-TEXT_READ_PARTS = 4
+# Q2.1 reads this many hash slices. hash(file_sha) % TEXT_READ_PARTS is
+# 0 .. TEXT_READ_PARTS-1. Eight slices keep one group-by to about an eighth
+# of the distinct texts, under LANGUAGE_DUCKDB_MEMORY_LIMIT.
+TEXT_READ_PARTS = 8
+# Rows of full skill text held in this process at once. Workers receive the
+# short language sample, not these rows.
+LABEL_CHUNK_ROWS = 10_000
 # Revision 2: 40 texts from each of en, unknown and non-English.
 LANGUAGE_CHECK_PER_GROUP = 40
 # First characters of the body stored in the hand-check CSV, on one line.
@@ -453,6 +458,23 @@ def _quiet_duckdb(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("SET preserve_insertion_order = false")
 
 
+def _cap_text_scan_memory(con: duckdb.DuckDBPyConnection) -> None:
+    """Bound the distinct-text group-by so it cannot take the whole machine.
+
+    One slice needs more than 2GB, and this group-by stops when the cap is
+    too low. The cap is one slice, not the whole table. Fewer threads keep
+    the hash table from growing once per core. Spill files, if DuckDB uses
+    them, go in ``duckdb_temp`` next to the language parquet. Other queries
+    on this stage keep DuckDB's own limit.
+    """
+    temp = settings.data_dir(False) / "duckdb_temp"
+    temp.mkdir(parents=True, exist_ok=True)
+    con.execute(f"SET memory_limit = '{settings.LANGUAGE_DUCKDB_MEMORY_LIMIT}'")
+    con.execute(f"SET threads = {int(settings.LANGUAGE_DUCKDB_THREADS)}")
+    con.execute(f"SET max_temp_directory_size = '{settings.DUCKDB_TEMP_LIMIT}'")
+    con.execute("SET temp_directory = " + _quote_path(str(temp)))
+
+
 def _vectors_per_chunk(chunk_rows: int) -> int:
     """How many DuckDB vectors cover about ``chunk_rows`` rows.
 
@@ -472,7 +494,7 @@ def _vectors_per_chunk(chunk_rows: int) -> int:
 
 def read_distinct_texts_in_chunks(
     con: duckdb.DuckDBPyConnection,
-    chunk_rows: int = 50_000,
+    chunk_rows: int = LABEL_CHUNK_ROWS,
 ) -> Iterator[pd.DataFrame]:
     """Yield distinct ``file_sha`` values and one non-null ``content`` each.
 
@@ -485,7 +507,7 @@ def read_distinct_texts_in_chunks(
     are never collected into one DataFrame.
 
     Inputs: a connection whose ``artifacts`` view is already registered,
-    and ``chunk_rows`` (default 50,000).
+    and ``chunk_rows`` (default 10,000).
     Outputs: frames with columns ``file_sha`` and ``content``. An empty
     table yields nothing.
 
@@ -493,14 +515,19 @@ def read_distinct_texts_in_chunks(
     >>> con = connect_duckdb()
     >>> _ = con.execute("CREATE TABLE artifacts AS SELECT 'a' AS file_sha, 'hi' AS content")
     >>> frames = list(read_distinct_texts_in_chunks(con, chunk_rows=10))
-    reading text part 1 of 4
-    reading text part 2 of 4
-    reading text part 3 of 4
-    reading text part 4 of 4
+    reading text part 1 of 8
+    reading text part 2 of 8
+    reading text part 3 of 8
+    reading text part 4 of 8
+    reading text part 5 of 8
+    reading text part 6 of 8
+    reading text part 7 of 8
+    reading text part 8 of 8
     >>> list(frames[0]["file_sha"])
     ['a']
     """
     _quiet_duckdb(con)
+    _cap_text_scan_memory(con)
     pending: list[pd.DataFrame] = []
     pending_rows = 0
     for part in range(TEXT_READ_PARTS):
@@ -510,6 +537,7 @@ def read_distinct_texts_in_chunks(
         pending, pending_rows = yield from _stream_text_part(
             result, chunk_rows, pending, pending_rows
         )
+        gc.collect()
     if pending_rows:
         yield pd.concat(pending, ignore_index=True)
 
@@ -536,10 +564,12 @@ def _stream_text_part(
             pending = [pd.concat(pending, ignore_index=True)]
         while pending_rows >= chunk_rows:
             block = pd.concat(pending, ignore_index=True)
-            yield block.iloc[:chunk_rows].reset_index(drop=True).copy()
+            piece = block.iloc[:chunk_rows].reset_index(drop=True).copy()
             rest = block.iloc[chunk_rows:].reset_index(drop=True)
+            del block
             pending = [] if rest.empty else [rest]
             pending_rows = 0 if rest.empty else len(rest)
+            yield piece
     return pending, pending_rows
 
 
@@ -571,7 +601,7 @@ def label_languages(texts: pd.DataFrame) -> pd.DataFrame:
     is true for ``en`` and ``unknown``. ``body_chars`` is the length of the
     normalised body, so front matter is not counted. This function does not
     drop duplicate shas; the SQL query does that. It runs in one process.
-    The pool calls it once per chunk.
+    The pool uses ``_label_prepared_chunk`` so workers never receive the full text.
 
     Inputs: a frame with ``file_sha`` and ``content``.
     Outputs: ``file_sha``, ``language``, ``is_english``, ``body_chars``.
@@ -593,12 +623,12 @@ def label_languages(texts: pd.DataFrame) -> pd.DataFrame:
     pairs = zip(texts["file_sha"].tolist(), texts["content"].tolist(), strict=True)
     for file_sha, content in pairs:
         text = _as_text(content)
-        body = split_front_matter(normalize_text(text))[1]
-        language = detect_language(text)
+        sample, size = language_sample_and_size(text)
+        language = classify_language_sample(sample)
         file_shas.append(str(file_sha))
         languages.append(language)
         english.append(language in {"en", "unknown"})
-        sizes.append(len(body))
+        sizes.append(size)
     return pd.DataFrame(
         {
             "file_sha": file_shas,
@@ -614,34 +644,81 @@ def _start_language_worker() -> None:
     build_language_detector()
 
 
-def _label_texts_chunk(texts: pd.DataFrame) -> pd.DataFrame:
-    """Label one chunk. The pool calls this in a worker process."""
-    return label_languages(texts)
+def _prepare_language_chunk(texts: pd.DataFrame) -> pd.DataFrame:
+    """Turn full skill texts into the short sample the workers label.
+
+    ``sample`` is at most ``LANGUAGE_MAX_CHARS`` of the body. ``body_chars``
+    is still the full normalised body length. The caller's frame, which holds
+    the raw ``content``, can be dropped after this returns.
+    """
+    if texts.empty:
+        return pd.DataFrame(
+            {
+                "file_sha": pd.Series(dtype="object"),
+                "sample": pd.Series(dtype="object"),
+                "body_chars": pd.Series(dtype="int64"),
+            }
+        )
+    file_shas: list[str] = []
+    samples: list[str] = []
+    sizes: list[int] = []
+    pairs = zip(texts["file_sha"].tolist(), texts["content"].tolist(), strict=True)
+    for file_sha, content in pairs:
+        sample, size = language_sample_and_size(_as_text(content))
+        file_shas.append(str(file_sha))
+        samples.append(sample)
+        sizes.append(size)
+    return pd.DataFrame(
+        {"file_sha": file_shas, "sample": samples, "body_chars": sizes}
+    )
+
+
+def _label_prepared_chunk(prepared: pd.DataFrame) -> pd.DataFrame:
+    """Label one prepared chunk. The pool calls this in a worker process.
+
+    The frame has ``file_sha``, ``sample`` and ``body_chars``. The sample is
+    what ``classify_language_sample`` scores, so the worker does not need the
+    original skill text.
+    """
+    if prepared.empty:
+        return _empty_label_frame()
+    languages = [classify_language_sample(sample) for sample in prepared["sample"].tolist()]
+    return pd.DataFrame(
+        {
+            "file_sha": prepared["file_sha"].astype(str).tolist(),
+            "language": languages,
+            "is_english": [language in {"en", "unknown"} for language in languages],
+            "body_chars": [int(value) for value in prepared["body_chars"].tolist()],
+        }
+    )
 
 
 def _label_chunks_in_pool(chunks: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
     """Label chunks on ``DOWNLOAD_WORKERS`` processes.
 
     Each worker calls ``build_language_detector`` once (spawn, so the
-    parent's detector is not copied). The chunk iterator is pulled on this
-    process, so the DuckDB connection stays on one thread. At most
-    ``DOWNLOAD_WORKERS`` chunks are waiting at once.
+    parent's detector is not copied). This process cuts each chunk down to
+    the language sample before the pool sees it, then drops the full text.
+    The chunk iterator stays on this process, so the DuckDB connection stays
+    on one thread. At most ``DOWNLOAD_WORKERS`` prepared chunks are waiting.
 
     Inputs: frames of ``file_sha`` and ``content``.
     Outputs: label frames, in the same order the chunks were read.
     """
     pending_chunks = iter(chunks)
     try:
-        first = next(pending_chunks)
+        first = _prepare_language_chunk(next(pending_chunks))
     except StopIteration:
         return
     context = multiprocessing.get_context("spawn")
     workers = settings.DOWNLOAD_WORKERS
     with context.Pool(processes=workers, initializer=_start_language_worker) as pool:
         waiting: deque[multiprocessing.pool.AsyncResult] = deque()
-        waiting.append(pool.apply_async(_label_texts_chunk, (first,)))
+        waiting.append(pool.apply_async(_label_prepared_chunk, (first,)))
         for chunk in pending_chunks:
-            waiting.append(pool.apply_async(_label_texts_chunk, (chunk,)))
+            prepared = _prepare_language_chunk(chunk)
+            del chunk
+            waiting.append(pool.apply_async(_label_prepared_chunk, (prepared,)))
             if len(waiting) >= workers:
                 yield waiting.popleft().get()
         while waiting:
@@ -747,9 +824,10 @@ def label_all_skill_languages(
 ) -> pd.DataFrame:
     """Label every distinct text and write ``out_path``, sorted by ``file_sha``.
 
-    Counts the texts (Q2.1), streams them in chunks of 50,000, and labels
-    the chunks on a process pool. ``label_languages`` stays single-process
-    for tests. The returned frame is the sorted file.
+    Counts the texts (Q2.1), streams them in chunks of 10,000, and labels
+    the chunks on a process pool. Workers receive the language sample, not
+    the full text. ``label_languages`` stays single-process for tests.
+    The returned frame is the sorted file.
 
     Inputs: a connection with the ``artifacts`` view, and the output path.
     Outputs: the parquet file and the same rows as a DataFrame.

@@ -463,8 +463,23 @@ def _language_sample(text: str) -> str:
     >>> _language_sample("ok")
     'ok'
     """
-    body = _drop_code_fences(split_front_matter(normalize_text(text))[1])
-    return body[:LANGUAGE_MAX_CHARS]
+    return language_sample_and_size(text)[0]
+
+
+def language_sample_and_size(text: str) -> tuple[str, int]:
+    """Return the lingua sample and the full normalised body length.
+
+    The sample is the body with code fences removed, cut to
+    ``LANGUAGE_MAX_CHARS``. ``body_chars`` counts the whole body, including
+    characters past that cut. Front matter is in neither. The text is
+    normalised once.
+
+    Example:
+    >>> language_sample_and_size("ok")
+    ('ok', 2)
+    """
+    body = split_front_matter(normalize_text(text))[1]
+    return (_drop_code_fences(body)[:LANGUAGE_MAX_CHARS], len(body))
 
 
 def _is_latin_letter(character: str) -> bool:
@@ -559,7 +574,15 @@ def detect_language(text: str) -> str:
     >>> detect_language("ok")
     'unknown'
     """
-    sample = _language_sample(text)
+    return classify_language_sample(_language_sample(text))
+
+
+def classify_language_sample(sample: str) -> str:
+    """Label a sample already built by ``language_sample_and_size``.
+
+    Same rules as ``detect_language``. Callers that have already cut the
+    body pass the sample so the full skill text is not sent again.
+    """
     if sum(character.isalpha() for character in sample) < MIN_LANGUAGE_LETTERS:
         return "unknown"
     detector = build_language_detector()

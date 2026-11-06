@@ -44,7 +44,7 @@ Rows with a null `file_sha` or null `content` are skipped. One distinct `file_sh
 
 ## What the code does
 
-Eight worker processes label chunks of 50,000 texts. The file is sorted by `file_sha`.
+Eight worker processes label chunks of 10,000 texts. This process keeps the full text only long enough to cut a 2,000-character sample. DuckDB reads the texts in 8 slices, with a cap of 8 GB and 2 threads. The file is sorted by `file_sha`.
 
 | Output | Contents |
 |---|---|

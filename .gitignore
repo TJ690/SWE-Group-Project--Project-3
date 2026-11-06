@@ -32,3 +32,6 @@ src/skillsig.egg-info/requires.txt
 src/skillsig.egg-info/SOURCES.txt
 src/skillsig.egg-info/PKG-INFO
 
+
+docs/skill_genealogy/stories.md
+docs/skill_genealogy/bugs.md

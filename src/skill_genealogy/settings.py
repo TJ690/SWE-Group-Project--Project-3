@@ -134,6 +134,11 @@ CLUSTER_LINK_THRESHOLD = 0.80
 # loading file content. The temp cap is the spill folder under data_dir(dev).
 DUCKDB_MEMORY_LIMIT = "8GB"
 DUCKDB_TEMP_LIMIT = "40GB"
+# Language labelling. One hash slice groups full skill texts. 2GB is too
+# small for that group-by (DuckDB stops instead of spilling). 8GB fits one
+# slice. Threads stay low so the hash table does not grow with every core.
+LANGUAGE_DUCKDB_MEMORY_LIMIT = "8GB"
+LANGUAGE_DUCKDB_THREADS = 2
 # A22: a line shared by this many GitHub owners is template text.
 # G12 keeps 50 unless the top 30 lines are real skill content (see PROGRESS).
 BOILERPLATE_MIN_OWNERS = 50
