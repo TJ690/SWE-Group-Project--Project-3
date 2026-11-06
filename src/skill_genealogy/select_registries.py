@@ -1,11 +1,17 @@
 """Choose registry repos and give every dataset repo a role.
 
-What: stage 2. Step 1 labels the language of every distinct skill text.
-Steps 2–6 keep repos with enough stars and English skills, test which of
-those texts were first seen in an older repo, assign a role, and draw the
-30-registry dev sample.
+What: stages 2a and 2c. Step 1 (stage 2a) labels the language of every
+distinct skill text. Steps 2–6 (stage 2c) keep repos with enough stars and
+English skills, test which of those texts were first seen in an older repo,
+assign a role, and draw the 30-registry dev sample. Stage 2b
+(``check_registry_trees``) runs between them.
+Order: 2a ``select_registries`` (writes the language file on a first run, or with
+``--force-languages``), 2b ``check_registry_trees``, 2c ``select_registries --force``.
 Inputs: GitSkills ``artifacts`` and ``repos`` parquet, plus
-``skill_language.parquet`` once step 1 has written it.
+``skill_language.parquet`` once step 1 has written it, and
+``registry_tree_counts.parquet`` from stage 2b (``check_registry_trees``)
+when it exists. That table lets a popular repo the dataset under-counts pass
+on its own SKILL.md count (bug B01). This stage never uses the network.
 Outputs: all under ``src/data/skill_genealogy/`` (full data folder).
 ``--dev`` does not change the folder. The registry list does not depend on
 dev mode; later stages filter with ``dev_registries.parquet``.
@@ -17,7 +23,6 @@ Score a filled check sample with ``--score-language-check``.
 
 from __future__ import annotations
 
-import gc
 import multiprocessing
 import random
 import time
@@ -32,6 +37,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import skill_genealogy.settings as settings
+from skill_genealogy.check_registry_trees import (
+    summarize_tree_counts,
+    tree_check_candidates,
+    tree_counts_path,
+)
 from skill_genealogy.file_helpers import (
     build_arg_parser,
     check_inputs_exist,
@@ -39,25 +49,22 @@ from skill_genealogy.file_helpers import (
     outputs_exist,
     print_sample_records,
     print_summary,
+    read_parquet,
     write_parquet,
 )
 from skill_genealogy.text_helpers import (
     build_language_detector,
-    classify_language_sample,
-    language_sample_and_size,
+    detect_language,
     normalize_text,
     split_front_matter,
 )
 
 # DuckDB hands rows to Python in vectors of this size. fetch_df_chunk counts vectors.
 DUCKDB_VECTOR_ROWS = 2048
-# Q2.1 reads this many hash slices. hash(file_sha) % TEXT_READ_PARTS is
-# 0 .. TEXT_READ_PARTS-1. Eight slices keep one group-by to about an eighth
-# of the distinct texts, under LANGUAGE_DUCKDB_MEMORY_LIMIT.
-TEXT_READ_PARTS = 8
-# Rows of full skill text held in this process at once. Workers receive the
-# short language sample, not these rows.
-LABEL_CHUNK_ROWS = 10_000
+# Q2.1 reads this many hash slices. One slice holds about a quarter of the
+# distinct strings (about 1 GB) so a 16 GB machine is not asked to group every
+# text at once. hash(file_sha) % TEXT_READ_PARTS is 0 .. TEXT_READ_PARTS-1.
+TEXT_READ_PARTS = 4
 # Revision 2: 40 texts from each of en, unknown and non-English.
 LANGUAGE_CHECK_PER_GROUP = 40
 # First characters of the body stored in the hand-check CSV, on one line.
@@ -367,6 +374,8 @@ _REGISTRY_COLUMNS: tuple[str, ...] = (
     "hub_share",
     "is_hub",
     "hub_tested",
+    "tree_skill_md",
+    "registry_basis",
 )
 _ROLE_COLUMNS: tuple[str, ...] = (
     "repo",
@@ -379,6 +388,8 @@ _ROLE_COLUMNS: tuple[str, ...] = (
     "hub_tested",
     "hub_share",
     "repo_role",
+    "tree_skill_md",
+    "registry_basis",
 )
 _DEV_COLUMNS: tuple[str, ...] = ("repo", "english_skills", "is_hub", "size_group")
 _ROLE_NAMES: tuple[str, ...] = ("registry", "registry_hub", "hub", "repository")
@@ -458,23 +469,6 @@ def _quiet_duckdb(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("SET preserve_insertion_order = false")
 
 
-def _cap_text_scan_memory(con: duckdb.DuckDBPyConnection) -> None:
-    """Bound the distinct-text group-by so it cannot take the whole machine.
-
-    One slice needs more than 2GB, and this group-by stops when the cap is
-    too low. The cap is one slice, not the whole table. Fewer threads keep
-    the hash table from growing once per core. Spill files, if DuckDB uses
-    them, go in ``duckdb_temp`` next to the language parquet. Other queries
-    on this stage keep DuckDB's own limit.
-    """
-    temp = settings.data_dir(False) / "duckdb_temp"
-    temp.mkdir(parents=True, exist_ok=True)
-    con.execute(f"SET memory_limit = '{settings.LANGUAGE_DUCKDB_MEMORY_LIMIT}'")
-    con.execute(f"SET threads = {int(settings.LANGUAGE_DUCKDB_THREADS)}")
-    con.execute(f"SET max_temp_directory_size = '{settings.DUCKDB_TEMP_LIMIT}'")
-    con.execute("SET temp_directory = " + _quote_path(str(temp)))
-
-
 def _vectors_per_chunk(chunk_rows: int) -> int:
     """How many DuckDB vectors cover about ``chunk_rows`` rows.
 
@@ -494,7 +488,7 @@ def _vectors_per_chunk(chunk_rows: int) -> int:
 
 def read_distinct_texts_in_chunks(
     con: duckdb.DuckDBPyConnection,
-    chunk_rows: int = LABEL_CHUNK_ROWS,
+    chunk_rows: int = 50_000,
 ) -> Iterator[pd.DataFrame]:
     """Yield distinct ``file_sha`` values and one non-null ``content`` each.
 
@@ -507,7 +501,7 @@ def read_distinct_texts_in_chunks(
     are never collected into one DataFrame.
 
     Inputs: a connection whose ``artifacts`` view is already registered,
-    and ``chunk_rows`` (default 10,000).
+    and ``chunk_rows`` (default 50,000).
     Outputs: frames with columns ``file_sha`` and ``content``. An empty
     table yields nothing.
 
@@ -515,19 +509,14 @@ def read_distinct_texts_in_chunks(
     >>> con = connect_duckdb()
     >>> _ = con.execute("CREATE TABLE artifacts AS SELECT 'a' AS file_sha, 'hi' AS content")
     >>> frames = list(read_distinct_texts_in_chunks(con, chunk_rows=10))
-    reading text part 1 of 8
-    reading text part 2 of 8
-    reading text part 3 of 8
-    reading text part 4 of 8
-    reading text part 5 of 8
-    reading text part 6 of 8
-    reading text part 7 of 8
-    reading text part 8 of 8
+    reading text part 1 of 4
+    reading text part 2 of 4
+    reading text part 3 of 4
+    reading text part 4 of 4
     >>> list(frames[0]["file_sha"])
     ['a']
     """
     _quiet_duckdb(con)
-    _cap_text_scan_memory(con)
     pending: list[pd.DataFrame] = []
     pending_rows = 0
     for part in range(TEXT_READ_PARTS):
@@ -537,7 +526,6 @@ def read_distinct_texts_in_chunks(
         pending, pending_rows = yield from _stream_text_part(
             result, chunk_rows, pending, pending_rows
         )
-        gc.collect()
     if pending_rows:
         yield pd.concat(pending, ignore_index=True)
 
@@ -564,12 +552,10 @@ def _stream_text_part(
             pending = [pd.concat(pending, ignore_index=True)]
         while pending_rows >= chunk_rows:
             block = pd.concat(pending, ignore_index=True)
-            piece = block.iloc[:chunk_rows].reset_index(drop=True).copy()
+            yield block.iloc[:chunk_rows].reset_index(drop=True).copy()
             rest = block.iloc[chunk_rows:].reset_index(drop=True)
-            del block
             pending = [] if rest.empty else [rest]
             pending_rows = 0 if rest.empty else len(rest)
-            yield piece
     return pending, pending_rows
 
 
@@ -601,7 +587,7 @@ def label_languages(texts: pd.DataFrame) -> pd.DataFrame:
     is true for ``en`` and ``unknown``. ``body_chars`` is the length of the
     normalised body, so front matter is not counted. This function does not
     drop duplicate shas; the SQL query does that. It runs in one process.
-    The pool uses ``_label_prepared_chunk`` so workers never receive the full text.
+    The pool calls it once per chunk.
 
     Inputs: a frame with ``file_sha`` and ``content``.
     Outputs: ``file_sha``, ``language``, ``is_english``, ``body_chars``.
@@ -623,12 +609,12 @@ def label_languages(texts: pd.DataFrame) -> pd.DataFrame:
     pairs = zip(texts["file_sha"].tolist(), texts["content"].tolist(), strict=True)
     for file_sha, content in pairs:
         text = _as_text(content)
-        sample, size = language_sample_and_size(text)
-        language = classify_language_sample(sample)
+        body = split_front_matter(normalize_text(text))[1]
+        language = detect_language(text)
         file_shas.append(str(file_sha))
         languages.append(language)
         english.append(language in {"en", "unknown"})
-        sizes.append(size)
+        sizes.append(len(body))
     return pd.DataFrame(
         {
             "file_sha": file_shas,
@@ -644,81 +630,34 @@ def _start_language_worker() -> None:
     build_language_detector()
 
 
-def _prepare_language_chunk(texts: pd.DataFrame) -> pd.DataFrame:
-    """Turn full skill texts into the short sample the workers label.
-
-    ``sample`` is at most ``LANGUAGE_MAX_CHARS`` of the body. ``body_chars``
-    is still the full normalised body length. The caller's frame, which holds
-    the raw ``content``, can be dropped after this returns.
-    """
-    if texts.empty:
-        return pd.DataFrame(
-            {
-                "file_sha": pd.Series(dtype="object"),
-                "sample": pd.Series(dtype="object"),
-                "body_chars": pd.Series(dtype="int64"),
-            }
-        )
-    file_shas: list[str] = []
-    samples: list[str] = []
-    sizes: list[int] = []
-    pairs = zip(texts["file_sha"].tolist(), texts["content"].tolist(), strict=True)
-    for file_sha, content in pairs:
-        sample, size = language_sample_and_size(_as_text(content))
-        file_shas.append(str(file_sha))
-        samples.append(sample)
-        sizes.append(size)
-    return pd.DataFrame(
-        {"file_sha": file_shas, "sample": samples, "body_chars": sizes}
-    )
-
-
-def _label_prepared_chunk(prepared: pd.DataFrame) -> pd.DataFrame:
-    """Label one prepared chunk. The pool calls this in a worker process.
-
-    The frame has ``file_sha``, ``sample`` and ``body_chars``. The sample is
-    what ``classify_language_sample`` scores, so the worker does not need the
-    original skill text.
-    """
-    if prepared.empty:
-        return _empty_label_frame()
-    languages = [classify_language_sample(sample) for sample in prepared["sample"].tolist()]
-    return pd.DataFrame(
-        {
-            "file_sha": prepared["file_sha"].astype(str).tolist(),
-            "language": languages,
-            "is_english": [language in {"en", "unknown"} for language in languages],
-            "body_chars": [int(value) for value in prepared["body_chars"].tolist()],
-        }
-    )
+def _label_texts_chunk(texts: pd.DataFrame) -> pd.DataFrame:
+    """Label one chunk. The pool calls this in a worker process."""
+    return label_languages(texts)
 
 
 def _label_chunks_in_pool(chunks: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
     """Label chunks on ``DOWNLOAD_WORKERS`` processes.
 
     Each worker calls ``build_language_detector`` once (spawn, so the
-    parent's detector is not copied). This process cuts each chunk down to
-    the language sample before the pool sees it, then drops the full text.
-    The chunk iterator stays on this process, so the DuckDB connection stays
-    on one thread. At most ``DOWNLOAD_WORKERS`` prepared chunks are waiting.
+    parent's detector is not copied). The chunk iterator is pulled on this
+    process, so the DuckDB connection stays on one thread. At most
+    ``DOWNLOAD_WORKERS`` chunks are waiting at once.
 
     Inputs: frames of ``file_sha`` and ``content``.
     Outputs: label frames, in the same order the chunks were read.
     """
     pending_chunks = iter(chunks)
     try:
-        first = _prepare_language_chunk(next(pending_chunks))
+        first = next(pending_chunks)
     except StopIteration:
         return
     context = multiprocessing.get_context("spawn")
     workers = settings.DOWNLOAD_WORKERS
     with context.Pool(processes=workers, initializer=_start_language_worker) as pool:
         waiting: deque[multiprocessing.pool.AsyncResult] = deque()
-        waiting.append(pool.apply_async(_label_prepared_chunk, (first,)))
+        waiting.append(pool.apply_async(_label_texts_chunk, (first,)))
         for chunk in pending_chunks:
-            prepared = _prepare_language_chunk(chunk)
-            del chunk
-            waiting.append(pool.apply_async(_label_prepared_chunk, (prepared,)))
+            waiting.append(pool.apply_async(_label_texts_chunk, (chunk,)))
             if len(waiting) >= workers:
                 yield waiting.popleft().get()
         while waiting:
@@ -824,10 +763,9 @@ def label_all_skill_languages(
 ) -> pd.DataFrame:
     """Label every distinct text and write ``out_path``, sorted by ``file_sha``.
 
-    Counts the texts (Q2.1), streams them in chunks of 10,000, and labels
-    the chunks on a process pool. Workers receive the language sample, not
-    the full text. ``label_languages`` stays single-process for tests.
-    The returned frame is the sorted file.
+    Counts the texts (Q2.1), streams them in chunks of 50,000, and labels
+    the chunks on a process pool. ``label_languages`` stays single-process
+    for tests. The returned frame is the sorted file.
 
     Inputs: a connection with the ``artifacts`` view, and the output path.
     Outputs: the parquet file and the same rows as a DataFrame.
@@ -1207,14 +1145,97 @@ def _registry_mask(frame: pd.DataFrame) -> pd.Series:
     """True for a non-fork with enough stars and enough English skills.
 
     A missing star count or fork flag does not pass. The cutoffs are
-    ``MIN_REGISTRY_STARS`` and ``MIN_REGISTRY_ENGLISH_SKILLS``.
+    ``MIN_REGISTRY_STARS`` and ``MIN_REGISTRY_ENGLISH_SKILLS``. A repo also
+    passes on its own tree (bug B01) when ``tree_skill_md`` is at least
+    ``MIN_REGISTRY_ENGLISH_SKILLS``, it has at least one English skill in the
+    dataset, and ``stars >= TREE_CHECK_MIN_STARS``. Without a
+    ``tree_skill_md`` column only the dataset count is used.
     """
+    return _dataset_pass(frame) | _tree_pass(frame)
+
+
+def _base_pass(frame: pd.DataFrame, min_stars: int) -> pd.Series:
+    """Non-fork with at least ``min_stars``. Missing values do not pass."""
     stars = pd.to_numeric(frame["stars"], errors="coerce")
     forks = pd.to_numeric(frame["is_fork"], errors="coerce")
+    return ((stars >= min_stars) & forks.eq(0)).fillna(False).astype(bool)
+
+
+def _dataset_pass(frame: pd.DataFrame) -> pd.Series:
+    """The original rule: enough stars and enough English skills in the dataset."""
     skills = pd.to_numeric(frame["english_skills"], errors="coerce").fillna(0)
-    mask = (stars >= settings.MIN_REGISTRY_STARS) & forks.eq(0)
-    mask = mask & (skills >= settings.MIN_REGISTRY_ENGLISH_SKILLS)
-    return mask.fillna(False)
+    enough = (skills >= settings.MIN_REGISTRY_ENGLISH_SKILLS).astype(bool)
+    return _base_pass(frame, settings.MIN_REGISTRY_STARS) & enough
+
+
+def _tree_pass(frame: pd.DataFrame) -> pd.Series:
+    """Bug B01: enough SKILL.md files in the repo's own tree, and one English skill.
+
+    Example:
+    >>> frame = pd.DataFrame({
+    ...     "stars": [300, 300, 300], "is_fork": [0, 0, 0],
+    ...     "english_skills": [1, 0, 2], "tree_skill_md": [14, 14, 3],
+    ... })
+    >>> list(_tree_pass(frame))
+    [True, False, False]
+    """
+    if "tree_skill_md" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    skills = pd.to_numeric(frame["english_skills"], errors="coerce").fillna(0)
+    tree = pd.to_numeric(frame["tree_skill_md"], errors="coerce")
+    enough = ((skills >= 1) & (tree >= settings.MIN_REGISTRY_ENGLISH_SKILLS)).fillna(False)
+    return _base_pass(frame, settings.TREE_CHECK_MIN_STARS) & enough.astype(bool)
+
+
+def _registry_basis(frame: pd.DataFrame) -> pd.Series:
+    """``dataset``, ``repo_tree`` (promoted by the tree check), or None for a non-registry.
+
+    Example:
+    >>> frame = pd.DataFrame({
+    ...     "stars": [300, 300, 300], "is_fork": [0, 0, 0],
+    ...     "english_skills": [9, 1, 1], "tree_skill_md": [None, 14, 2],
+    ... })
+    >>> list(_registry_basis(frame))
+    ['dataset', 'repo_tree', None]
+    """
+    values = [
+        "dataset" if dataset else "repo_tree" if tree else None
+        for dataset, tree in zip(_dataset_pass(frame), _tree_pass(frame), strict=True)
+    ]
+    return pd.Series(values, index=frame.index, dtype="object")
+
+
+def add_tree_counts(skills_per_repo: pd.DataFrame, tree_counts: pd.DataFrame) -> pd.DataFrame:
+    """Add ``tree_skill_md`` from stage 2b to the tree-check candidates.
+
+    Only candidates (``tree_check_candidates``) with status ``ok`` get a
+    count. Every other row, and every repo that was not checked or failed,
+    gets null, so it is judged on the dataset count alone.
+
+    Inputs: the step 2 skill counts, and the stage 2b table (``repo``,
+    ``status``, ``tree_skill_md``), which may be empty.
+    Outputs: the skill counts plus ``tree_skill_md`` (nullable integer).
+    """
+    out = skills_per_repo.copy()
+    out["tree_skill_md"] = pd.Series(pd.NA, index=out.index, dtype="Int64")
+    if tree_counts.empty:
+        return out
+    _require_columns(tree_counts, ("repo", "status", "tree_skill_md"), "tree_counts")
+    candidates = set(tree_check_candidates(out))
+    ok = tree_counts.loc[tree_counts["status"].astype(str) == "ok", ["repo", "tree_skill_md"]]
+    ok = ok.loc[ok["repo"].astype(str).isin(candidates)].drop_duplicates("repo")
+    found = dict(zip(ok["repo"].astype(str), ok["tree_skill_md"], strict=True))
+    counts = out["repo"].astype(str).map(found)
+    out["tree_skill_md"] = pd.to_numeric(counts, errors="coerce").astype("Int64")
+    return out
+
+
+def read_tree_counts() -> pd.DataFrame:
+    """The stage 2b table, or an empty frame when stage 2b has not run."""
+    path = tree_counts_path()
+    if not path.is_file():
+        return pd.DataFrame(columns=["repo", "status", "tree_skill_md"])
+    return read_parquet(path)
 
 
 def count_english_skills_per_repo(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
@@ -1237,12 +1258,32 @@ def count_english_skills_per_repo(con: duckdb.DuckDBPyConnection) -> pd.DataFram
     return frame.loc[:, list(_SKILL_COUNT_COLUMNS)].reset_index(drop=True)
 
 
+def english_skill_counts() -> pd.DataFrame:
+    """Q2.4 on its own connection: English skills per dataset repo.
+
+    Stage 2b (``check_registry_trees``) uses this to pick its candidates
+    before stage 2c writes ``repo_roles.parquet``. It needs the dataset and
+    ``skill_language.parquet`` from stage 2a.
+
+    Outputs: the ``count_english_skills_per_repo`` frame.
+    """
+    con = connect_duckdb()
+    try:
+        read_inputs(con)
+        _register_language(con)
+        return count_english_skills_per_repo(con)
+    finally:
+        con.close()
+
+
 def select_registry_repos(skills_per_repo: pd.DataFrame) -> pd.DataFrame:
     """Keep repos that pass the registry rule, sorted by repo.
 
     The rule is ``stars >= MIN_REGISTRY_STARS``, ``is_fork = 0`` and
     ``english_skills >= MIN_REGISTRY_ENGLISH_SKILLS``. A missing star count
-    or fork flag does not pass.
+    or fork flag does not pass. When the frame has ``tree_skill_md`` (from
+    ``add_tree_counts``), a repo with enough SKILL.md files in its own tree
+    also passes (bug B01).
 
     Inputs: the frame from ``count_english_skills_per_repo``.
     Outputs: the same columns, one row per registry.
@@ -1425,7 +1466,9 @@ def assign_repo_roles(
     Inputs: skill counts for every repo, and the hub-test frame
     (``repo``, ``hub_share``, ``skills_tested``).
     Outputs: ``repo``, ``owner``, ``stars``, ``is_fork``, ``english_skills``,
-    ``is_registry``, ``is_hub``, ``hub_tested``, ``hub_share``, ``repo_role``.
+    ``is_registry``, ``is_hub``, ``hub_tested``, ``hub_share``, ``repo_role``,
+    ``tree_skill_md`` (null when not checked) and ``registry_basis``
+    (``dataset``, ``repo_tree``, or null for a non-registry).
     """
     _require_columns(
         skills_per_repo,
@@ -1435,7 +1478,10 @@ def assign_repo_roles(
     _require_columns(hub_shares, ("repo", "hub_share", "skills_tested"), "hub_shares")
     hubs = hub_shares.loc[:, ["repo", "hub_share", "skills_tested"]].drop_duplicates("repo")
     merged = skills_per_repo.merge(hubs, on="repo", how="left")
+    if "tree_skill_md" not in merged.columns:
+        merged["tree_skill_md"] = pd.Series(pd.NA, index=merged.index, dtype="Int64")
     merged["is_registry"] = _registry_mask(merged).astype(bool)
+    merged["registry_basis"] = _registry_basis(merged)
     merged["hub_tested"] = _hub_tested(merged["skills_tested"])
     merged["is_hub"] = _as_hub_flag(merged["hub_share"], merged["skills_tested"])
     merged["repo_role"] = _role_labels(merged["is_registry"], merged["is_hub"])
@@ -1651,6 +1697,7 @@ def _print_selection(
     numbers.update(stats)
     print_summary("registry selection", numbers)
     _print_null_date_decision(stats)
+    _print_tree_check_note(stats)
     if numbers["dev_hubs"] < settings.DEV_MIN_HUBS:
         print(
             f"dev sample has {numbers['dev_hubs']} hubs; "
@@ -1658,11 +1705,38 @@ def _print_selection(
             "No further hub in the same size group was left to swap in."
         )
     top = registries.sort_values(["stars", "repo"], ascending=[False, True], kind="mergesort")
-    top_columns = ["repo", "stars", "english_skills", "hub_share", "is_hub", "hub_tested"]
+    top_columns = [
+        "repo",
+        "stars",
+        "english_skills",
+        "tree_skill_md",
+        "registry_basis",
+        "hub_share",
+        "is_hub",
+        "hub_tested",
+    ]
     print_sample_records(top.reindex(columns=top_columns), "Top 10 registries by stars", 10)
+    if "registry_basis" in registries.columns:
+        promoted = top.loc[top["registry_basis"].astype(str) == "repo_tree"]
+        print_sample_records(
+            promoted.reindex(columns=top_columns), "Top 10 registries added by the tree check", 10
+        )
     print_sample_records(registries, "Sample registries", 2)
     print_sample_records(roles, "Sample repo roles", 2)
     print_sample_records(dev_registries, "Sample dev registries", 2)
+
+
+def _print_tree_check_note(stats: dict[str, object]) -> None:
+    """Say how to run stage 2b when some tree-check candidates have no count yet."""
+    missing = stats.get("tree_check_not_checked")
+    if not isinstance(missing, int) or missing <= 0:
+        return
+    print(
+        f"{missing} of {stats.get('tree_check_candidates')} tree-check candidates "
+        "have no SKILL.md count from their own repo, so they were judged on the "
+        "dataset count only (bug B01). Run: python -m skill_genealogy.check_registry_trees, "
+        "then python -m skill_genealogy.select_registries --force"
+    )
 
 
 def _load_selection() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -1716,6 +1790,10 @@ def _run_selection_steps(
     # Step 2: count English skills per repo
     print("Step 2: count English skills per repo", flush=True)
     skills = count_english_skills_per_repo(con)
+    # Stage 2b result: SKILL.md counts from the repo's own tree (bug B01)
+    tree_counts = read_tree_counts()
+    skills = add_tree_counts(skills, tree_counts)
+    tree_stats = summarize_tree_counts(tree_counts, tree_check_candidates(skills))
     # Step 3: registry rule
     print("Step 3: registry rule", flush=True)
     chosen = select_registry_repos(skills)
@@ -1738,6 +1816,11 @@ def _run_selection_steps(
     )
     save_registry_outputs(registries, roles, dev_registries, settings.data_dir(False))
     stats = _undated_text_counts(skills, hub_shares, registries["repo"])
+    basis = registries["registry_basis"].astype(str).value_counts()
+    stats["registries_by_dataset"] = int(basis.get("dataset", 0))
+    stats["registries_by_repo_tree"] = int(basis.get("repo_tree", 0))
+    for name, value in tree_stats.items():
+        stats[f"tree_check_{name}"] = value
     return registries, roles, dev_registries, stats
 
 

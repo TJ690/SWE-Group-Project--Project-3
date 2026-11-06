@@ -13,10 +13,22 @@ SELECT * FROM 'src/data/gitskills_data/data/repos/*.parquet';
 CREATE OR REPLACE VIEW skill_language AS
 SELECT * FROM 'src/data/skill_genealogy/skill_language.parquet';
 
--- Registry skills (lineages) that were dropped, with the reason (for example not_english).
-CREATE OR REPLACE VIEW lineages_dropped AS
-SELECT * FROM 'src/data/skill_genealogy/lineages_dropped.parquet';
-
 -- The 120 texts picked for a person to check the language label by hand.
 CREATE OR REPLACE VIEW language_check_sample AS
 SELECT * FROM 'src/data/skill_genealogy/language_check_sample.csv';
+
+-- Stage 2b. One row per candidate repo whose own tree was checked.
+CREATE OR REPLACE VIEW registry_tree_counts AS
+SELECT * FROM 'src/data/skill_genealogy/registry_tree_counts.parquet';
+
+-- Stage 2c. Repos that pass the registry rule, including tree promotions.
+CREATE OR REPLACE VIEW registries AS
+SELECT * FROM 'src/data/skill_genealogy/registries.parquet';
+
+-- Stage 2c. One role for every repository in the dataset.
+CREATE OR REPLACE VIEW repo_roles AS
+SELECT * FROM 'src/data/skill_genealogy/repo_roles.parquet';
+
+-- Stage 2c. The fixed 30-registry sample.
+CREATE OR REPLACE VIEW dev_registries AS
+SELECT * FROM 'src/data/skill_genealogy/dev_registries.parquet';

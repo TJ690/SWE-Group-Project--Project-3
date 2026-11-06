@@ -7,8 +7,8 @@ Labels every distinct skill text with a language code and an English flag. Run c
 The full-run script starts in the background and writes a log under `logs/skill_genealogy/`. The dev script stays in the terminal.
 
 ```bash
-bash scripts/skill_genealogy/full_run/language_labels.sh
-bash scripts/skill_genealogy/dev_mode/language_labels.sh
+bash scripts/skill_genealogy/full_run/01_language_labels.sh
+bash scripts/skill_genealogy/dev_mode/01_language_labels.sh
 ```
 
 Both run:
@@ -28,7 +28,7 @@ Both run:
 Tests:
 
 ```bash
-bash scripts/skill_genealogy/tests/language_labels.sh
+bash scripts/skill_genealogy/tests/01_language_labels.sh
 ```
 
 ## Inputs

@@ -15,6 +15,7 @@ from skill_genealogy.file_helpers import connect_duckdb
 from skill_genealogy.select_registries import (
     _register_language,
     _should_write_sample,
+    add_tree_counts,
     assign_repo_roles,
     compute_hub_shares,
     count_english_skills_per_repo,
@@ -427,6 +428,48 @@ def test_repo_roles_for_hub_registry_and_fork() -> None:
     assert bool(roles.loc["e/both", "hub_tested"]) is True
     chosen = select_registry_repos(skills)
     assert list(chosen["repo"]) == ["b/reg", "e/both"]
+
+
+def test_tree_count_promotes_an_under_counted_repo() -> None:
+    """Bug B01. One dataset skill but 14 in its own tree is a registry (basis repo_tree).
+
+    A repo that really has 2 skills stays a repository. A count on a repo with no
+    English skill in the dataset, or on a failed check, is ignored. A repo that
+    passes on the dataset keeps basis dataset.
+    """
+    skills = pd.DataFrame(
+        {
+            "repo": ["obra/superpowers", "fastapi/fastapi", "x/none", "x/failed", "b/reg"],
+            "owner": ["obra", "fastapi", "x", "x", "b"],
+            "stars": [255_386, 100_714, 900, 900, 200],
+            "is_fork": [0, 0, 0, 0, 0],
+            "english_skills": [1, 1, 0, 2, 10],
+            "files": [1, 1, 0, 2, 12],
+        }
+    )
+    tree = pd.DataFrame(
+        {
+            "repo": ["obra/superpowers", "fastapi/fastapi", "x/none", "x/failed"],
+            "status": ["ok", "ok", "ok", "timeout"],
+            "tree_skill_md": [14, 2, 30, pd.NA],
+        }
+    )
+    with_tree = add_tree_counts(skills, tree)
+    hubs = pd.DataFrame(columns=["repo", "skills_tested", "first_seen_elsewhere", "hub_share"])
+    roles = assign_repo_roles(with_tree, hubs).set_index("repo")
+    assert roles.loc["obra/superpowers", "repo_role"] == "registry"
+    assert roles.loc["obra/superpowers", "registry_basis"] == "repo_tree"
+    assert int(roles.loc["obra/superpowers", "tree_skill_md"]) == 14
+    assert roles.loc["fastapi/fastapi", "repo_role"] == "repository"
+    assert roles.loc["x/none", "repo_role"] == "repository"
+    assert pd.isna(roles.loc["x/none", "tree_skill_md"])
+    assert roles.loc["x/failed", "repo_role"] == "repository"
+    assert roles.loc["b/reg", "registry_basis"] == "dataset"
+    assert pd.isna(roles.loc["fastapi/fastapi", "registry_basis"])
+    chosen = select_registry_repos(with_tree)
+    assert list(chosen["repo"]) == ["b/reg", "obra/superpowers"]
+    without_tree = assign_repo_roles(skills, hubs).set_index("repo")
+    assert without_tree.loc["obra/superpowers", "repo_role"] == "repository"
 
 
 def test_one_dated_text_is_not_a_hub() -> None:
