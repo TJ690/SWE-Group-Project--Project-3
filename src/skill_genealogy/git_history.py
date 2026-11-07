@@ -113,6 +113,7 @@ _STATUS_COLUMNS = [
     "twin",
     "history_since",
     "deleted_folders",
+    "moved_folders",
     "history_folders_dropped",
 ]
 # Git's message when a --shallow-since clone finds no commit after the date.
@@ -147,8 +148,11 @@ class RepoResult:
     ``deleted_folders`` counts skill folders found only in the history (their
     ``SKILL.md`` was gone at HEAD) and mined by their exact path. It is None
     when the history was not searched (an explicit folder list, or a failure).
-    ``history_folders_dropped`` counts history-only folders that were logged
-    but not kept, because their skill moved or their deletion is not visible.
+    ``moved_folders`` counts history-only folders whose skill moved to a
+    folder that still exists; their rows are kept as that folder's
+    ``former_folder`` history. ``history_folders_dropped`` counts history-only
+    folders that were logged but not kept (no visible delete, or newer than a
+    backfill snapshot).
     """
 
     repo: str
@@ -162,6 +166,7 @@ class RepoResult:
     twin: int = 0
     history_since: str | None = None
     deleted_folders: int | None = None
+    moved_folders: int | None = None
     history_folders_dropped: int | None = None
 
 
@@ -681,6 +686,7 @@ def _mine_checked(
     # The row dicts can be millions; free them before the texts are read.
     del grouped
     kept_deleted: int | None = None
+    moved: int | None = None
     dropped: int | None = None
     note = ""
     if folders is None:
@@ -689,11 +695,13 @@ def _mine_checked(
             set(chosen),
             _covered_skill_folders(changes),
         )
-        extra, kept_deleted, dropped, note = _deleted_folder_rows(
+        extra, kept_deleted, moved, dropped, note = _deleted_folder_rows(
             repo, clone_dir, changes, deleted, timeout_seconds
         )
         if not extra.empty:
             changes = extra if changes.empty else pd.concat([changes, extra], ignore_index=True)
+            targets = _former_targets(extra)
+            changes = renumber_commit_seq(collapse_move_rows(changes, targets), targets)
     texts, used_lazy = _texts_for_changes(clone_dir, changes, timeout_seconds)
     message = "; ".join(part for part in (_LAZY_FETCH_MESSAGE if used_lazy else "", note) if part)
     result = RepoResult(
@@ -707,6 +715,7 @@ def _mine_checked(
         after_copy=drops["after_copy"],
         twin=drops["twin"],
         deleted_folders=kept_deleted,
+        moved_folders=moved,
         history_folders_dropped=dropped,
     )
     return result, changes, texts
@@ -777,13 +786,13 @@ def mine_deleted_folders(
             mined,
             _covered_skill_folders(shard_changes),
         )
-        changes, kept, dropped, note = _deleted_folder_rows(
+        changes, kept, moved, dropped, note = _deleted_folder_rows(
             repo, clone_dir, shard_changes, deleted, timeout_seconds
         )
         texts, _used_lazy = _texts_for_changes(clone_dir, changes, timeout_seconds)
         result = RepoResult(
             repo, "ok", note, head, 0.0, False,
-            deleted_folders=kept, history_folders_dropped=dropped,
+            deleted_folders=kept, moved_folders=moved, history_folders_dropped=dropped,
         )
     except GitError as error:
         result = _result_from_git_error(repo, error)
@@ -805,6 +814,7 @@ def append_to_repo_shard(
     deleted_folders: int | None,
     dropped_folders: int | None = None,
     message: str = "",
+    moved_folders: int | None = None,
 ) -> None:
     """Add deleted-folder rows to a finished shard and mark it as checked.
 
@@ -824,6 +834,8 @@ def append_to_repo_shard(
     if len(changes):
         old = read_parquet(changes_path)
         joined = pd.concat([frame for frame in (old, changes) if len(frame)], ignore_index=True)
+        targets = _former_targets(changes)
+        joined = renumber_commit_seq(collapse_move_rows(joined, targets), targets)
         write_parquet(joined, changes_path)
     if len(texts):
         old_texts = pq.read_table(texts_path, schema=_TEXT_SCHEMA).to_pandas()
@@ -833,6 +845,7 @@ def append_to_repo_shard(
     status = json.loads(status_path.read_text(encoding="utf-8"))
     status["deleted_folders"] = None if deleted_folders is None else int(deleted_folders)
     status["history_folders_dropped"] = None if dropped_folders is None else int(dropped_folders)
+    status["moved_folders"] = None if moved_folders is None else int(moved_folders)
     status["deleted_folders_message"] = message
     status["deleted_folders_checked"] = True
     temporary = status_path.with_suffix(".tmp")
@@ -891,8 +904,8 @@ def keep_deleted_folders(
 
     Rule, per folder in ``extra``:
     1. moved: one of its ``SKILL.md`` versions (blob ids) is also a ``SKILL.md``
-       version in ``base`` (the folders that still exist). Its history is
-       already kept under the new folder, so it is dropped.
+       version in ``base`` (the folders that still exist). It is not a deleted
+       skill; ``attach_moved_folders`` keeps its rows as earlier history.
     2. not visibly deleted: its newest ``SKILL.md`` row is not a delete (``D``)
        or a rename out of the folder. The folder is gone but git shows no
        delete (for example a merge or a large restructure), so it is dropped.
@@ -936,6 +949,167 @@ def keep_deleted_folders(
     return kept_rows.reset_index(drop=True), len(keep), len(folders) - len(keep)
 
 
+def attach_moved_folders(extra: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Keep the history of moved skills as ``former_folder`` rows of their new folder.
+
+    A history-only folder moved when one of its ``SKILL.md`` versions is also a
+    version in a folder of ``base``. Its target is the base folder that holds
+    its last ``SKILL.md`` version (the text it had before the move), else the
+    base folder that shares most of its versions, then the smaller name. Its
+    rows get the target's ``skill_folder`` and ``history_role`` ``former_folder``;
+    ``file_path`` stays relative to the old folder, as for a followed rename.
+    Without these rows a skill would look younger than its copies.
+
+    Inputs: the history-only rows and the repo's rows of folders that exist.
+    Outputs: the attached rows and the number of folders attached.
+
+    Example:
+    >>> base = pd.DataFrame({"skill_folder": ["new/pdf"], "is_skill_md": [True],
+    ...     "old_sha": ["0" * 40], "new_sha": ["b" * 40], "status": ["A"], "commit_seq": [1]})
+    >>> extra = pd.DataFrame({"skill_folder": ["old/pdf"] * 2, "is_skill_md": [True] * 2,
+    ...     "old_sha": ["0" * 40, "b" * 40], "new_sha": ["b" * 40, "0" * 40],
+    ...     "status": ["A", "D"], "commit_seq": [1, 2], "history_role": ["own"] * 2})
+    >>> rows, count = attach_moved_folders(extra, base)
+    >>> sorted(set(rows["skill_folder"])), sorted(set(rows["history_role"])), count
+    (['new/pdf'], ['former_folder'], 1)
+    """
+    if extra.empty or base.empty:
+        return extra.iloc[0:0], 0
+    holders = _blob_holders(base)
+    parts: list[pd.DataFrame] = []
+    for folder, rows in extra.groupby(extra["skill_folder"].astype(str), sort=False):
+        target = _move_target(rows, holders, str(folder))
+        if target is None:
+            continue
+        moved = rows.copy()
+        moved["skill_folder"] = target
+        moved["history_role"] = "former_folder"
+        parts.append(moved)
+    if not parts:
+        return extra.iloc[0:0], 0
+    return pd.concat(parts, ignore_index=True), len(parts)
+
+
+def collapse_move_rows(changes: pd.DataFrame, folders: set[str]) -> pd.DataFrame:
+    """Turn the delete + add of a moved file into one rename row, as ``--follow`` shows it.
+
+    In ``folders``, a ``former_folder`` row with status ``D`` and a row with
+    status ``A`` for the same ``file_path`` in the same commit are one move. The
+    add row becomes ``R`` with the delete's old path, blob and mode, and the
+    delete row is dropped. Without this, each move is two rows with one key.
+
+    Example:
+    >>> rows = pd.DataFrame({"skill_folder": ["new/pdf"] * 2, "commit": ["c2", "c2"],
+    ...     "file_path": ["SKILL.md"] * 2, "status": ["D", "A"],
+    ...     "history_role": ["former_folder", "own"], "old_file_path": ["", ""],
+    ...     "repo_path": ["old/pdf/SKILL.md", "new/pdf/SKILL.md"], "old_repo_path": ["", ""],
+    ...     "old_sha": ["b" * 40, "0" * 40], "new_sha": ["0" * 40, "b" * 40],
+    ...     "old_mode": ["100644", "000000"], "new_mode": ["000000", "100644"]})
+    >>> out = collapse_move_rows(rows, {"new/pdf"})
+    >>> out[["status", "old_repo_path", "repo_path"]].values.tolist()
+    [['R', 'old/pdf/SKILL.md', 'new/pdf/SKILL.md']]
+    """
+    if changes.empty or not folders:
+        return changes
+    key = ["skill_folder", "commit", "file_path"]
+    in_scope = changes["skill_folder"].astype(str).isin(folders)
+    deletes = changes.loc[
+        in_scope & (changes["status"] == "D") & (changes["history_role"] == "former_folder")
+    ]
+    adds = changes.loc[in_scope & (changes["status"] == "A")]
+    if deletes.empty or adds.empty:
+        return changes
+    once_d = deletes.drop_duplicates(key, keep=False)
+    once_a = adds.drop_duplicates(key, keep=False)
+    delete_side = once_d.reset_index()[[*key, "index", "repo_path", "old_sha", "old_mode"]]
+    delete_side = delete_side.rename(
+        columns={
+            "index": "d_index",
+            "repo_path": "d_repo_path",
+            "old_sha": "d_old_sha",
+            "old_mode": "d_old_mode",
+        }
+    )
+    pairs = once_a.reset_index().merge(delete_side, on=key)
+    if pairs.empty:
+        return changes
+    out = changes.copy()
+    at = pairs["index"].to_numpy()
+    out.loc[at, "status"] = "R"
+    out.loc[at, "old_file_path"] = pairs["file_path"].to_numpy()
+    out.loc[at, "old_repo_path"] = pairs["d_repo_path"].to_numpy()
+    out.loc[at, "old_sha"] = pairs["d_old_sha"].to_numpy()
+    out.loc[at, "old_mode"] = pairs["d_old_mode"].to_numpy()
+    return out.drop(index=pairs["d_index"].to_numpy()).reset_index(drop=True)
+
+
+def renumber_commit_seq(changes: pd.DataFrame, folders: set[str]) -> pd.DataFrame:
+    """Number the commits of ``folders`` again, oldest first, by commit time.
+
+    Used after earlier rows were attached to a folder. Other folders keep
+    their numbers. Commits with the same time keep the order of their first row.
+
+    Example:
+    >>> rows = pd.DataFrame({"skill_folder": ["s"] * 3, "commit": ["c3", "c1", "c2"],
+    ...     "commit_seq": [1, 1, 2],
+    ...     "commit_date": ["2026-03-01T00:00:00Z", "2026-01-01T00:00:00Z",
+    ...                     "2026-02-01T00:00:00Z"]})
+    >>> renumber_commit_seq(rows, {"s"})["commit_seq"].tolist()
+    [3, 1, 2]
+    """
+    if changes.empty or not folders:
+        return changes
+    out = changes.copy()
+    mask = out["skill_folder"].astype(str).isin(folders)
+    part = out.loc[mask, ["skill_folder", "commit", "commit_date"]].copy()
+    part["time"] = pd.to_datetime(part["commit_date"], utc=True, errors="coerce", format="ISO8601")
+    first = part.groupby(["skill_folder", "commit"], sort=False)["time"].min().reset_index()
+    first = first.sort_values(["skill_folder", "time"], kind="mergesort")
+    first["seq"] = first.groupby("skill_folder").cumcount() + 1
+    seq = first.set_index(["skill_folder", "commit"])["seq"]
+    keys = pd.MultiIndex.from_frame(out.loc[mask, ["skill_folder", "commit"]])
+    out.loc[mask, "commit_seq"] = seq.reindex(keys).to_numpy()
+    out["commit_seq"] = out["commit_seq"].astype("int64")
+    return out
+
+
+def _former_targets(rows: pd.DataFrame) -> set[str]:
+    """Folders that received ``former_folder`` rows from moved folders."""
+    if rows.empty or "history_role" not in rows.columns:
+        return set()
+    return set(rows.loc[rows["history_role"] == "former_folder", "skill_folder"].astype(str))
+
+
+def _blob_holders(base: pd.DataFrame) -> dict[str, set[str]]:
+    """``SKILL.md`` blob id -> base folders that hold it."""
+    holders: dict[str, set[str]] = {}
+    skill = base.loc[base["is_skill_md"].fillna(False).astype(bool)]
+    for row in skill.loc[:, ["skill_folder", "old_sha", "new_sha"]].to_dict("records"):
+        for sha in _real_shas(str(row["old_sha"]), str(row["new_sha"])):
+            holders.setdefault(sha, set()).add(str(row["skill_folder"]))
+    return holders
+
+
+def _move_target(rows: pd.DataFrame, holders: dict[str, set[str]], folder: str) -> str | None:
+    """The base folder a moved folder went to, or None when it shares no version."""
+    skill = rows.loc[rows["is_skill_md"].fillna(False).astype(bool)].sort_values(
+        "commit_seq", kind="mergesort"
+    )
+    versions: list[str] = []
+    for row in skill.to_dict("records"):
+        versions.extend(_real_shas(str(row["new_sha"]), str(row["old_sha"])))
+    shared: dict[str, int] = {}
+    for sha in versions:
+        for target in holders.get(sha, set()) - {folder}:
+            shared[target] = shared.get(target, 0) + 1
+    if not shared:
+        return None
+    last = holders.get(versions[-1], set()) - {folder} if versions else set()
+    if last:
+        return min(last, key=lambda name: (-shared.get(name, 0), name))
+    return min(shared, key=lambda name: (-shared[name], name))
+
+
 def _first_commit_time(rows: pd.DataFrame) -> pd.Timestamp:
     """Earliest commit time of ``rows`` in UTC. Dates carry their own offsets (``+09:00``)."""
     times = pd.to_datetime(rows["commit_date"], utc=True, errors="coerce", format="ISO8601")
@@ -972,10 +1146,11 @@ def _deleted_folder_rows(
     base: pd.DataFrame,
     deleted: list[str],
     timeout_seconds: int,
-) -> tuple[pd.DataFrame, int | None, int | None, str]:
-    """Log ``deleted`` folders by exact path (no --follow) and keep the real deletions.
+) -> tuple[pd.DataFrame, int | None, int | None, int | None, str]:
+    """Log history-only folders by exact path (no --follow); keep deletions and moves.
 
-    Returns the kept rows, the kept and dropped folder counts, and a note.
+    Returns the rows to add (deleted skills, and moved skills attached to their
+    new folder), the deleted, moved and dropped folder counts, and a note.
     More than ``DELETED_FOLDERS_MAX`` candidates are not logged at all: the
     counts are None and the note says why.
     """
@@ -984,14 +1159,19 @@ def _deleted_folder_rows(
             f"skipped {len(deleted)} history-only folders (over {DELETED_FOLDERS_MAX}); "
             "the layout was rebuilt or moved"
         )
-        return _empty_changes(), None, None, note
+        return _empty_changes(), None, None, None, note
     if not deleted:
-        return _empty_changes(), 0, 0, ""
+        return _empty_changes(), 0, 0, 0, ""
     grouped, _drops = _grouped_logs(clone_dir, deleted, False, timeout_seconds)
     extra = _changes_frame(repo, grouped)
     del grouped
-    kept, kept_count, dropped = keep_deleted_folders(extra, base)
-    return kept, kept_count, dropped, ""
+    kept, kept_count, _not_kept = keep_deleted_folders(extra, base)
+    attached, moved_count = attach_moved_folders(extra, base)
+    dropped = extra["skill_folder"].nunique() - kept_count - moved_count if len(extra) else 0
+    rows = pd.concat([frame for frame in (kept, attached) if len(frame)], ignore_index=True)
+    if rows.empty:
+        rows = _empty_changes()
+    return rows, kept_count, moved_count, int(dropped), ""
 
 
 def _choose_folders(
@@ -2948,7 +3128,14 @@ def _status_frame(rows: list[dict]) -> pd.DataFrame:
     for column in _STATUS_COLUMNS:
         if column not in frame.columns:
             frame[column] = pd.NA
-    for column in ("not_ours", "after_copy", "twin", "deleted_folders", "history_folders_dropped"):
+    for column in (
+        "not_ours",
+        "after_copy",
+        "twin",
+        "deleted_folders",
+        "moved_folders",
+        "history_folders_dropped",
+    ):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0).astype("int64")
     return frame.loc[:, _STATUS_COLUMNS]
 

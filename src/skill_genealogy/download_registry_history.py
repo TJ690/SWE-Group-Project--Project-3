@@ -65,6 +65,7 @@ _STATUS_COLUMNS = [
     "twin",
     "history_since",
     "deleted_folders",
+    "moved_folders",
     "history_folders_dropped",
     "skill_folders",
     "changes",
@@ -473,7 +474,7 @@ def _add_deleted_folders(
         try:
             append_to_repo_shard(
                 shard_dir, repo, changes, texts, result.deleted_folders,
-                result.history_folders_dropped, result.message,
+                result.history_folders_dropped, result.message, result.moved_folders,
             )
         except OSError as error:
             status, message = "error", _last_error_line(error)
@@ -670,6 +671,7 @@ def _status_row(
         "twin": result.twin,
         "history_since": result.history_since,
         "deleted_folders": result.deleted_folders,
+        "moved_folders": result.moved_folders,
         "history_folders_dropped": result.history_folders_dropped,
         "skill_folders": folder_count,
         "changes": change_count,
@@ -698,7 +700,14 @@ def _attach_counts(status: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
     merged = base.merge(counts, on="repo", how="left")
     merged["skill_folders"] = merged["skill_folders"].fillna(0).astype("int64")
     merged["changes"] = merged["changes"].fillna(0).astype("int64")
-    for name in ("not_ours", "after_copy", "twin", "deleted_folders", "history_folders_dropped"):
+    for name in (
+        "not_ours",
+        "after_copy",
+        "twin",
+        "deleted_folders",
+        "moved_folders",
+        "history_folders_dropped",
+    ):
         if name not in merged.columns:
             merged[name] = 0
         merged[name] = pd.to_numeric(merged[name], errors="coerce").fillna(0).astype("int64")

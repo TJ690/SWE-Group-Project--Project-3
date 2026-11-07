@@ -215,6 +215,64 @@ README_FILE_NAMES = (
     "readme",
 )
 README_MAX_BYTES = 200_000
+# Stage 3c registry kinds (source or copier). The date vote counts SKILL.md
+# texts a registry shares with registries of other owners, and asks who had each
+# text first. Its strength grows with the distance of that share from 0.5 and
+# with the number of shared texts, up to KIND_FULL_EVIDENCE_TEXTS.
+KIND_FULL_EVIDENCE_TEXTS = 20
+# A registry that shares no text with another owner: nothing in it was copied
+# from another registry. That is a source vote of this strength.
+KIND_NO_SHARED_SOURCE_STRENGTH = 0.7
+# A share of texts first seen elsewhere at or below this is a source vote of at
+# least KIND_NO_SHARED_SOURCE_STRENGTH: others copy it, it copies little.
+KIND_LOW_SHARE_SOURCE_MAX = 0.2
+# The share above counts only shared texts, so a registry that wrote 600 skills
+# and borrowed one shows 1 of 1 first seen elsewhere. When the texts first seen
+# elsewhere are below this share of ALL the registry's own SKILL.md texts, the
+# copier vote becomes a source vote of KIND_NO_SHARED_SOURCE_STRENGTH: it wrote
+# nearly everything itself. Only below KIND_FULL_EVIDENCE_TEXTS shared texts: a
+# crawler of repos outside the registries also has many unshared texts.
+KIND_COPIED_SHARE_SOURCE_MAX = 0.1
+# Below this confidence a registry goes to the review sheet.
+KIND_REVIEW_BELOW = 0.5
+# README phrases (lower case). A copier phrase says the repo holds skills of
+# other authors; a source phrase says the skills are the team's own. A phrase
+# counts only as whole words, only in a sentence that mentions a skill, and not
+# right after "not", "no" or "never" ("not a mirror of" is not a copier). Words
+# such as "a curated collection of skills" are not used: on the 2026-11-07 run
+# original authors (MicrosoftDocs/Agent-Skills, GPTomics/bioSkills) used them
+# for their own skills, so they describe packaging, not where skills came from.
+# "copied from" is not used either: its 7 matches on that run described install
+# steps, file trees or one borrowed plugin (microsoft/skills), and the date vote
+# called all 7 sources.
+README_COPIER_STRONG = (
+    "aggregate catalog",
+    "this mirror",
+    "a mirror of",
+    "mirrors of",
+    "not necessarily the author",
+    "not the author",
+    "not the original author",
+    "collected from",
+    "aggregated from",
+    "scraped from",
+    "crawled from",
+    "automatically collected",
+    "auto-collected",
+    "all credit goes to",
+    "credit goes to the original",
+)
+README_SOURCE = (
+    "our skills",
+    "our own skills",
+    "official skills",
+    "skills built by",
+    "built by our team",
+    "written by our team",
+    "maintained by our team",
+)
+README_STRONG_STRENGTH = 0.8
+README_SOURCE_STRENGTH = 0.6
 # Blobs per git cat-file --batch read. One read of every blob at once held
 # several GB in memory for a repo with 500,000 texts.
 BLOB_READ_BATCH = 2000

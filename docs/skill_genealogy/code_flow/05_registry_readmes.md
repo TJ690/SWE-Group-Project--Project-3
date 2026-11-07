@@ -74,6 +74,10 @@ Runs the tests.
 
 The run prints the counts by status and by commit basis, how many texts were kept, the median README size, and two sample rows.
 
+## Full run
+
+On 2026-11-07 the full run fetched all 4,806 registries in 555 seconds: 4,739 `ok`, 33 `no_readme`, 34 `gone`. 4,769 used the stage 3 commit. Details are in the [registry READMEs report](../report/05_registry_readmes_report.md).
+
 ## Dev check
 
 On 2026-11-07, `--dev --limit 5` fetched 5 READMEs in 1.0 second. 3 used the stage 3 commit. 2 used the newest commit because the dev stage 3 status had no row for them. The median README was 14,376 bytes.

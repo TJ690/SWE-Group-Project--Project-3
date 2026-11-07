@@ -1280,7 +1280,11 @@ def test_mine_deleted_folders_appends_only_the_missing_folder(tmp_path: Path) ->
 def test_moved_skill_is_not_counted_as_deleted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without --follow, a moved skill leaves its old path in the history; it is not a new skill."""
+    """Without --follow, a moved skill leaves its old path in the history.
+
+    It is not a new skill: its old rows become ``former_folder`` history of the new folder,
+    so the skill keeps its first date (2026-03-01, not the move on 2026-04-01).
+    """
     monkeypatch.setattr("skill_genealogy.git_history.MANY_PATHS_LIMIT", 0)
     origin = tmp_path / "origin"
     _init_repo(origin)
@@ -1294,7 +1298,17 @@ def test_moved_skill_is_not_counted_as_deleted(
     assert result.follow_renames is False
     assert set(changes["skill_folder"]) == {"skills/pdf"}
     assert result.deleted_folders == 0
-    assert result.history_folders_dropped == 1
+    assert result.moved_folders == 1
+    assert result.history_folders_dropped == 0
+    former = changes[changes["history_role"] == "former_folder"]
+    assert set(former["repo_path"]) >= {"old/pdf/SKILL.md"}
+    first = changes.sort_values("commit_seq").iloc[0]
+    assert first["commit_date"].startswith("2026-03-01") and first["commit_seq"] == 1
+    move = changes[changes["subject"] == "move layout"]
+    assert move[["status", "old_repo_path", "repo_path"]].values.tolist() == [
+        ["R", "old/pdf/SKILL.md", "skills/pdf/SKILL.md"]
+    ]
+    assert not changes.duplicated(["skill_folder", "commit", "file_path"]).any()
 
 
 def test_too_many_history_folders_are_skipped(
