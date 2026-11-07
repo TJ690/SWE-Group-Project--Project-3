@@ -31,13 +31,17 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from skill_genealogy.file_helpers import read_parquet, write_parquet
+from skill_genealogy.file_helpers import connect_duckdb, read_parquet, write_parquet
 from skill_genealogy.settings import (
     BLOB_FETCH_BATCH,
+    BLOB_READ_BATCH,
+    DELETED_FOLDERS_MAX,
     DOWNLOAD_TIMEOUT_SECONDS,
-    GIT6_BATCH_FOLDERS,
+    GIT6_MAX_PATHSPECS,
+    HISTORY_DUCKDB_MEMORY_LIMIT,
     MANY_PATHS_LIMIT,
     MAX_SCRIPT_BYTES,
+    PROGRESS_SECONDS,
     SCRIPT_EXTENSIONS,
     SKILL_MD_MAX_BYTES,
     SKIPPED_FOLDERS,
@@ -93,6 +97,9 @@ _CHANGE_COLUMNS = [
     "old_repo_path",
     "history_role",
 ]
+# Merged changes are sorted by these columns, then by every other column,
+# so a second merge writes the same file.
+_CHANGE_SORT = ["repo", "skill_folder", "commit_seq", "file_path", "status", "new_sha"]
 _TEXT_SCHEMA = pa.schema([("sha", pa.string()), ("text", pa.string())])
 _STATUS_COLUMNS = [
     "repo",
@@ -104,7 +111,12 @@ _STATUS_COLUMNS = [
     "not_ours",
     "after_copy",
     "twin",
+    "history_since",
+    "deleted_folders",
+    "history_folders_dropped",
 ]
+# Git's message when a --shallow-since clone finds no commit after the date.
+_NO_SHALLOW_COMMITS = "no commits selected for shallow requests"
 
 
 class GitError(RuntimeError):
@@ -130,7 +142,13 @@ class RepoResult:
     ``follow_renames`` is false when the repo has more than
     ``MANY_PATHS_LIMIT`` skill folders. ``seconds`` is how long the mine took.
     ``not_ours``, ``after_copy`` and ``twin`` count change rows dropped
-    because another folder was not this skill.
+    because another folder was not this skill. ``history_since`` is the
+    ``--shallow-since`` date the clone used, or None for full history.
+    ``deleted_folders`` counts skill folders found only in the history (their
+    ``SKILL.md`` was gone at HEAD) and mined by their exact path. It is None
+    when the history was not searched (an explicit folder list, or a failure).
+    ``history_folders_dropped`` counts history-only folders that were logged
+    but not kept, because their skill moved or their deletion is not visible.
     """
 
     repo: str
@@ -142,6 +160,9 @@ class RepoResult:
     not_ours: int = 0
     after_copy: int = 0
     twin: int = 0
+    history_since: str | None = None
+    deleted_folders: int | None = None
+    history_folders_dropped: int | None = None
 
 
 def run_git(
@@ -177,18 +198,46 @@ def clone_history_only(
     target_dir: Path,
     timeout_seconds: int,
     url: str | None = None,
+    since: str | None = None,
 ) -> None:
     """Clone the default branch without file contents or a checkout.
 
+    ``since`` (``YYYY-MM-DD``) keeps only commits from that date on
+    (``--shallow-since``), then fetches one more commit back (``--deepen=1``).
+    Git shows the oldest commit of a shallow clone as adding every file, so
+    that extra commit is the one with false rows, and the log readers drop
+    it. Every commit on or after ``since`` keeps its true changes. When no
+    commit is that new, only the newest commit is cloned and the logs keep
+    nothing.
+
     Inputs: ``repo`` is ``owner/repo``. ``target_dir`` is the new clone folder.
     ``timeout_seconds`` limits the clone. ``url`` replaces the GitHub address
-    (tests pass a ``file://`` URL).
+    (tests pass a ``file://`` URL). ``since`` is None for the whole history.
     Outputs: the clone folder. Raises ``GitError`` when clone fails.
     """
     remote = url or f"https://github.com/{repo}.git"
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    # Git command GIT1, see CODE_FLOW.md
-    run_git(_clone_args(remote, target_dir), target_dir.parent, timeout_seconds)
+    if since is None:
+        # Git command GIT1, see CODE_FLOW.md
+        run_git(_clone_args(remote, target_dir), target_dir.parent, timeout_seconds)
+        return
+    try:
+        # Git command GIT1 with --shallow-since, see CODE_FLOW.md
+        run_git(
+            _clone_args(remote, target_dir, [f"--shallow-since={since}"]),
+            target_dir.parent,
+            timeout_seconds,
+        )
+    except GitError as error:
+        if error.timed_out or _NO_SHALLOW_COMMITS not in error.stderr:
+            raise
+        _delete_tree(target_dir)
+        # Git command GIT9, see CODE_FLOW.md
+        run_git(_head_clone_args(remote, target_dir), target_dir.parent, timeout_seconds)
+        return
+    if _shallow_boundary(target_dir):
+        # Git command GIT1b, see CODE_FLOW.md
+        run_git(_deepen_args(remote), target_dir, timeout_seconds)
 
 
 def clone_head_tree_only(
@@ -211,6 +260,77 @@ def clone_head_tree_only(
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     # Git command GIT9, see CODE_FLOW.md
     run_git(_head_clone_args(remote, target_dir), target_dir.parent, timeout_seconds)
+
+
+def clone_commit_tree_only(
+    repo: str,
+    target_dir: Path,
+    commit: str,
+    timeout_seconds: int,
+    url: str | None = None,
+) -> None:
+    """Download one exact commit and its trees, without file contents or history.
+
+    Like GIT9, but for a commit chosen by id instead of the newest one, so a
+    later stage reads the same snapshot that stage 3 mined. Git marks the new
+    repo as a partial clone, so ``read_blob_texts`` can fetch single files.
+
+    Inputs: ``repo`` is ``owner/repo``. ``target_dir`` is the new folder.
+    ``commit`` is a full commit id. ``timeout_seconds`` limits each git command.
+    ``url`` replaces the GitHub address (tests pass a ``file://`` URL).
+    Outputs: the folder. Raises ``GitError`` when the commit cannot be fetched,
+    for example after a force push removed it.
+    """
+    remote = url or f"https://github.com/{repo}.git"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    run_git(["init", "--quiet", str(target_dir)], target_dir.parent, timeout_seconds)
+    run_git(["remote", "add", "origin", remote], target_dir, timeout_seconds)
+    allow_file = ["-c", "protocol.file.allow=always"] if remote.startswith("file:") else []
+    # Git command GIT10, see CODE_FLOW.md
+    run_git(
+        [
+            *allow_file,
+            "fetch",
+            "--quiet",
+            "--depth",
+            "1",
+            "--filter=blob:none",
+            "origin",
+            commit,
+        ],
+        target_dir,
+        timeout_seconds,
+    )
+
+
+def list_files_at_commit(clone_dir: Path, commit: str, folders: list[str]) -> list[dict]:
+    """List the files directly inside ``folders`` at one commit (not recursive).
+
+    ``""`` is the repo root. Subfolders are not listed and file contents are
+    not downloaded.
+
+    Inputs: ``clone_dir`` (a clone that has ``commit``), the full commit id,
+    and folder names such as ``["", ".github", "docs"]``.
+    Outputs: one dict per entry with ``path``, ``mode``, ``type`` and ``sha``,
+    in git's order. A folder that does not exist adds nothing.
+    """
+    specs = [f"{folder.strip('/')}/" if folder.strip("/") else "." for folder in folders]
+    # Git command GIT11, see CODE_FLOW.md
+    text = run_git(
+        ["ls-tree", "--full-tree", commit, "--", *specs],
+        clone_dir,
+        DOWNLOAD_TIMEOUT_SECONDS,
+    )
+    entries: list[dict] = []
+    for line in text.splitlines():
+        meta, separator, path = line.partition("\t")
+        parts = meta.split()
+        if not separator or len(parts) != 3:
+            continue
+        entries.append(
+            {"path": _unquote_path(path), "mode": parts[0], "type": parts[1], "sha": parts[2]}
+        )
+    return entries
 
 
 def classify_git_error(error: GitError) -> tuple[str, str]:
@@ -373,6 +493,7 @@ def mine_one_repo(
     folders: list[str] | None,
     timeout_seconds: int,
     url: str | None = None,
+    since: str | None = None,
 ) -> tuple[RepoResult, pd.DataFrame, pd.DataFrame]:
     """Clone one repo, read its skill folders, and delete the clone.
 
@@ -382,14 +503,15 @@ def mine_one_repo(
     Inputs: ``repo`` is ``owner/repo``. ``work_dir`` holds the temporary clone.
     ``folders`` None means every skill folder at HEAD. A list mines only those
     (stage 6 passes the copied skill's folder). ``timeout_seconds`` limits each
-    git command. ``url`` replaces the GitHub address in tests.
+    git command. ``url`` replaces the GitHub address in tests. ``since``
+    (``YYYY-MM-DD``) keeps only history from that date; None keeps all of it.
     Outputs: the status, the changes frame, and the texts frame (``sha``, ``text``).
     """
     started = time.perf_counter()
     clone_dir = work_dir / _shard_stem(repo)
     try:
         result, changes, texts = _mine_checked(
-            repo, clone_dir, folders, timeout_seconds, url
+            repo, clone_dir, folders, timeout_seconds, url, since
         )
     except GitError as error:
         result = _result_from_git_error(repo, error)
@@ -400,6 +522,7 @@ def mine_one_repo(
     finally:
         _delete_tree(clone_dir)
     result.seconds = time.perf_counter() - started
+    result.history_since = since
     return result, changes, texts
 
 
@@ -435,10 +558,12 @@ def merge_shards(
 ) -> dict[str, int]:
     """Join every finished shard into three tables.
 
-    Only a repo whose ``.status.json`` exists is included. Texts are written
-    with pyarrow in row groups of 1,000 so one giant copy is not held as a
-    single parquet row group. Each blob sha is written once. The ``texts``
-    count is the number of distinct shas.
+    Only a repo whose ``.status.json`` exists is included. Changes are
+    joined and sorted in DuckDB, which spills to disk, so millions of rows
+    are never held in pandas. Texts are written with pyarrow in row groups
+    of 1,000 so one giant copy is not held as a single parquet row group.
+    Each blob sha is written once. The ``texts`` count is the number of
+    distinct shas.
 
     Inputs: ``shard_dir`` and the three output paths.
     Outputs: those files, and a dict ``changes``, ``texts``, ``status`` with
@@ -446,24 +571,90 @@ def merge_shards(
     writes the same rows.
     """
     status_paths = sorted(shard_dir.glob("*.status.json"))
-    change_frames: list[pd.DataFrame] = []
+    change_paths: list[Path] = []
     status_rows: list[dict] = []
     text_paths: list[Path] = []
     for status_path in status_paths:
         stem = status_path.name[: -len(".status.json")]
         status_rows.append(json.loads(status_path.read_text(encoding="utf-8")))
-        change_frames.append(read_parquet(shard_dir / f"{stem}.changes.parquet"))
+        change_paths.append(shard_dir / f"{stem}.changes.parquet")
         text_paths.append(shard_dir / f"{stem}.texts.parquet")
-    changes = _combined_changes(change_frames)
+    change_rows = _write_merged_changes(change_paths, out_changes)
     status = _status_frame(status_rows)
-    write_parquet(
-        changes,
-        out_changes,
-        sort_by=["repo", "skill_folder", "commit_seq", "file_path", "status", "new_sha"],
-    )
     text_rows = _write_merged_texts(text_paths, out_texts)
     write_parquet(status, out_status, sort_by=["repo"])
-    return {"changes": len(changes), "texts": text_rows, "status": len(status)}
+    return {"changes": change_rows, "texts": text_rows, "status": len(status)}
+
+
+def connect_history_duckdb(temp_root: Path):
+    """DuckDB for the stage 3 merge and summary.
+
+    The memory cap is ``HISTORY_DUCKDB_MEMORY_LIMIT``. Above it, DuckDB
+    spills to ``temp_root/duckdb_tmp``. The caller closes the connection.
+    """
+    con = connect_duckdb()
+    temp = temp_root / "duckdb_tmp"
+    temp.mkdir(parents=True, exist_ok=True)
+    con.execute(f"SET memory_limit = '{HISTORY_DUCKDB_MEMORY_LIMIT}'")
+    con.execute(f"SET temp_directory = {_sql_text(str(temp))}")
+    return con
+
+
+def _write_merged_changes(paths: list[Path], out_changes: Path) -> int:
+    """Join shard change files into one sorted parquet. Return the row count.
+
+    Shards with no rows are skipped, so their untyped empty columns cannot
+    clash with real ones. The file is written beside the output and then
+    moved into place, so a failed merge keeps the old file.
+    """
+    filled = [path for path in paths if pq.ParquetFile(path).metadata.num_rows > 0]
+    out_changes.parent.mkdir(parents=True, exist_ok=True)
+    if not filled:
+        write_parquet(_empty_changes(), out_changes)
+        return 0
+    names: list[str] = []
+    for path in filled:
+        for name in pq.read_schema(path).names:
+            if name not in names:
+                names.append(name)
+    columns = [name for name in _CHANGE_COLUMNS if name in names]
+    columns += [name for name in names if name not in columns]
+    order = [name for name in _CHANGE_SORT if name in columns]
+    order += [name for name in columns if name not in order]
+    files = "[" + ", ".join(_sql_text(str(path)) for path in filled) + "]"
+    temporary = out_changes.with_name(out_changes.stem + ".merging.parquet")
+    con = connect_history_duckdb(out_changes.parent)
+    try:
+        con.execute(
+            f"""
+            COPY (
+                SELECT {", ".join(_sql_name(name) for name in columns)}
+                FROM read_parquet({files}, union_by_name = true)
+                ORDER BY {", ".join(_sql_name(name) for name in order)}
+            ) TO {_sql_text(str(temporary))} (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+        )
+        counted = con.execute(
+            f"SELECT count(*) FROM read_parquet({_sql_text(str(temporary))})"
+        ).fetchone()
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        con.close()
+    temporary.replace(out_changes)
+    return int(counted[0]) if counted else 0
+
+
+def _sql_text(value: str) -> str:
+    """A single-quoted SQL string, with quotes escaped."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_name(name: str) -> str:
+    """A double-quoted SQL column name (``commit`` is a keyword)."""
+    return '"' + name.replace('"', '""') + '"'
+
 
 
 def _mine_checked(
@@ -472,10 +663,11 @@ def _mine_checked(
     folders: list[str] | None,
     timeout_seconds: int,
     url: str | None,
+    since: str | None = None,
 ) -> tuple[RepoResult, pd.DataFrame, pd.DataFrame]:
     """Clone and read. Raises ``GitError``; ``mine_one_repo`` turns that into a status."""
     _delete_tree(clone_dir)
-    clone_history_only(repo, clone_dir, timeout_seconds, url)
+    clone_history_only(repo, clone_dir, timeout_seconds, url, since)
     head = _head_commit(clone_dir, timeout_seconds)
     if head is None:
         empty = RepoResult(
@@ -486,8 +678,24 @@ def _mine_checked(
     follow = len(chosen) <= MANY_PATHS_LIMIT
     grouped, drops = _grouped_logs(clone_dir, chosen, follow, timeout_seconds)
     changes = _changes_frame(repo, grouped)
+    # The row dicts can be millions; free them before the texts are read.
+    del grouped
+    kept_deleted: int | None = None
+    dropped: int | None = None
+    note = ""
+    if folders is None:
+        deleted = deleted_skill_folders(
+            _history_skill_md_paths(clone_dir, timeout_seconds),
+            set(chosen),
+            _covered_skill_folders(changes),
+        )
+        extra, kept_deleted, dropped, note = _deleted_folder_rows(
+            repo, clone_dir, changes, deleted, timeout_seconds
+        )
+        if not extra.empty:
+            changes = extra if changes.empty else pd.concat([changes, extra], ignore_index=True)
     texts, used_lazy = _texts_for_changes(clone_dir, changes, timeout_seconds)
-    message = _LAZY_FETCH_MESSAGE if used_lazy else ""
+    message = "; ".join(part for part in (_LAZY_FETCH_MESSAGE if used_lazy else "", note) if part)
     result = RepoResult(
         repo,
         "ok",
@@ -498,8 +706,292 @@ def _mine_checked(
         not_ours=drops["not_ours"],
         after_copy=drops["after_copy"],
         twin=drops["twin"],
+        deleted_folders=kept_deleted,
+        history_folders_dropped=dropped,
     )
     return result, changes, texts
+
+
+def deleted_skill_folders(
+    history_paths: list[str],
+    mined_folders: set[str],
+    covered_folders: set[str],
+) -> list[str]:
+    """Skill folders that held a ``SKILL.md`` at some point but were not mined.
+
+    Rule: the parent folder of every ``SKILL.md`` path in the history (GIT12),
+    minus folders already mined, folders inside a mined folder (their files
+    are already in that folder's rows), folders whose history is already kept
+    under a later name (``covered_folders``: parents of the ``SKILL.md`` paths
+    in the mined rows), vendored folders, and the repo root. A deleted root
+    skill would mean logging every file of the repo, so it is left out.
+
+    Example:
+    >>> history = ["skills/pdf/SKILL.md", "skills/old/SKILL.md", "skills/pdf/cn/SKILL.md",
+    ...            "skills/pdf-v1/SKILL.md", "node_modules/x/SKILL.md", "SKILL.md"]
+    >>> deleted_skill_folders(history, {"skills/pdf"}, {"skills/pdf", "skills/pdf-v1"})
+    ['skills/old']
+    """
+    found: list[str] = []
+    for path in history_paths:
+        if not _is_skill_md_name(path):
+            continue
+        folder = _parent_folder(path)
+        if folder == "." or folder in mined_folders or folder in covered_folders:
+            continue
+        if _is_skipped(folder + "/x") or _ancestors(folder) & mined_folders:
+            continue
+        found.append(folder)
+    return sorted(set(found))
+
+
+def mine_deleted_folders(
+    repo: str,
+    work_dir: Path,
+    shard_changes: pd.DataFrame,
+    timeout_seconds: int,
+    url: str | None = None,
+) -> tuple[RepoResult, pd.DataFrame, pd.DataFrame]:
+    """Mine only the deleted skill folders of a repo that already has a shard.
+
+    The repo is cloned as in stage 3. ``deleted_skill_folders`` compares the
+    history with the shard's own rows, and only the folders it returns are
+    logged, by their exact path without ``--follow`` (a deleted ``SKILL.md`` is
+    not at HEAD, so it cannot be followed). Never raises: a failure is a status
+    with two empty frames. The clone is deleted.
+
+    Inputs: ``repo``, ``work_dir`` for the clone, the repo's current shard
+    changes, ``timeout_seconds`` per git command, ``url`` for tests.
+    Outputs: a ``RepoResult`` (``deleted_folders`` is the folder count) and
+    the new change and text rows, which the caller appends to the shard.
+    """
+    started = time.perf_counter()
+    clone_dir = work_dir / _shard_stem(repo)
+    try:
+        _delete_tree(clone_dir)
+        clone_history_only(repo, clone_dir, timeout_seconds, url)
+        head = _head_commit(clone_dir, timeout_seconds)
+        mined = set(shard_changes["skill_folder"].astype(str)) if len(shard_changes) else set()
+        deleted = deleted_skill_folders(
+            _history_skill_md_paths(clone_dir, timeout_seconds),
+            mined,
+            _covered_skill_folders(shard_changes),
+        )
+        changes, kept, dropped, note = _deleted_folder_rows(
+            repo, clone_dir, shard_changes, deleted, timeout_seconds
+        )
+        texts, _used_lazy = _texts_for_changes(clone_dir, changes, timeout_seconds)
+        result = RepoResult(
+            repo, "ok", note, head, 0.0, False,
+            deleted_folders=kept, history_folders_dropped=dropped,
+        )
+    except GitError as error:
+        result = _result_from_git_error(repo, error)
+        changes, texts = _empty_changes(), _empty_texts()
+    except Exception as error:
+        result = RepoResult(repo, "error", _last_line(str(error)), None, 0.0, False)
+        changes, texts = _empty_changes(), _empty_texts()
+    finally:
+        _delete_tree(clone_dir)
+    result.seconds = time.perf_counter() - started
+    return result, changes, texts
+
+
+def append_to_repo_shard(
+    shard_dir: Path,
+    repo: str,
+    changes: pd.DataFrame,
+    texts: pd.DataFrame,
+    deleted_folders: int | None,
+    dropped_folders: int | None = None,
+    message: str = "",
+) -> None:
+    """Add deleted-folder rows to a finished shard and mark it as checked.
+
+    The new change rows are added to the shard's changes, and new texts are
+    added once per sha. The status file keeps its status and gets
+    ``deleted_folders`` and ``deleted_folders_checked: true``. It is written
+    last, so a crash leaves the old shard, which is checked again next time.
+
+    Inputs: ``shard_dir``, ``repo``, the new rows from ``mine_deleted_folders``,
+    the kept and dropped folder counts, and a note (for example a skip reason).
+    Outputs: the three shard files, rewritten.
+    """
+    stem = _shard_stem(repo)
+    changes_path = shard_dir / f"{stem}.changes.parquet"
+    texts_path = shard_dir / f"{stem}.texts.parquet"
+    status_path = shard_dir / f"{stem}.status.json"
+    if len(changes):
+        old = read_parquet(changes_path)
+        joined = pd.concat([frame for frame in (old, changes) if len(frame)], ignore_index=True)
+        write_parquet(joined, changes_path)
+    if len(texts):
+        old_texts = pq.read_table(texts_path, schema=_TEXT_SCHEMA).to_pandas()
+        all_texts = pd.concat([old_texts, texts], ignore_index=True)
+        all_texts = all_texts.drop_duplicates("sha").sort_values("sha", kind="mergesort")
+        _write_text_file(texts_path, all_texts.reset_index(drop=True))
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["deleted_folders"] = None if deleted_folders is None else int(deleted_folders)
+    status["history_folders_dropped"] = None if dropped_folders is None else int(dropped_folders)
+    status["deleted_folders_message"] = message
+    status["deleted_folders_checked"] = True
+    temporary = status_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(status_path)
+
+
+def list_skill_md_paths_in_history(clone_dir: Path) -> list[str]:
+    """Every ``SKILL.md`` path that existed in any commit of the clone (GIT12).
+
+    Deleted and renamed skills are included. Inputs: a history clone.
+    Outputs: repo-relative paths, sorted, each once.
+    """
+    return _history_skill_md_paths(clone_dir, DOWNLOAD_TIMEOUT_SECONDS)
+
+
+def _history_skill_md_paths(clone_dir: Path, timeout_seconds: int) -> list[str]:
+    """GIT12. Paths named skill.md in any case, from every commit's file list."""
+    # Git command GIT12, see CODE_FLOW.md
+    text = run_git(
+        [
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            "--",
+            ":(icase,glob)**/skill.md",
+        ],
+        clone_dir,
+        timeout_seconds,
+    )
+    return sorted({_unquote_path(line.strip()) for line in text.splitlines() if line.strip()})
+
+
+def _covered_skill_folders(changes: pd.DataFrame) -> set[str]:
+    """Folders of the ``SKILL.md`` paths already in the rows (new and old names)."""
+    if changes.empty:
+        return set()
+    skill = changes.loc[changes["is_skill_md"].fillna(False).astype(bool)]
+    found: set[str] = set()
+    for column in ("repo_path", "old_repo_path"):
+        if column not in skill.columns:
+            continue
+        for path in skill[column].astype(str):
+            if path and path not in {"nan", "None"}:
+                found.add(_parent_folder(path))
+    return found
+
+
+def keep_deleted_folders(
+    extra: pd.DataFrame,
+    base: pd.DataFrame,
+    created_before: str | None = None,
+) -> tuple[pd.DataFrame, int, int]:
+    """Keep the history-only folders that are really deleted skills.
+
+    Rule, per folder in ``extra``:
+    1. moved: one of its ``SKILL.md`` versions (blob ids) is also a ``SKILL.md``
+       version in ``base`` (the folders that still exist). Its history is
+       already kept under the new folder, so it is dropped.
+    2. not visibly deleted: its newest ``SKILL.md`` row is not a delete (``D``)
+       or a rename out of the folder. The folder is gone but git shows no
+       delete (for example a merge or a large restructure), so it is dropped.
+    3. ``created_before`` (an ISO time): a folder whose first row is later is
+       dropped, so a backfill does not add skills newer than the snapshot.
+
+    Inputs: the new rows, the existing rows of the repo, an optional time.
+    Outputs: the kept rows, the kept folder count, the dropped folder count.
+
+    Example:
+    >>> base = pd.DataFrame({"skill_folder": ["s/new"], "is_skill_md": [True],
+    ...     "old_sha": ["0" * 40], "new_sha": ["b" * 40], "status": ["A"],
+    ...     "commit_seq": [1], "repo_path": ["s/new/SKILL.md"],
+    ...     "commit_date": ["2026-03-01T00:00:00Z"]})
+    >>> extra = pd.DataFrame({"skill_folder": ["s/old", "s/old", "s/gone", "s/gone"],
+    ...     "is_skill_md": [True] * 4,
+    ...     "old_sha": ["0" * 40, "b" * 40, "0" * 40, "c" * 40],
+    ...     "new_sha": ["b" * 40, "0" * 40, "c" * 40, "0" * 40],
+    ...     "status": ["A", "D", "A", "D"], "commit_seq": [1, 2, 1, 2],
+    ...     "repo_path": ["s/old/SKILL.md"] * 2 + ["s/gone/SKILL.md"] * 2,
+    ...     "commit_date": ["2026-01-01T00:00:00Z"] * 4})
+    >>> rows, kept, dropped = keep_deleted_folders(extra, base)
+    >>> sorted(set(rows["skill_folder"])), kept, dropped
+    (['s/gone'], 1, 1)
+    """
+    if extra.empty:
+        return extra, 0, 0
+    base_blobs = _skill_blobs(base)
+    keep: list[str] = []
+    folders = list(dict.fromkeys(extra["skill_folder"].astype(str)))
+    for folder, rows in extra.groupby(extra["skill_folder"].astype(str), sort=False):
+        skill = rows.loc[rows["is_skill_md"].fillna(False).astype(bool)]
+        if skill.empty or _skill_blobs(skill) & base_blobs:
+            continue
+        if not _ends_deleted(str(folder), skill):
+            continue
+        if created_before is not None and _first_commit_time(rows) > pd.Timestamp(created_before):
+            continue
+        keep.append(str(folder))
+    kept_rows = extra.loc[extra["skill_folder"].astype(str).isin(set(keep))]
+    return kept_rows.reset_index(drop=True), len(keep), len(folders) - len(keep)
+
+
+def _first_commit_time(rows: pd.DataFrame) -> pd.Timestamp:
+    """Earliest commit time of ``rows`` in UTC. Dates carry their own offsets (``+09:00``)."""
+    times = pd.to_datetime(rows["commit_date"], utc=True, errors="coerce", format="ISO8601")
+    return times.min()
+
+
+def _skill_blobs(changes: pd.DataFrame) -> set[str]:
+    """Real blob ids of the ``SKILL.md`` rows (old and new side)."""
+    if changes.empty:
+        return set()
+    skill = changes.loc[changes["is_skill_md"].fillna(False).astype(bool)]
+    found: set[str] = set()
+    for column in ("old_sha", "new_sha"):
+        for sha in skill[column].astype(str):
+            found.update(_real_shas(sha))
+    return found
+
+
+def _ends_deleted(folder: str, skill_rows: pd.DataFrame) -> bool:
+    """True when the newest ``SKILL.md`` change deletes it or renames it out of ``folder``."""
+    newest = skill_rows.loc[skill_rows["commit_seq"] == skill_rows["commit_seq"].max()]
+    prefix = folder.strip("/") + "/"
+    for row in newest.to_dict("records"):
+        if row["status"] == "D":
+            return True
+        if row["status"] == "R" and not str(row.get("repo_path") or "").startswith(prefix):
+            return True
+    return False
+
+
+def _deleted_folder_rows(
+    repo: str,
+    clone_dir: Path,
+    base: pd.DataFrame,
+    deleted: list[str],
+    timeout_seconds: int,
+) -> tuple[pd.DataFrame, int | None, int | None, str]:
+    """Log ``deleted`` folders by exact path (no --follow) and keep the real deletions.
+
+    Returns the kept rows, the kept and dropped folder counts, and a note.
+    More than ``DELETED_FOLDERS_MAX`` candidates are not logged at all: the
+    counts are None and the note says why.
+    """
+    if len(deleted) > DELETED_FOLDERS_MAX:
+        note = (
+            f"skipped {len(deleted)} history-only folders (over {DELETED_FOLDERS_MAX}); "
+            "the layout was rebuilt or moved"
+        )
+        return _empty_changes(), None, None, note
+    if not deleted:
+        return _empty_changes(), 0, 0, ""
+    grouped, _drops = _grouped_logs(clone_dir, deleted, False, timeout_seconds)
+    extra = _changes_frame(repo, grouped)
+    del grouped
+    kept, kept_count, dropped = keep_deleted_folders(extra, base)
+    return kept, kept_count, dropped, ""
 
 
 def _choose_folders(
@@ -519,20 +1011,23 @@ def _grouped_logs(
 ) -> tuple[list[tuple[str, list[dict]]], dict[str, int]]:
     """Pair each skill folder with its rows, and count rows dropped by reason."""
     drops = {"not_ours": 0, "after_copy": 0, "twin": 0}
+    index = _FolderIndex(folders)
     if follow:
         grouped = []
-        for folder in folders:
+        progress = _Progress(clone_dir, "folder", len(folders))
+        for done, folder in enumerate(folders, start=1):
             folder_rows, part = _read_folder_log(
                 clone_dir, folder, True, timeout_seconds
             )
             grouped.append((folder, folder_rows))
             for key in drops:
                 drops[key] += part[key]
+            progress.tick(done)
     else:
         rows = _read_folder_log_many(clone_dir, folders, timeout_seconds)
-        grouped = _split_rows_by_folder(folders, rows)
+        grouped = _split_rows_by_index(folders, index, rows)
     grouped = [
-        (folder, _drop_deeper_skill_rows(folder, folder_rows, folders))
+        (folder, _drop_deeper_skill_rows(folder, folder_rows, index))
         for folder, folder_rows in grouped
     ]
     return grouped, drops
@@ -540,11 +1035,18 @@ def _grouped_logs(
 
 def _split_rows_by_folder(folders: list[str], rows: list[dict]) -> list[tuple[str, list[dict]]]:
     """Give each row to the longest requested folder that contains its new path."""
+    return _split_rows_by_index(folders, _FolderIndex(folders), rows)
+
+
+def _split_rows_by_index(
+    folders: list[str], index: _FolderIndex, rows: list[dict]
+) -> list[tuple[str, list[dict]]]:
+    """``_split_rows_by_folder`` with a prebuilt index of ``folders``."""
     grouped: dict[str, list[dict]] = {folder: [] for folder in folders}
     for row in rows:
-        folder = _folder_for_path(row["path"], folders)
+        folder = index.owner(row["path"])
         if folder is None and row["old_path"]:
-            folder = _folder_for_path(row["old_path"], folders)
+            folder = index.owner(row["old_path"])
         if folder is None:
             continue
         grouped[folder].append(row)
@@ -659,7 +1161,7 @@ def _one_folder_log(clone_dir: Path, folder: str, timeout_seconds: int) -> list[
         timeout_seconds,
         allow_lazy=True,
     )
-    return parse_raw_log(text)
+    return _log_rows(clone_dir, text)
 
 
 def _followed_folder_log(
@@ -675,7 +1177,7 @@ def _followed_folder_log(
         timeout_seconds,
         allow_lazy=True,
     )
-    parsed = parse_raw_log(text)
+    parsed = _log_rows(clone_dir, text)
     parsed, drops = _classify_folder_rows(
         folder, parsed, follow_rows, clone_dir, timeout_seconds
     )
@@ -694,7 +1196,7 @@ def _follow_skill_rows(clone_dir: Path, folder: str, timeout_seconds: int) -> li
             timeout_seconds,
             allow_lazy=True,
         )
-        rows.extend(parse_raw_log(text))
+        rows.extend(_log_rows(clone_dir, text))
     return rows
 
 
@@ -1437,56 +1939,124 @@ def _containing_folder(path: str, folders: list[str]) -> str | None:
 def _read_folder_log_many(
     clone_dir: Path, folders: list[str], timeout_seconds: int
 ) -> list[dict]:
-    """GIT6: one log per batch of folders, no ``--follow``.
+    """GIT6: one log for all folders, no ``--follow``.
 
     The pathspecs go on standard input (``--stdin``). Tens of thousands of
-    folders are more than the 1 MB argument limit of macOS. Git's pathspec
-    matching grows about quadratically with the folder count, so more than
-    ``GIT6_BATCH_FOLDERS`` folders are logged in batches. A folder and the
-    folders inside it share a batch, so each folder's rows come from one log
-    in git's newest-first order. A rename between folders in two batches is
-    a ``D`` in one log and an ``A`` in the other.
+    folders are more than the 1 MB argument limit of macOS. Up to
+    ``GIT6_MAX_PATHSPECS`` folders are logged by name. Git compares every
+    changed entry with every pathspec, so more folders than that are logged
+    through their parent folders (``_covering_pathspecs``), and the rows are
+    then cut back to what a log of the folders themselves shows
+    (``_rows_as_if_exact``): a rename from outside the folders is an add, and
+    a rename out of them is a delete. One log keeps every row in git's
+    newest-first order.
     """
-    cleaned = [_clean_folder(folder) for folder in folders]
-    rows: list[dict] = []
-    for batch in _folder_batches(cleaned, GIT6_BATCH_FOLDERS):
-        pathspecs = [_pathspec(folder) for folder in batch]
-        payload = "".join(f"{spec}\n" for spec in ["--", *pathspecs]).encode("utf-8")
-        # Git command GIT6, see CODE_FLOW.md
-        data = _run_git_bytes(
-            _log_args(follow=False, pathspecs=[], stdin=True),
+    cleaned = _unique([_clean_folder(folder) for folder in folders])
+    if not cleaned:
+        return []
+    covered = len(cleaned) > GIT6_MAX_PATHSPECS
+    pathspecs = (
+        _covering_pathspecs(cleaned, GIT6_MAX_PATHSPECS)
+        if covered
+        else [_pathspec(folder) for folder in cleaned]
+    )
+    started = time.perf_counter()
+    if covered:
+        _print_progress(
             clone_dir,
-            timeout_seconds,
-            payload=payload,
-            allow_lazy=True,
+            f"log {len(cleaned)} folders through {len(pathspecs)} parent pathspecs",
         )
-        rows.extend(parse_raw_log(data.decode("utf-8", "replace")))
+    payload = "".join(f"{spec}\n" for spec in ["--", *pathspecs]).encode("utf-8")
+    # Git command GIT6, see CODE_FLOW.md
+    data = _run_git_bytes(
+        _log_args(follow=False, pathspecs=[], stdin=True),
+        clone_dir,
+        timeout_seconds,
+        payload=payload,
+        allow_lazy=True,
+    )
+    rows = _log_rows(clone_dir, data.decode("utf-8", "replace"))
+    if covered:
+        rows = _rows_as_if_exact(rows, _FolderIndex(cleaned))
+        seconds = time.perf_counter() - started
+        _print_progress(clone_dir, f"log done: {len(rows)} rows in {seconds:.0f}s")
     return rows
 
 
-def _folder_batches(folders: list[str], size: int) -> list[list[str]]:
-    """Sorted folders in batches of about ``size``. Nested folders stay with their parent.
+def _covering_pathspecs(folders: list[str], limit: int) -> list[str]:
+    """At most ``limit`` parent folders that hold every folder in ``folders``.
 
-    A batch can be larger than ``size`` when one folder holds many others.
-    The repo root holds every folder, so it puts all of them in one batch.
+    Folders are cut to fewer path parts until the set is small enough. When
+    even the top-level names are too many, or a folder is the repo root, the
+    pathspec is ``.`` (the whole repo).
+
+    Example:
+    >>> _covering_pathspecs(["skills/a/x", "skills/a/y", "skills/b/z"], 2)
+    ['skills/a/', 'skills/b/']
+    >>> _covering_pathspecs(["skills/a/x", "skills/b/z", "tools/t"], 2)
+    ['skills/', 'tools/']
+    >>> _covering_pathspecs(["a", "b", "c"], 2)
+    ['.']
     """
-    if "." in folders:
-        return [_unique(folders)] if folders else []
-    batches: list[list[str]] = []
-    current: list[str] = []
-    top = ""
-    # Sorting on "folder/" keeps a folder's subtree together ("a-b" sorts before "a/").
-    for folder in sorted(set(folders), key=lambda name: name + "/"):
-        nested = bool(top) and folder.startswith(top + "/")
-        if not nested:
-            if len(current) >= size:
-                batches.append(current)
-                current = []
-            top = folder
-        current.append(folder)
-    if current:
-        batches.append(current)
-    return batches
+    if any(folder in {"", "."} for folder in folders):
+        return ["."]
+    parts = [folder.split("/") for folder in folders]
+    depth = max(len(bits) for bits in parts)
+    while depth >= 1:
+        cut = {"/".join(bits[:depth]) for bits in parts}
+        if len(cut) <= limit:
+            kept = [
+                folder
+                for folder in sorted(cut)
+                if not any(folder.startswith(other + "/") for other in _ancestors(folder) & cut)
+            ]
+            return [_pathspec(folder) for folder in kept]
+        depth -= 1
+    return ["."]
+
+
+def _ancestors(folder: str) -> set[str]:
+    """Every parent folder of ``folder``: ``a/b/c`` gives ``a`` and ``a/b``."""
+    bits = folder.split("/")
+    return {"/".join(bits[:size]) for size in range(1, len(bits))}
+
+
+def _rows_as_if_exact(rows: list[dict], index: _FolderIndex) -> list[dict]:
+    """Keep the rows a log of the folders themselves would print.
+
+    A log through parent folders also sees files beside the skill folders.
+    Rows wholly outside every folder are dropped. A rename (or copy) from
+    outside into a folder becomes an add. A rename from a folder to outside
+    becomes a delete; a copy to outside is dropped, since the source did not
+    change. Inexact rename detection can still differ, because git stops
+    looking for edited renames when a commit has too many files.
+    """
+    kept: list[dict] = []
+    for row in rows:
+        new_inside = index.owner(row["path"]) is not None
+        if row["status"] not in {"R", "C"} or not row["old_path"]:
+            if new_inside:
+                kept.append(row)
+            continue
+        old_inside = index.owner(row["old_path"]) is not None
+        if new_inside and old_inside:
+            kept.append(row)
+        elif new_inside:
+            kept.append(
+                {**row, "status": "A", "old_path": "", "old_sha": _ZERO_SHA, "old_mode": "000000"}
+            )
+        elif old_inside and row["status"] == "R":
+            kept.append(
+                {
+                    **row,
+                    "status": "D",
+                    "path": row["old_path"],
+                    "old_path": "",
+                    "new_sha": _ZERO_SHA,
+                    "new_mode": "000000",
+                }
+            )
+    return kept
 
 
 def _skill_files_in_folder(clone_dir: Path, folder: str, timeout_seconds: int) -> list[str]:
@@ -1573,12 +2143,15 @@ def _read_blob_texts(
         return {}, False
     missing = _missing_blob_shas(clone_dir, wanted, timeout_seconds)
     lazy: list[str] = []
-    for start in range(0, len(missing), BLOB_FETCH_BATCH):
+    batches = range(0, len(missing), BLOB_FETCH_BATCH)
+    progress = _Progress(clone_dir, f"texts batch (of {len(missing)} blobs)", len(batches))
+    for done, start in enumerate(batches, start=1):
         batch = missing[start : start + BLOB_FETCH_BATCH]
         try:
             _fetch_blob_batch(clone_dir, batch, timeout_seconds)
         except GitError:
             lazy.extend(batch)
+        progress.tick(done)
     still_lazy = set(lazy)
     ready = [sha for sha in wanted if sha not in still_lazy]
     texts = _texts_from_cat_file(clone_dir, ready, max_bytes, timeout_seconds, allow_lazy=False)
@@ -1626,15 +2199,21 @@ def _texts_from_cat_file(
         chosen = _shas_within_size(clone_dir, shas, max_bytes, timeout_seconds)
     if not chosen:
         return {}
-    # Git command GIT8, see CODE_FLOW.md
-    data = _run_git_bytes(
-        ["cat-file", "--batch"],
-        clone_dir,
-        timeout_seconds,
-        payload=("\n".join(chosen) + "\n").encode("ascii"),
-        allow_lazy=allow_lazy,
-    )
-    return _parse_cat_file_batch(data, max_bytes)
+    found: dict[str, str] = {}
+    # Read in chunks so one huge cat-file output is never held in memory.
+    for start in range(0, len(chosen), BLOB_READ_BATCH):
+        part = chosen[start : start + BLOB_READ_BATCH]
+        # Git command GIT8, see CODE_FLOW.md
+        data = _run_git_bytes(
+            ["cat-file", "--batch"],
+            clone_dir,
+            timeout_seconds,
+            payload=("\n".join(part) + "\n").encode("ascii"),
+            allow_lazy=allow_lazy,
+        )
+        found.update(_parse_cat_file_batch(data, max_bytes))
+        del data
+    return found
 
 
 def _missing_blob_shas(clone_dir: Path, shas: list[str], timeout_seconds: int) -> list[str]:
@@ -1835,19 +2414,59 @@ def _log_args(follow: bool, pathspecs: list[str], stdin: bool = False) -> list[s
     return args
 
 
-def _clone_args(remote: str, target_dir: Path) -> list[str]:
-    """GIT1. A ``file://`` URL also allows the file protocol, which tests need."""
+def _clone_args(
+    remote: str, target_dir: Path, extra: list[str] | None = None
+) -> list[str]:
+    """GIT1. A ``file://`` URL also allows the file protocol, which tests need.
+
+    ``extra`` adds flags before the URL, such as ``--shallow-since``.
+    """
     args = [
         "clone",
         "--filter=blob:none",
         "--no-checkout",
         "--single-branch",
+        *(extra or []),
         remote,
         str(target_dir),
     ]
     if remote.startswith("file:"):
         return ["-c", "protocol.file.allow=always", *args]
     return args
+
+
+def _deepen_args(remote: str) -> list[str]:
+    """GIT1b. Fetch one more commit behind the shallow boundary.
+
+    The clone's own partial-clone filter still applies, so no file contents
+    are downloaded.
+    """
+    args = ["fetch", "--quiet", "--deepen=1", "origin"]
+    if remote.startswith("file:"):
+        return ["-c", "protocol.file.allow=always", *args]
+    return args
+
+
+def _shallow_boundary(clone_dir: Path) -> frozenset[str]:
+    """Commits listed in ``.git/shallow``. Empty for a clone with full history.
+
+    Git shows each of these as adding every file it holds, because their
+    parents were not downloaded. Their log rows are false and are dropped.
+    """
+    path = clone_dir / ".git" / "shallow"
+    if not path.is_file():
+        return frozenset()
+    lines = path.read_text(encoding="utf-8").split()
+    return frozenset(line for line in lines if line)
+
+
+def _log_rows(clone_dir: Path, text: str) -> list[dict]:
+    """``parse_raw_log`` without the rows of shallow-boundary commits."""
+    rows = parse_raw_log(text)
+    boundary = _shallow_boundary(clone_dir)
+    if not boundary:
+        return rows
+    return [row for row in rows if row["commit"] not in boundary]
 
 
 def _head_clone_args(remote: str, target_dir: Path) -> list[str]:
@@ -2014,20 +2633,20 @@ def _historical_skill_folders(folder: str, rows: list[dict]) -> set[str]:
 
 
 def _drop_deeper_skill_rows(
-    folder: str, rows: list[dict], folders: list[str]
+    folder: str, rows: list[dict], index: _FolderIndex
 ) -> list[dict]:
     """Drop rows that belong to a chosen skill folder deeper than ``folder``."""
     kept: list[dict] = []
     for row in rows:
-        if _owned_by_deeper_skill(row["path"], folder, folders):
+        if _owned_by_deeper_skill(row["path"], folder, index):
             continue
-        if row["old_path"] and _owned_by_deeper_skill(row["old_path"], folder, folders):
+        if row["old_path"] and _owned_by_deeper_skill(row["old_path"], folder, index):
             continue
         kept.append(row)
     return kept
 
 
-def _owned_by_deeper_skill(path: str, folder: str, folders: list[str]) -> bool:
+def _owned_by_deeper_skill(path: str, folder: str, index: _FolderIndex) -> bool:
     """True when the longest chosen folder for ``path`` is deeper than ``folder``.
 
     A historical path whose parent is not a chosen folder is kept. That is
@@ -2035,7 +2654,7 @@ def _owned_by_deeper_skill(path: str, folder: str, folders: list[str]) -> bool:
     """
     if not path:
         return False
-    owner = _folder_for_path(path, folders)
+    owner = index.owner(path)
     if owner is None or owner == folder:
         return False
     if folder in {"", "."}:
@@ -2106,20 +2725,75 @@ def _relative_to_folders(path: str, folders: list[str]) -> str:
 
 def _folder_for_path(path: str, folders: list[str]) -> str | None:
     """The requested folder that contains ``path``, preferring the longest match."""
-    best: str | None = None
-    best_length = -1
-    for folder in folders:
-        if folder in {"", "."}:
-            continue
-        prefix = folder.strip("/") + "/"
-        if path.startswith(prefix) and len(prefix) > best_length:
-            best = folder
-            best_length = len(prefix)
-    if best is not None:
-        return best
-    if "." in folders or "" in folders:
-        return "."
-    return None
+    return _FolderIndex(folders).owner(path)
+
+
+class _FolderIndex:
+    """Find the longest requested folder that holds a path.
+
+    Build it once per repo. ``owner`` walks the path's parent folders, so a
+    lookup costs the path depth, not the number of folders.
+
+    Example:
+    >>> index = _FolderIndex(["skills/pdf", "skills/pdf/cn", "."])
+    >>> index.owner("skills/pdf/cn/SKILL.md"), index.owner("skills/pdf/a.py")
+    ('skills/pdf/cn', 'skills/pdf')
+    >>> index.owner("README.md")
+    '.'
+    """
+
+    def __init__(self, folders: list[str]) -> None:
+        self._by_name: dict[str, str] = {}
+        self._root: str | None = None
+        for folder in folders:
+            if folder in {"", "."}:
+                if self._root is None:
+                    self._root = "."
+                continue
+            self._by_name.setdefault(folder.strip("/"), folder)
+
+    def owner(self, path: str) -> str | None:
+        """The requested folder for ``path``, ``.`` for a root skill, or None."""
+        bits = path.split("/")
+        for size in range(len(bits) - 1, 0, -1):
+            found = self._by_name.get("/".join(bits[:size]))
+            if found is not None:
+                return found
+        return self._root
+
+
+class _Progress:
+    """Print ``progress <repo> <step> <done>/<total> <seconds>s`` for a long step.
+
+    Nothing is printed for a step with one item. Otherwise a line is printed
+    at most every ``PROGRESS_SECONDS`` and once more at the end, so a log of
+    thousands of repos stays short.
+    """
+
+    def __init__(self, clone_dir: Path, step: str, total: int) -> None:
+        self._clone_dir = clone_dir
+        self._step = step
+        self._total = total
+        self._started = time.perf_counter()
+        self._last = self._started
+
+    def tick(self, done: int) -> None:
+        """Record that ``done`` of ``total`` items are finished."""
+        if self._total <= 1:
+            return
+        now = time.perf_counter()
+        if done < self._total and now - self._last < PROGRESS_SECONDS:
+            return
+        self._last = now
+        _print_progress(
+            self._clone_dir,
+            f"{self._step} {done}/{self._total} {now - self._started:.0f}s",
+        )
+
+
+def _print_progress(clone_dir: Path, text: str) -> None:
+    """One progress line. The repo name is the clone folder (``owner__repo``)."""
+    print(f"progress {clone_dir.name.replace('__', '/', 1)} {text}", flush=True)
 
 
 def _finish_changes(frame: pd.DataFrame) -> pd.DataFrame:
@@ -2245,9 +2919,15 @@ def _write_text_file(path: Path, frame: pd.DataFrame) -> None:
     """Write a texts parquet with a fixed string schema, sorted by sha."""
     path.parent.mkdir(parents=True, exist_ok=True)
     table = _text_table(frame)
-    if table.num_rows:
+    if table.num_rows and not _sorted_by_sha(table):
         table = table.sort_by("sha")
     pq.write_table(table, path, compression="zstd")
+
+
+def _sorted_by_sha(table: pa.Table) -> bool:
+    """True when ``sha`` is already in order, so the texts need no sorted copy."""
+    shas = table.column("sha").to_pylist()
+    return all(left <= right for left, right in zip(shas, shas[1:], strict=False))
 
 
 def _text_table(frame: pd.DataFrame) -> pa.Table:
@@ -2260,16 +2940,6 @@ def _text_table(frame: pd.DataFrame) -> pa.Table:
     )
 
 
-def _combined_changes(frames: list[pd.DataFrame]) -> pd.DataFrame:
-    """Stack shard change tables. No shards yields the empty column layout."""
-    if not frames:
-        return _empty_changes()
-    stacked = pd.concat(frames, ignore_index=True)
-    if stacked.empty:
-        return _empty_changes()
-    return stacked
-
-
 def _status_frame(rows: list[dict]) -> pd.DataFrame:
     """One row per shard status file, with a stable column order."""
     if not rows:
@@ -2278,7 +2948,7 @@ def _status_frame(rows: list[dict]) -> pd.DataFrame:
     for column in _STATUS_COLUMNS:
         if column not in frame.columns:
             frame[column] = pd.NA
-    for column in ("not_ours", "after_copy", "twin"):
+    for column in ("not_ours", "after_copy", "twin", "deleted_folders", "history_folders_dropped"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0).astype("int64")
     return frame.loc[:, _STATUS_COLUMNS]
 

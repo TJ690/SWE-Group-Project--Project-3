@@ -32,3 +32,16 @@ SELECT * FROM 'src/data/skill_genealogy/repo_roles.parquet';
 -- Stage 2c. The fixed 30-registry sample.
 CREATE OR REPLACE VIEW dev_registries AS
 SELECT * FROM 'src/data/skill_genealogy/dev_registries.parquet';
+
+-- Stage 3. One row per file change in a registry skill folder.
+-- A --dev run writes the same three files under src/data/skill_genealogy_dev/registry_history/.
+CREATE OR REPLACE VIEW registry_history_changes AS
+SELECT * FROM 'src/data/skill_genealogy/registry_history/registry_history_changes.parquet';
+
+-- Stage 3. One row per blob. SKILL.md and small script texts, each stored once.
+CREATE OR REPLACE VIEW registry_history_texts AS
+SELECT * FROM 'src/data/skill_genealogy/registry_history/registry_history_texts.parquet';
+
+-- Stage 3. One status per registry.
+CREATE OR REPLACE VIEW registry_history_status AS
+SELECT * FROM 'src/data/skill_genealogy/registry_history/registry_history_status.parquet';

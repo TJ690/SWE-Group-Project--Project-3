@@ -169,8 +169,20 @@ DOWNLOAD_WORKERS = 8
 DOWNLOAD_TIMEOUT_SECONDS = 600
 # Above this, one git log for all paths (no --follow).
 MANY_PATHS_LIMIT = 200
-# Folders per GIT6 log. Pathspec matching cost grows about quadratically.
-GIT6_BATCH_FOLDERS = 1000
+# Most pathspecs in one GIT6 log. Git compares every changed entry with every
+# pathspec, so 1,000 folders inside a directory of 100,000 skills is very slow.
+# Above this many folders, GIT6 logs their parent folders instead.
+GIT6_MAX_PATHSPECS = 1000
+# Stage 3 merge and summary run in DuckDB, which spills to disk above this.
+# The pandas merge of 5 million change rows peaked near 15 GB.
+HISTORY_DUCKDB_MEMORY_LIMIT = "4GB"
+# Stage 3 deleted skill folders (bug 2). A repo with more history-only folders
+# than this is skipped: it rebuilt or moved its whole layout (a crawler such as
+# majiayu000/claude-skill-registry has 300,000+), and its old paths are not
+# deleted skills. Logging them all used more memory than the machine has.
+DELETED_FOLDERS_MAX = 20_000
+# Seconds between progress lines for a long step inside one repo.
+PROGRESS_SECONDS = 30
 # Script files.
 SCRIPT_EXTENSIONS: tuple[str, ...] = (
     ".py",
@@ -187,6 +199,25 @@ SCRIPT_EXTENSIONS: tuple[str, ...] = (
 MAX_SCRIPT_BYTES = 200_000
 # GIT8: blob ids per `git fetch`. 500 keeps one command line short.
 BLOB_FETCH_BATCH = 500
+# Stage 3b README download. GitHub shows the first README it finds in
+# .github/, then the repo root, then docs/; within a folder these names are
+# tried in this order (any letter case). Larger READMEs keep their row but no
+# text, the same cap as a script.
+README_FOLDERS = (".github", "", "docs")
+README_FILE_NAMES = (
+    "readme.md",
+    "readme.markdown",
+    "readme.mdx",
+    "readme.rst",
+    "readme.txt",
+    "readme.org",
+    "readme.adoc",
+    "readme",
+)
+README_MAX_BYTES = 200_000
+# Blobs per git cat-file --batch read. One read of every blob at once held
+# several GB in memory for a repo with 500,000 texts.
+BLOB_READ_BATCH = 2000
 # Stages 4 and 5 read registry SKILL.md texts about this many blobs at a time.
 # The full registry history has 6.7 GB of SKILL.md text, more than this machine's 16 GB
 # holds as Python strings. 40,000 blobs is about 0.5 GB.
