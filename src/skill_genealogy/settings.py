@@ -277,9 +277,15 @@ README_SOURCE_STRENGTH = 0.6
 # several GB in memory for a repo with 500,000 texts.
 BLOB_READ_BATCH = 2000
 # Stages 4 and 5 read registry SKILL.md texts about this many blobs at a time.
-# The full registry history has 6.7 GB of SKILL.md text, more than this machine's 16 GB
-# holds as Python strings. 40,000 blobs is about 0.5 GB.
+# Without the copiers, stage 4 needs 933,117 SKILL.md blobs with 9.4 GB of text
+# (2026-11-07), more than this machine's 16 GB holds as Python strings. 40,000
+# blobs is about 0.4 GB (median text 5 KB, mean 10 KB).
 LINEAGE_TEXT_BATCH = 40_000
+# Stage 4 (G10 rule 0): registry kinds from stage 3c (registry_kinds.parquet)
+# that become lineages. A copier is never a lineage, root or origin, so every
+# later stage, which reads the stage 4 tables, leaves copiers out without a
+# second filter. "unclear" (44 registries, no vote either way) is kept.
+LINEAGE_REGISTRY_KINDS: tuple[str, ...] = ("source", "unclear")
 # merge_shards writes text rows in groups of this size. One huge copy broke a file before.
 TEXT_ROW_GROUP = 1000
 # No design cap for SKILL.md. This is only the integer passed to read_blob_texts.
