@@ -286,6 +286,17 @@ LINEAGE_TEXT_BATCH = 40_000
 # later stage, which reads the stage 4 tables, leaves copiers out without a
 # second filter. "unclear" (44 registries, no vote either way) is kept.
 LINEAGE_REGISTRY_KINDS: tuple[str, ...] = ("source", "unclear")
+# Stage 4b (G11): change rows of whole registries read and replayed per batch.
+# The kept English lineages have 4.4M own and former-folder rows (2026-11-08);
+# 400,000 rows is about 0.5 GB in pandas. A registry is never split, so one
+# larger registry (github/gh-aw, 395,000 rows) is a batch of its own.
+PACKAGE_ROW_BATCH = 400_000
+# Stage 4b (G11): a skill whose folder is the repo root (skill_folder ".") would
+# make the whole repository its package: 75 root lineages have 1.07M file rows
+# (github/gh-aw alone 395,000). For them only these top-level folders count as
+# package files. They are the optional skill folders of the Agent Skills format
+# (scripts/, references/, assets/). Other skill folders keep every file.
+ROOT_SKILL_PACKAGE_FOLDERS: tuple[str, ...] = ("scripts", "references", "assets")
 # merge_shards writes text rows in groups of this size. One huge copy broke a file before.
 TEXT_ROW_GROUP = 1000
 # No design cap for SKILL.md. This is only the integer passed to read_blob_texts.

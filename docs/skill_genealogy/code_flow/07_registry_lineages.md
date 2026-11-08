@@ -4,6 +4,8 @@ Turns the registry `SKILL.md` history into lineages. This is stage 4a. It does n
 
 A lineage is one skill folder in one registry, followed through renames. Its versions are numbered, and a new version starts only when the text really changes. A copy inside a registry is its own lineage and names its source. A skill whose folder was deleted is marked removed. A lineage whose newest text is not English is dropped.
 
+The same command then runs stage 4b, [package versions](08_package_versions.md) (steps 8–10, card G11), unless its outputs exist. A stage 4a rebuild always rebuilds stage 4b. `--packages-only` runs stage 4b alone.
+
 **Copiers are left out here, once.** Only registries whose stage 3c `registry_kind` is `source` or `unclear` become lineages. A copier is never a lineage, a root or an origin. Every later stage reads these tables, so no later stage filters copiers again.
 
 ## Scripts
@@ -36,7 +38,7 @@ All in the full data folder `src/data/skill_genealogy/`, also with `--dev`:
 - `registry_kinds.parquet` (stage 3c). The hand labels from `registry_kind_review.csv` are already in it after a `--force` run of stage 3c; the review is optional.
 - `registries.parquet`, or `dev_registries.parquet` with `--dev` (stage 2c)
 
-A run skips when the four outputs exist. `--force` builds them again.
+A run skips stage 4a when the four outputs exist. `--force` builds them again (and stage 4b with them).
 
 ## Size
 

@@ -15,14 +15,20 @@ from skill_genealogy import download_registry_history, settings
 from skill_genealogy.build_registry_lineages import (
     CHANGE_COLUMNS,
     FRONT_MATTER_FIELDS,
+    MANIFEST_COLUMNS,
+    PACKAGE_COLUMNS,
     TEXT_CHANGE_FIELDS,
+    build_package_versions,
     build_registry_lineages,
     compare_consecutive_versions,
     join_renamed_folders,
     label_lineage_language,
     mark_removed_lineages,
+    number_package_versions,
     number_text_versions,
     read_skill_md_changes,
+    rebuild_folder_manifests,
+    summarize_packages,
 )
 
 ZERO = "0" * 40
@@ -51,6 +57,7 @@ def _row(**overrides: object) -> dict[str, object]:
         "old_repo_path": None,
         "old_sha": None,
         "new_sha": "v1",
+        "new_mode": "100644",
         "commit": "c1",
         "commit_date": "2026-01-01T00:00:00Z",
         "commit_seq": 1,
@@ -486,3 +493,335 @@ def test_version_bump_is_front_matter_only_with_the_changed_key(tmp_path: Path) 
     assert changes.loc[0, "state"] == "front_matter_only"
     assert list(changes.loc[0, "fm_keys_changed"]) == ["version"]
     assert bool(changes.loc[0, "name_changed"]) is False
+
+
+# Stage 4b (card G11): package versions and folder manifests
+
+
+def _file(path: str, commit: str, day: int, status: str = "A", **overrides: object) -> dict:
+    """One change of a file in ``skills/new`` (``path`` relative to the folder)."""
+    row = _row(
+        file_path=path,
+        repo_path=f"skills/new/{path}",
+        status=status,
+        new_sha=f"{path}@{commit}" if status != "D" else ZERO,
+        new_mode="100644" if status != "D" else "000000",
+        commit=commit,
+        commit_seq=day,
+        commit_date=_day(day),
+    )
+    row.update(overrides)
+    return row
+
+
+def _versions(*commits: str, lineage: str = "acme/copy::skills/new") -> pd.DataFrame:
+    """Text versions 1..n of one lineage, first seen at ``commits``."""
+    return pd.DataFrame(
+        {"lineage_id": lineage, "version_seq": range(1, len(commits) + 1), "commit": commits}
+    )
+
+
+def _packages(rows: list[dict], versions: pd.DataFrame) -> pd.DataFrame:
+    """Steps 8 and 9 on hand-made rows."""
+    return number_package_versions(rebuild_folder_manifests(pd.DataFrame(rows)), versions)
+
+
+def _paths(files: tuple) -> list[str]:
+    """Paths of one manifest."""
+    return [path for path, _, _ in files]
+
+
+def test_folder_edits_make_five_package_versions() -> None:
+    """Add SKILL.md + x.md; add a.py; edit a.py; rename to b.py; delete x.md -> 5 versions."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("references/x.md", "c1", 1),
+        _file("scripts/a.py", "c2", 2),
+        _file("scripts/a.py", "c3", 3, status="M"),
+        _file(
+            "scripts/b.py",
+            "c4",
+            4,
+            status="R",
+            old_repo_path="skills/new/scripts/a.py",
+            new_sha="scripts/a.py@c3",
+        ),
+        _file("references/x.md", "c5", 5, status="D"),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages["package_version_seq"].tolist() == [1, 2, 3, 4, 5]
+    assert packages["version_seq"].tolist() == [1, 1, 1, 1, 1]
+    assert [_paths(files) for files in packages["files"]] == [
+        ["references/x.md"],
+        ["references/x.md", "scripts/a.py"],
+        ["references/x.md", "scripts/a.py"],
+        ["references/x.md", "scripts/b.py"],
+        ["scripts/b.py"],
+    ]
+    assert packages.loc[2, "files"][1][1] == "scripts/a.py@c3"
+    assert packages["changed_skill_md"].tolist() == [True, False, False, False, False]
+    assert packages["changed_scripts"].tolist() == [False, True, True, True, False]
+    assert packages["changed_other_files"].tolist() == [True, False, False, False, True]
+    assert packages["file_count"].tolist() == [1, 2, 2, 2, 1]
+    assert packages["script_count"].tolist() == [0, 1, 1, 1, 1]
+
+
+def test_node_modules_file_is_ignored() -> None:
+    """A vendored file starts no package version and is not in the manifest."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("node_modules/left-pad/index.js", "c2", 2),
+        _file("scripts/a.py", "c3", 3),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages["commit"].tolist() == ["c1", "c3"]
+    assert _paths(packages.loc[1, "files"]) == ["scripts/a.py"]
+
+
+def test_skill_md_is_not_in_the_manifest_but_a_nested_one_is() -> None:
+    """The folder's own SKILL.md is the text version; cn/SKILL.md is a folder file."""
+    rows = [_file("SKILL.md", "c1", 1, new_sha="v1"), _file("cn/SKILL.md", "c1", 1)]
+    packages = _packages(rows, _versions("c1"))
+    assert _paths(packages.loc[0, "files"]) == ["cn/SKILL.md"]
+
+
+def test_whitespace_skill_md_edit_is_not_a_package_version() -> None:
+    """A SKILL.md commit with no new text version and no file change adds nothing."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("SKILL.md", "c2", 2, status="M", new_sha="v1s"),
+        _file("SKILL.md", "c3", 3, status="M", new_sha="v2"),
+    ]
+    packages = _packages(rows, _versions("c1", "c3"))
+    assert packages["commit"].tolist() == ["c1", "c3"]
+    assert packages["version_seq"].tolist() == [1, 2]
+    assert packages["changed_skill_md"].tolist() == [True, True]
+
+
+def test_files_before_skill_md_join_version_one() -> None:
+    """Files added before the first SKILL.md are in package version 1, not a version 0."""
+    rows = [_file("scripts/a.py", "c1", 1), _file("SKILL.md", "c2", 2, new_sha="v1")]
+    packages = _packages(rows, _versions("c2"))
+    assert packages["commit"].tolist() == ["c2"]
+    assert _paths(packages.loc[0, "files"]) == ["scripts/a.py"]
+
+
+def test_folder_rename_keeps_the_files_and_adds_no_package_version() -> None:
+    """skills/old -> skills/new with the same blobs: the manifest is the same."""
+    rows = [
+        _row(
+            file_path="SKILL.md",
+            repo_path="skills/old/SKILL.md",
+            history_role="former_folder",
+            status="A",
+            new_sha="v1",
+            commit_date=_day(1),
+        ),
+        _row(
+            file_path="run.sh",
+            repo_path="skills/old/run.sh",
+            history_role="former_folder",
+            status="A",
+            new_sha="r",
+            commit_date=_day(1),
+        ),
+        _file("SKILL.md", "c2", 2, status="R", old_repo_path="skills/old/SKILL.md", new_sha="v1"),
+        _file("run.sh", "c2", 2, status="R", old_repo_path="skills/old/run.sh", new_sha="r"),
+        _file("run.sh", "c3", 3, status="M", new_sha="r2"),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages["commit"].tolist() == ["c1", "c3"]
+    assert [_paths(files) for files in packages["files"]] == [["run.sh"], ["run.sh"]]
+    assert packages["changed_scripts"].tolist() == [True, True]
+
+
+def test_parallel_copy_delete_does_not_remove_the_own_file() -> None:
+    """The same skill in two places: deleting the old copy's script keeps the own one."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("scripts/a.py", "c1", 1, new_sha="a"),
+        _file(
+            "scripts/a.py",
+            "c1",
+            1,
+            new_sha="a",
+            history_role="former_folder",
+            repo_path="plugins/p/skills/new/scripts/a.py",
+        ),
+        _file(
+            "scripts/a.py",
+            "c2",
+            2,
+            status="D",
+            history_role="former_folder",
+            repo_path="plugins/p/skills/new/scripts/a.py",
+        ),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages["commit"].tolist() == ["c1"]
+    assert _paths(packages.loc[0, "files"]) == ["scripts/a.py"]
+
+
+def test_copy_source_rows_are_not_package_files() -> None:
+    """A copy_source row is the source skill's history, never this folder's file."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file(
+            "scripts/a.py",
+            "c2",
+            2,
+            history_role="copy_source",
+            repo_path="skills/new/scripts/a.py",
+        ),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages["commit"].tolist() == ["c1"]
+    assert packages.loc[0, "file_count"] == 0
+
+
+def test_root_skill_keeps_only_the_package_folders() -> None:
+    """A repo-root skill: scripts/ counts, src/ and the README do not."""
+
+    def root(path: str, commit: str, day: int) -> dict:
+        return _row(
+            skill_folder=".",
+            file_path=path,
+            repo_path=path,
+            status="A",
+            new_sha=f"{path}@{commit}",
+            commit=commit,
+            commit_seq=day,
+            commit_date=_day(day),
+        )
+
+    rows = [root("SKILL.md", "c1", 1), root("README.md", "c1", 1), root("src/main.go", "c2", 2)]
+    rows.append(root("scripts/build.sh", "c3", 3))
+    packages = _packages(rows, _versions("c1", lineage="acme/copy::."))
+    assert packages["commit"].tolist() == ["c1", "c3"]
+    assert _paths(packages.loc[1, "files"]) == ["scripts/build.sh"]
+
+
+def test_removed_skill_has_no_package_version_after_the_delete() -> None:
+    """SKILL.md and its script deleted together: no package version at the delete."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("run.sh", "c1", 1),
+        _file("SKILL.md", "c2", 2, status="D"),
+        _file("run.sh", "c2", 2, status="D"),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages["commit"].tolist() == ["c1"]
+
+
+def test_delete_and_add_in_one_commit_keeps_the_new_file() -> None:
+    """A delete runs before an add of the same path in one commit."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("run.sh", "c1", 1, new_sha="old"),
+        _file("run.sh", "c2", 2, new_sha="new"),
+        _file("run.sh", "c2", 2, status="D"),
+    ]
+    packages = _packages(rows, _versions("c1"))
+    assert packages.loc[1, "files"] == (("run.sh", "new", "100644"),)
+
+
+def _package_inputs(tmp_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Path]]:
+    """Stage 3 files and stage 4a tables for two registries, in ``tmp_path``."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1", is_skill_md=True),
+        _file("scripts/a.py", "c2", 2, new_sha="py", is_skill_md=False),
+        _file("references/x.md", "c3", 3, new_sha="md", is_skill_md=False),
+    ]
+    other = _file("SKILL.md", "c1", 1, repo="zed/other", new_sha="v2", is_skill_md=True)
+    changes_file = tmp_path / "registry_history_changes.parquet"
+    pd.DataFrame([*rows, other]).to_parquet(changes_file)
+    texts_file = tmp_path / "registry_history_texts.parquet"
+    pd.DataFrame({"sha": ["v1", "v2", "py"], "text": ["skill", "skill", "print(1)\n"]}).to_parquet(
+        texts_file
+    )
+    ids = ["acme/copy::skills/new", "zed/other::skills/new"]
+    lineages = pd.DataFrame(
+        {
+            "lineage_id": ids,
+            "repo": ["acme/copy", "zed/other"],
+            "skill_folder": "skills/new",
+            "version_count": 1,
+        }
+    )
+    versions = pd.DataFrame({"lineage_id": ids, "version_seq": 1, "commit": "c1"})
+    return lineages, versions, {"changes": changes_file, "texts": texts_file}
+
+
+def test_package_tables_are_written_with_sizes_for_stored_texts(tmp_path: Path) -> None:
+    """End to end on parquet files: sizes come from stored texts; one batch = many batches."""
+    lineages, versions, files = _package_inputs(tmp_path)
+    tables = {}
+    for limit in (1, 1000):
+        out = tmp_path / str(limit)
+        out.mkdir()
+        paths = {"packages": out / "p.parquet", "manifests": out / "m.parquet"}
+        build_package_versions(lineages, versions, files, paths, limit)
+        tables[limit] = {name: pd.read_parquet(path) for name, path in paths.items()}
+    for name in ("packages", "manifests"):
+        pd.testing.assert_frame_equal(tables[1][name], tables[1000][name])
+    packages, manifests = tables[1]["packages"], tables[1]["manifests"]
+    assert list(packages.columns) == PACKAGE_COLUMNS
+    assert list(manifests.columns) == MANIFEST_COLUMNS
+    assert packages.groupby("lineage_id").size().tolist() == [3, 1]
+    newest = manifests.loc[manifests["package_version_seq"] == 3]
+    assert newest["path"].tolist() == ["references/x.md", "scripts/a.py"]
+    assert newest["file_category"].tolist() == ["reference", "script"]
+    assert newest["size"].isna().tolist() == [True, False]
+    assert newest.loc[newest["path"] == "scripts/a.py", "size"].item() == 9
+    numbers = summarize_packages(
+        lineages,
+        versions,
+        {
+            "packages": packages,
+            "facts": {
+                "rows_read": 4,
+                "batches": 2,
+                "manifest_rows": len(manifests),
+                "rows_with_size": 2,
+                "categories": {"script": 2, "reference": 1},
+            },
+        },
+    )
+    assert numbers["lineages_with_scripts_now"] == 1
+    assert numbers["text_versions_without_package_version"] == 0
+
+
+def test_skill_moved_away_and_back_follows_its_skill_md() -> None:
+    """Moved to another folder (a version there), then re-added: every version is a package."""
+    rows = [
+        _file("SKILL.md", "c1", 1, new_sha="v1"),
+        _file("SKILL.md", "c2", 2, status="M", new_sha="v2"),
+        _file(
+            "SKILL.md",
+            "c3",
+            3,
+            status="R",
+            history_role="former_folder",
+            repo_path="protocols/new/SKILL.md",
+            old_repo_path="skills/new/SKILL.md",
+            new_sha="v3",
+        ),
+        _file("SKILL.md", "c4", 4, new_sha="v1"),
+    ]
+    packages = _packages(rows, _versions("c1", "c2", "c3", "c4"))
+    assert packages["commit"].tolist() == ["c1", "c2", "c3", "c4"]
+    assert packages["version_seq"].tolist() == [1, 2, 3, 4]
+
+
+def test_own_rows_at_the_repo_root_before_a_move_are_package_versions() -> None:
+    """Stage 3 can file a skill's older root history as own rows (repo_path SKILL.md)."""
+    rows = [
+        _file("SKILL.md", "c1", 1, repo_path="SKILL.md", new_sha="v1"),
+        _file("scripts/a.py", "c1", 1, repo_path="scripts/a.py"),
+        _file("src/main.go", "c2", 2, repo_path="src/main.go"),
+        _file("SKILL.md", "c3", 3, new_sha="v2"),
+    ]
+    packages = _packages(rows, _versions("c1", "c3"))
+    assert packages["commit"].tolist() == ["c1", "c3"]
+    assert _paths(packages.loc[0, "files"]) == ["scripts/a.py"]
+    assert packages.loc[1, "file_count"] == 0

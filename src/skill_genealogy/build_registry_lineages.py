@@ -24,26 +24,42 @@ DuckDB (with ``HISTORY_DUCKDB_MEMORY_LIMIT``), only ``SKILL.md`` rows of kept
 registries reach pandas, and texts are read about ``LINEAGE_TEXT_BATCH`` blobs at
 a time, one batch of whole lineages after another (steps 3, 5 and 6).
 
+Stage 4b (card G11, steps 8-10) runs in the same command: a package is the
+skill folder (``SKILL.md`` plus its files). A new package version starts at
+each commit where the folder's files or the text version change (Algorithm
+A21). Outputs: ``lineage_package_versions.parquet`` and
+``lineage_folder_manifests.parquet``. Each stage skips when its own outputs
+exist; a stage 4a rebuild rebuilds stage 4b too.
+
 Run (no network):
     python -m skill_genealogy.build_registry_lineages --dev
     python -m skill_genealogy.build_registry_lineages --force
+    python -m skill_genealogy.build_registry_lineages --packages-only --force   # stage 4b only
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import posixpath
 import statistics
 import time
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from skill_genealogy import settings
-from skill_genealogy.compare_texts import TextChange, compare_front_matter, compare_texts
+from skill_genealogy.compare_texts import (
+    TextChange,
+    compare_front_matter,
+    compare_texts,
+    file_category,
+    is_skipped_path,
+)
 from skill_genealogy.download_registry_history import read_registry_list
 from skill_genealogy.file_helpers import (
     build_arg_parser,
@@ -151,6 +167,34 @@ _CHANGE_TYPES: dict[str, pa.DataType] = {
 }
 CHANGE_SCHEMA = pa.schema([(name, _CHANGE_TYPES[name]) for name in CHANGE_COLUMNS])
 
+# Stage 4b (card G11): package versions and folder manifests.
+PACKAGE_COLUMNS: list[str] = [
+    "lineage_id",
+    "package_version_seq",
+    "version_seq",
+    "commit",
+    "commit_date",
+    "changed_skill_md",
+    "changed_scripts",
+    "changed_other_files",
+    "file_count",
+    "script_count",
+]
+MANIFEST_SCHEMA = pa.schema(
+    [
+        ("lineage_id", pa.string()),
+        ("package_version_seq", pa.int64()),
+        ("path", pa.string()),
+        ("sha", pa.string()),
+        ("mode", pa.string()),
+        ("size", pa.int64()),
+        ("file_category", pa.string()),
+    ]
+)
+MANIFEST_COLUMNS: list[str] = MANIFEST_SCHEMA.names
+# Inside one commit: deletes first, then renames, then adds and edits (A21).
+_APPLY_ORDER: dict[str, int] = {"D": 0, "R": 1}
+
 # Query Q4.1, see code_flow/07_registry_lineages.md
 # Every SKILL.md row (own, former_folder, copy_source, nested) of the kept
 # registries. kept_repos is a registered one-column table. commit_date stays text
@@ -167,6 +211,35 @@ SKILL_TEXTS_SQL = """
 SELECT sha, text
 FROM read_parquet(?)
 WHERE sha IN (SELECT sha FROM wanted_blobs)
+"""
+# Query Q4.3, see code_flow/08_package_versions.md
+# Rows per registry of the kept lineages: sizes the stage 4b batches.
+# kept_lineages is a registered (repo, skill_folder) table.
+FOLDER_ROW_COUNTS_SQL = """
+SELECT c.repo, count(*) AS row_count
+FROM read_parquet(?) AS c
+JOIN kept_lineages AS k ON c.repo = k.repo AND c.skill_folder = k.skill_folder
+WHERE c.history_role IN ('own', 'former_folder')
+GROUP BY c.repo
+"""
+# Query Q4.4, see code_flow/08_package_versions.md
+# Every own and former-folder row (SKILL.md and folder files) of the kept
+# lineages of one batch of registries. copy_source rows belong to the source.
+FOLDER_CHANGES_SQL = """
+SELECT k.lineage_id, c.skill_folder, c.file_path, c."commit", c.commit_date, c.commit_seq,
+       c.status, c.new_sha, c.new_mode, c.repo_path, c.old_repo_path, c.history_role,
+       c.is_skill_md
+FROM read_parquet(?) AS c
+JOIN kept_lineages AS k ON c.repo = k.repo AND c.skill_folder = k.skill_folder
+WHERE c.history_role IN ('own', 'former_folder') AND c.repo IN (SELECT repo FROM batch_repos)
+"""
+# Query Q4.5, see code_flow/08_package_versions.md
+# Byte size of the stored text of each wanted blob (scripts and SKILL.md are
+# stored; most other files are not, and get no size).
+BLOB_SIZES_SQL = """
+SELECT sha, strlen(text) AS size
+FROM read_parquet(?)
+WHERE sha IN (SELECT sha FROM wanted_blobs) AND text IS NOT NULL
 """
 
 
@@ -768,19 +841,574 @@ def count_parallel_commits(joined: pd.DataFrame) -> int:
     return int((sizes > 1).sum())
 
 
+# Steps 8-10 (stage 4b, card G11): package versions and folder manifests
+
+
+def package_output_paths(dev: bool) -> dict[str, Path]:
+    """The two stage 4b output files in the dev or full data folder."""
+    folder = settings.data_dir(dev)
+    return {
+        "packages": folder / "lineage_package_versions.parquet",
+        "manifests": folder / "lineage_folder_manifests.parquet",
+    }
+
+
+def lineage_keys(lineages: pd.DataFrame) -> pd.DataFrame:
+    """``lineage_id``, ``repo``, ``skill_folder`` of the kept lineages, as text columns."""
+    keys = lineages.loc[:, ["lineage_id", "repo", "skill_folder"]].astype(str)
+    return keys.astype("string").reset_index(drop=True)
+
+
+def count_folder_rows(changes_file: Path, keys: pd.DataFrame) -> pd.Series:
+    """Query Q4.3: own and former-folder rows per registry of the kept lineages."""
+    con = connect_duckdb()
+    try:
+        con.execute(f"SET memory_limit = '{settings.HISTORY_DUCKDB_MEMORY_LIMIT}'")
+        con.register("kept_lineages", keys)
+        counts = con.execute(FOLDER_ROW_COUNTS_SQL, [str(changes_file)]).df()
+    finally:
+        con.close()
+    return counts.set_index("repo")["row_count"].sort_index()
+
+
+def read_folder_changes(changes_file: Path, keys: pd.DataFrame, repos: list[str]) -> pd.DataFrame:
+    """Query Q4.4: every own and former-folder row of the kept lineages of ``repos``.
+
+    Both ``SKILL.md`` rows (they place the folder and say whether the skill is
+    there) and folder-file rows. ``copy_source`` rows are left out: they are
+    the history of the source skill, which has its own lineage.
+    """
+    con = connect_duckdb()
+    try:
+        con.execute(f"SET memory_limit = '{settings.HISTORY_DUCKDB_MEMORY_LIMIT}'")
+        con.register("kept_lineages", keys)
+        con.register("batch_repos", pd.DataFrame({"repo": pd.Series(repos, dtype="string")}))
+        return con.execute(FOLDER_CHANGES_SQL, [str(changes_file)]).df()
+    finally:
+        con.close()
+
+
+def read_blob_sizes(texts_file: Path, blobs: list[str]) -> dict[str, int]:
+    """Query Q4.5: ``sha -> bytes`` of the stored text, for the blobs that have one.
+
+    Stage 3 stores the text of ``SKILL.md`` files and of scripts up to
+    ``MAX_SCRIPT_BYTES``; other files have no stored text and get no size.
+    """
+    if not blobs:
+        return {}
+    con = connect_duckdb()
+    try:
+        con.execute(f"SET memory_limit = '{settings.HISTORY_DUCKDB_MEMORY_LIMIT}'")
+        con.register("wanted_blobs", pd.DataFrame({"sha": pd.Series(blobs, dtype="string")}))
+        rows = con.execute(BLOB_SIZES_SQL, [str(texts_file)]).fetchall()
+    finally:
+        con.close()
+    return {str(sha): int(size) for sha, size in rows}
+
+
+def assign_package_batches(row_counts: pd.Series, limit: int) -> list[list[str]]:
+    """Registries per batch, in name order, so a batch reads about ``limit`` rows.
+
+    A registry is never split: one with more than ``limit`` rows is a batch of
+    its own.
+
+    Example:
+    >>> assign_package_batches(pd.Series({"a/x": 3, "b/y": 3, "c/z": 9}), 6)
+    [['a/x', 'b/y'], ['c/z']]
+    """
+    batches: list[list[str]] = []
+    used = 0
+    for repo, count in row_counts.sort_index().items():
+        if not batches or (used and used + int(count) > limit):
+            batches.append([])
+            used = 0
+        batches[-1].append(str(repo))
+        used += int(count)
+    return batches
+
+
+# Step 8: rebuild folder manifests
+
+
+# Algorithm A21, see code_flow/08_package_versions.md
+def rebuild_folder_manifests(folder_changes: pd.DataFrame) -> pd.DataFrame:
+    """Replay each lineage's file changes; the folder manifest after every commit.
+
+    Walk a lineage's commits oldest first (UTC time, then ``commit_seq``) and
+    apply each row to a running map ``repo_path -> (sha, mode)``: ``A``, ``M``
+    and ``T`` set the path, ``D`` removes it, ``R`` moves ``old_repo_path`` to
+    ``repo_path``. In one commit deletes go first, then renames, then the rest.
+    The map is keyed by the full repo path, so parallel copies and older folder
+    names never mix. The *skill folder at that time* is the folder of the
+    newest ``SKILL.md`` text row, chosen as in A20 (``skill_folder_after_commit``).
+    The manifest is the files under
+    that folder, relative to it, without the folder's own ``SKILL.md``
+    (it is the text version), skipped folders, and, at a repo-root skill, files
+    outside ``ROOT_SKILL_PACKAGE_FOLDERS``.
+
+    Inputs: rows from Query Q4.4 (``lineage_id``, ``commit``, ``commit_date``,
+    ``commit_seq``, ``status``, ``new_sha``, ``new_mode``, ``repo_path``,
+    ``old_repo_path``, ``history_role``, ``file_path``).
+    Outputs: one row per lineage and commit: ``lineage_id``, ``commit``,
+    ``commit_date`` (UTC), ``skill_md_present`` (the folder has its
+    ``SKILL.md`` after the commit), ``files`` (sorted tuple of
+    ``(path, sha, mode)``).
+
+    Example:
+    >>> rows = pd.DataFrame([
+    ...     _example_row(status="A", file_path="SKILL.md", repo_path="skills/new/SKILL.md"),
+    ...     _example_row(status="A", file_path="scripts/a.py",
+    ...                  repo_path="skills/new/scripts/a.py", new_sha="p")])
+    >>> rebuild_folder_manifests(rows)["files"].tolist()
+    [(('scripts/a.py', 'p', '100644'),)]
+    """
+    records: list[dict] = []
+    ordered = _order_for_replay(folder_changes)
+    for lineage_id, group in ordered.groupby("lineage_id", sort=False):
+        records.extend(_replay_lineage(str(lineage_id), group))
+    columns = ["lineage_id", "commit", "commit_date", "skill_md_present", "files"]
+    return pd.DataFrame(records, columns=columns)
+
+
+def _order_for_replay(changes: pd.DataFrame) -> pd.DataFrame:
+    """Own and former-folder rows in replay order: lineage, UTC time, ``commit_seq``,
+    then delete / rename / rest. ``copy_source`` rows are the source's history: dropped."""
+    frame = changes.loc[changes["history_role"].isin(VERSION_ROLES)].copy()
+    if "lineage_id" not in frame:
+        frame["lineage_id"] = frame["repo"].astype(str) + "::" + frame["skill_folder"].astype(str)
+    frame["commit_time"] = _utc_times(frame["commit_date"])
+    frame["apply_rank"] = frame["status"].fillna("").astype(str).str[:1].map(_APPLY_ORDER)
+    frame["apply_rank"] = frame["apply_rank"].fillna(len(_APPLY_ORDER)).astype(int)
+    order = ["lineage_id", "commit_time", "commit_seq", "commit", "apply_rank", "repo_path"]
+    return frame.sort_values(order, kind="mergesort").reset_index(drop=True)
+
+
+def _replay_lineage(lineage_id: str, group: pd.DataFrame) -> list[dict]:
+    """Manifest after each commit of one lineage (rows already in replay order)."""
+    state: dict[str, tuple[str, str]] = {}
+    folder: str | None = None
+    files: tuple = ()
+    present = False
+    records: list[dict] = []
+    rows = group.itertuples(index=False)
+    for commit, commit_rows in itertools.groupby(rows, key=lambda row: row.commit):
+        commit_rows = list(commit_rows)
+        for row in commit_rows:
+            _apply_file_change(state, row)
+        new_folder = skill_folder_after_commit(commit_rows, folder)
+        if new_folder is not None and (
+            new_folder != folder or _touches_package(commit_rows, new_folder)
+        ):
+            files, present = folder_manifest(state, new_folder)
+        folder = new_folder
+        records.append(
+            {
+                "lineage_id": lineage_id,
+                "commit": str(commit),
+                "commit_date": commit_rows[0].commit_time,
+                "skill_md_present": present,
+                "files": files,
+            }
+        )
+    return records
+
+
+def _apply_file_change(state: dict[str, tuple[str, str]], row: object) -> None:
+    """Apply one ``A``/``M``/``T``/``D``/``R`` row to the running path map."""
+    status = str(getattr(row, "status", "") or "")[:1]
+    new_path = _path_text(getattr(row, "repo_path", None))
+    old_path = _path_text(getattr(row, "old_repo_path", None))
+    if status == _DELETE:
+        state.pop(new_path, None)
+        state.pop(old_path, None)
+        return
+    if status == "R" and old_path and old_path != new_path:
+        state.pop(old_path, None)
+    if new_path:
+        state[new_path] = (str(row.new_sha), str(row.new_mode))
+
+
+def skill_folder_after_commit(rows: list, folder: str | None) -> str | None:
+    """The skill folder after a commit: where the ``SKILL.md`` that A20 reads lives.
+
+    The commit's ``SKILL.md`` text rows (the folder's own file, not a delete)
+    are chosen as in A20 (``one_row_per_commit``): an ``own`` row first, else
+    the ``former_folder`` row whose ``repo_path`` comes first alphabetically.
+    The folder is that row's ``repo_path`` folder. A commit without such a row
+    keeps the folder. The ``repo_path`` decides, not the HEAD folder: stage 3
+    can file a skill's older root history as ``own`` rows (``repo_path`` is
+    ``SKILL.md``), and a skill can move away and come back.
+
+    Example:
+    >>> rows = [_example_tuple(history_role="former_folder", repo_path="b/SKILL.md"),
+    ...         _example_tuple(history_role="former_folder", repo_path="a/SKILL.md")]
+    >>> skill_folder_after_commit(rows, None), skill_folder_after_commit([], "x")
+    ('a', 'x')
+    """
+    texts = [
+        ((row.history_role != "own"), _path_text(row.repo_path))
+        for row in rows
+        if str(row.file_path or "").lower() == SKILL_MD_NAME and _carries_text(row)
+    ]
+    return parent_folder(min(texts)[1]) if texts else folder
+
+
+def folder_manifest(state: dict[str, tuple[str, str]], folder: str) -> tuple[tuple, bool]:
+    """Files of one folder in the path map, and whether its ``SKILL.md`` is there.
+
+    Paths are made relative to ``folder``. The folder's own ``SKILL.md`` (any
+    letter case) is not a file of the manifest; ``is_package_path`` decides
+    the rest.
+
+    Example:
+    >>> state = {"s/a/SKILL.md": ("t", "100644"), "s/a/run.sh": ("r", "100755"),
+    ...          "s/a/node_modules/x.js": ("n", "100644"), "s/b/x.md": ("b", "100644")}
+    >>> folder_manifest(state, "s/a")
+    ((('run.sh', 'r', '100755'),), True)
+    """
+    prefix = "" if folder == "." else f"{folder}/"
+    files: list[tuple[str, str, str]] = []
+    present = False
+    for repo_path, (sha, mode) in state.items():
+        if not repo_path.startswith(prefix):
+            continue
+        relative = repo_path[len(prefix) :]
+        if relative.lower() == SKILL_MD_NAME:
+            present = True
+        elif is_package_path(relative, folder):
+            files.append((relative, sha, mode))
+    return tuple(sorted(files)), present
+
+
+def is_package_path(relative: str, folder: str) -> bool:
+    """Whether a path relative to the skill folder is a package file.
+
+    Not inside ``SKIPPED_FOLDERS``; at a repo-root skill (``folder`` is
+    ``.``) also inside one of ``ROOT_SKILL_PACKAGE_FOLDERS``.
+
+    Example:
+    >>> is_package_path("scripts/a.py", "skills/x"), is_package_path("dist/a.js", "skills/x")
+    (True, False)
+    >>> is_package_path("src/main.go", "."), is_package_path("scripts/a.py", ".")
+    (False, True)
+    """
+    if not relative or is_skipped_path(relative):
+        return False
+    if folder != ".":
+        return True
+    return relative.split("/", 1)[0] in settings.ROOT_SKILL_PACKAGE_FOLDERS
+
+
+def _touches_package(rows: list, folder: str) -> bool:
+    """Whether a commit changed a package file or the ``SKILL.md`` of ``folder``."""
+    prefix = "" if folder == "." else f"{folder}/"
+    for row in rows:
+        for path in (_path_text(row.repo_path), _path_text(row.old_repo_path)):
+            if not path.startswith(prefix):
+                continue
+            relative = path[len(prefix) :]
+            if relative.lower() == SKILL_MD_NAME or is_package_path(relative, folder):
+                return True
+    return False
+
+
+# Step 9: number package versions
+
+
+# Algorithm A21, see code_flow/08_package_versions.md
+def number_package_versions(manifests: pd.DataFrame, versions: pd.DataFrame) -> pd.DataFrame:
+    """A new package version at each commit where the files or the text version change.
+
+    ``version_seq`` is the text version (A20) in force after the commit: the
+    version whose first commit is the newest one so far. Package versions start
+    at the commit of text version 1 and are only counted while the folder has
+    its ``SKILL.md`` (a removed skill has none). ``changed_skill_md`` is True
+    when ``version_seq`` changed, ``changed_scripts`` / ``changed_other_files``
+    when a script / another file was added, removed or got a new sha or mode,
+    compared with the previous package version (version 1 compares with an
+    empty folder).
+
+    Inputs: rows from ``rebuild_folder_manifests``; versions with
+    ``lineage_id``, ``version_seq``, ``commit``.
+    Outputs: ``PACKAGE_COLUMNS`` plus ``files``, one row per package version.
+
+    Example:
+    >>> rows = pd.DataFrame([
+    ...     _example_row(status="A", commit="c1"),
+    ...     _example_row(status="A", file_path="run.sh", repo_path="skills/new/run.sh",
+    ...                  commit="c2", commit_seq=2, commit_date="2026-01-02T00:00:00Z")])
+    >>> versions = pd.DataFrame({"lineage_id": ["acme/copy::skills/new"],
+    ...     "version_seq": [1], "commit": ["c1"]})
+    >>> packages = number_package_versions(rebuild_folder_manifests(rows), versions)
+    >>> packages[["package_version_seq", "version_seq", "changed_scripts"]].values.tolist()
+    [[1, 1, False], [2, 1, True]]
+    """
+    version_of: dict[str, dict[str, int]] = {}
+    for lineage_id, commit, seq in zip(
+        versions["lineage_id"], versions["commit"], versions["version_seq"], strict=True
+    ):
+        version_of.setdefault(str(lineage_id), {})[str(commit)] = int(seq)
+    records: list[dict] = []
+    for lineage_id, group in manifests.groupby("lineage_id", sort=False):
+        records.extend(
+            _packages_of_lineage(str(lineage_id), group, version_of.get(str(lineage_id), {}))
+        )
+    packages = pd.DataFrame(records, columns=[*PACKAGE_COLUMNS, "files"])
+    for name in ("package_version_seq", "version_seq", "file_count", "script_count"):
+        packages[name] = packages[name].astype("int64")
+    return packages
+
+
+def _packages_of_lineage(
+    lineage_id: str, group: pd.DataFrame, version_of: dict[str, int]
+) -> list[dict]:
+    """Package version records of one lineage (manifest rows in commit order)."""
+    records: list[dict] = []
+    version, last_version, last_files = 0, 0, None
+    for row in group.itertuples(index=False):
+        version = version_of.get(row.commit, version)
+        if version < 1 or not row.skill_md_present:
+            continue
+        if last_files is not None and row.files == last_files and version == last_version:
+            continue
+        scripts_changed, others_changed = changed_file_kinds(last_files or (), row.files)
+        records.append(
+            {
+                "lineage_id": lineage_id,
+                "package_version_seq": len(records) + 1,
+                "version_seq": version,
+                "commit": row.commit,
+                "commit_date": row.commit_date,
+                "changed_skill_md": version != last_version,
+                "changed_scripts": scripts_changed,
+                "changed_other_files": others_changed,
+                "file_count": len(row.files),
+                "script_count": sum(
+                    file_category(path, mode) == "script" for path, _, mode in row.files
+                ),
+                "files": row.files,
+            }
+        )
+        last_files, last_version = row.files, version
+    return records
+
+
+def changed_file_kinds(old_files: tuple, new_files: tuple) -> tuple[bool, bool]:
+    """(a script changed, another file changed) between two manifests.
+
+    A file changed when it was added, removed, or got another sha or mode. A
+    rename is a remove plus an add. The kind comes from ``file_category``
+    with the newer mode.
+
+    Example:
+    >>> changed_file_kinds((("a.py", "1", "100644"),), (("b.py", "1", "100644"),))
+    (True, False)
+    >>> changed_file_kinds((), (("notes.md", "2", "100644"),))
+    (False, True)
+    """
+    old_map = {path: (sha, mode) for path, sha, mode in old_files}
+    new_map = {path: (sha, mode) for path, sha, mode in new_files}
+    kinds = {
+        file_category(path, (new_map.get(path) or old_map[path])[1])
+        for path in old_map.keys() | new_map.keys()
+        if old_map.get(path) != new_map.get(path)
+    }
+    return "script" in kinds, bool(kinds - {"script"})
+
+
+def folder_manifest_rows(packages: pd.DataFrame, sizes: dict[str, int]) -> pd.DataFrame:
+    """One row per file per package version (``MANIFEST_COLUMNS``).
+
+    ``size`` is the byte length of the stored text, or null when stage 3
+    stored none. ``file_category`` comes from ``compare_texts.file_category``.
+
+    Example:
+    >>> packages = pd.DataFrame({"lineage_id": ["r::s"], "package_version_seq": [1],
+    ...     "files": [(("run.sh", "x", "100755"),)]})
+    >>> row = folder_manifest_rows(packages, {"x": 12}).loc[0]
+    >>> row["path"], int(row["size"]), row["file_category"]
+    ('run.sh', 12, 'script')
+    """
+    records = [
+        (lineage_id, int(seq), path, sha, mode, sizes.get(sha), file_category(path, mode))
+        for lineage_id, seq, files in zip(
+            packages["lineage_id"], packages["package_version_seq"], packages["files"], strict=True
+        )
+        for path, sha, mode in files
+    ]
+    rows = pd.DataFrame(records, columns=MANIFEST_COLUMNS)
+    rows["size"] = rows["size"].astype("Int64")
+    return rows
+
+
+def build_package_versions(
+    lineages: pd.DataFrame,
+    versions: pd.DataFrame,
+    files: dict[str, Path],
+    paths: dict[str, Path],
+    row_limit: int,
+) -> dict[str, object]:
+    """Steps 8 and 9 for every batch of registries; manifests are written as they go.
+
+    Inputs: kept lineages and their versions (stage 4a), ``files`` with the
+    stage 3 ``changes`` and ``texts`` files, the two output paths, and the row
+    limit per batch. Outputs: the two files; returns the package versions and
+    the counts the summary needs.
+    """
+    keys = lineage_keys(lineages)
+    batches = assign_package_batches(count_folder_rows(files["changes"], keys), row_limit)
+    version_repo = versions["lineage_id"].astype(str).str.split("::", n=1).str[0]
+    part_file = paths["manifests"].with_name(paths["manifests"].name + ".part")
+    package_parts, facts = [], {"rows_read": 0, "manifest_rows": 0, "rows_with_size": 0}
+    categories: dict[str, int] = {}
+    started = time.perf_counter()
+    with pq.ParquetWriter(part_file, MANIFEST_SCHEMA, compression="zstd") as writer:
+        for index, repos in enumerate(batches):
+            changes = read_folder_changes(files["changes"], keys, repos)
+            # Step 8: Rebuild folder manifests (Algorithm A21)
+            manifests = rebuild_folder_manifests(changes)
+            # Step 9: Number package versions (Algorithm A21)
+            packages = number_package_versions(manifests, versions.loc[version_repo.isin(repos)])
+            blobs = sorted({sha for files_ in packages["files"] for _, sha, _ in files_})
+            rows = folder_manifest_rows(packages, read_blob_sizes(files["texts"], blobs))
+            writer.write_table(
+                pa.Table.from_pandas(rows, schema=MANIFEST_SCHEMA, preserve_index=False)
+            )
+            package_parts.append(packages.drop(columns="files"))
+            facts["rows_read"] += len(changes)
+            facts["manifest_rows"] += len(rows)
+            facts["rows_with_size"] += int(rows["size"].notna().sum())
+            for name, count in rows["file_category"].value_counts().items():
+                categories[name] = categories.get(name, 0) + int(count)
+            print(
+                f"progress package batch {index + 1}/{len(batches)}: {len(repos)} registries, "
+                f"{len(changes)} rows, {len(packages)} package versions, "
+                f"{len(rows)} manifest rows, "
+                f"{time.perf_counter() - started:.0f} s",
+                flush=True,
+            )
+    packages = _concat(package_parts, PACKAGE_COLUMNS)
+    write_parquet(packages, paths["packages"], sort_by=["lineage_id", "package_version_seq"])
+    part_file.replace(paths["manifests"])
+    facts["batches"] = len(batches)
+    facts["categories"] = categories
+    return {"packages": packages, "facts": facts}
+
+
+# Step 10: summary
+
+
+def summarize_packages(
+    lineages: pd.DataFrame, versions: pd.DataFrame, built: dict[str, object]
+) -> dict[str, object]:
+    """The counts card G11 step 10 asks for (folder files, scripts, package vs text versions)."""
+    packages, facts = built["packages"], built["facts"]
+    per_lineage = packages.groupby("lineage_id").size()
+    text_per_lineage = lineages.set_index("lineage_id")["version_count"]
+    newest = (
+        packages.sort_values(["lineage_id", "package_version_seq"]).groupby("lineage_id").tail(1)
+    )
+    ever = packages.groupby("lineage_id")[["file_count", "script_count"]].max()
+    seen = set(zip(packages["lineage_id"], packages["commit"], strict=True))
+    text_commits = set(zip(versions["lineage_id"], versions["commit"], strict=True))
+    lineage_count = len(lineages)
+    numbers: dict[str, object] = {
+        "lineages": lineage_count,
+        "root_lineages": int((lineages["skill_folder"] == ".").sum()),
+        "change_rows_read": facts["rows_read"],
+        "package_batches": facts["batches"],
+        "lineages_with_package_versions": int(per_lineage.size),
+        "package_versions": len(packages),
+        "text_versions": len(versions),
+        "package_versions_per_lineage_median": _median(per_lineage),
+        "package_versions_per_lineage_max": _max_with_name(per_lineage),
+        "lineages_more_package_than_text_versions": int(
+            (per_lineage > text_per_lineage.reindex(per_lineage.index).fillna(0)).sum()
+        ),
+        "text_versions_without_package_version": len(text_commits - seen),
+        "changed_skill_md": int(packages["changed_skill_md"].sum()),
+        "changed_scripts": int(packages["changed_scripts"].sum()),
+        "changed_other_files": int(packages["changed_other_files"].sum()),
+        "only_folder_changed": int((~packages["changed_skill_md"].astype(bool)).sum()),
+        "lineages_with_files_now": int((newest["file_count"] > 0).sum()),
+        "share_with_files_now": _share(int((newest["file_count"] > 0).sum()), lineage_count),
+        "lineages_with_scripts_now": int((newest["script_count"] > 0).sum()),
+        "share_with_scripts_now": _share(int((newest["script_count"] > 0).sum()), lineage_count),
+        "lineages_with_files_ever": int((ever["file_count"] > 0).sum()),
+        "lineages_with_scripts_ever": int((ever["script_count"] > 0).sum()),
+        "manifest_rows": facts["manifest_rows"],
+        "manifest_rows_with_size": facts["rows_with_size"],
+    }
+    for name in sorted(facts["categories"]):
+        numbers[f"manifest_rows_{name}"] = facts["categories"][name]
+    return numbers
+
+
+def run_package_stage(dev: bool, lineage_paths: dict[str, Path], paths: dict[str, Path]) -> None:
+    """Steps 8-10 from the saved stage 4a tables: build, save, print the summary."""
+    started = time.perf_counter()
+    check_inputs_exist(
+        {"lineages": lineage_paths["lineages"], "lineage_versions": lineage_paths["versions"]},
+        {
+            name: "python -m skill_genealogy.build_registry_lineages"
+            for name in ("lineages", "lineage_versions")
+        },
+    )
+    lineages = read_parquet(lineage_paths["lineages"])
+    versions = read_parquet(lineage_paths["versions"]).loc[
+        :, ["lineage_id", "version_seq", "commit"]
+    ]
+    files = {
+        "changes": history_dir() / "registry_history_changes.parquet",
+        "texts": history_dir() / "registry_history_texts.parquet",
+    }
+    built = build_package_versions(lineages, versions, files, paths, settings.PACKAGE_ROW_BATCH)
+    # Step 10: Summary
+    numbers = summarize_packages(lineages, versions, built)
+    numbers["elapsed_seconds"] = round(time.perf_counter() - started, 1)
+    numbers["output_folder"] = str(settings.data_dir(dev))
+    print_summary("Stage 4b summary", numbers)
+    _print_package_samples(paths, built["packages"])
+
+
 def main() -> None:
-    """Read the inputs, build the lineages in batches, save and print the summary."""
-    args = build_arg_parser(
-        "Turn registry SKILL.md history into lineages (no network)."
-    ).parse_args()
+    """Stage 4a (steps 0-7), then stage 4b (steps 8-10); each skips when its outputs exist.
+
+    ``--packages-only`` runs only stage 4b from the saved stage 4a tables. A
+    stage 4a rebuild always rebuilds stage 4b too.
+    """
+    parser = build_arg_parser("Turn registry SKILL.md history into lineages (no network).")
+    parser.add_argument(
+        "--packages-only",
+        action="store_true",
+        help="run only steps 8-10 (package versions) from the saved lineage tables",
+    )
+    args = parser.parse_args()
     dev = bool(args.dev)
     paths = output_paths(dev)
-    if outputs_exist(list(paths.values())) and not args.force:
+    package_paths = package_output_paths(dev)
+    ran_lineages = False
+    if args.packages_only:
+        pass
+    elif outputs_exist(list(paths.values())) and not args.force:
         print(
             f"skip: the four lineage tables exist in {settings.data_dir(dev)} (pass --force)",
             flush=True,
         )
+    else:
+        run_lineage_stage(dev, paths)
+        ran_lineages = True
+    if outputs_exist(list(package_paths.values())) and not (args.force or ran_lineages):
+        print(
+            f"skip: the two package tables exist in {settings.data_dir(dev)} (pass --force)",
+            flush=True,
+        )
         return
+    run_package_stage(dev, paths, package_paths)
+
+
+def run_lineage_stage(dev: bool, paths: dict[str, Path]) -> None:
+    """Steps 0-7 (stage 4a): read, build the lineages in batches, save, print the summary."""
     started = time.perf_counter()
     # Step 0: Copier filter (rule 0)
     scope = registry_scope(dev)
@@ -880,6 +1508,37 @@ def _utc_times(dates: pd.Series) -> pd.Series:
     return pd.to_datetime(dates, utc=True, format="ISO8601", errors="coerce")
 
 
+def _path_text(value: object) -> str:
+    """A repo path as text; None, NaN and NA become ``""``."""
+    return value if isinstance(value, str) else ""
+
+
+def _carries_text(row: object) -> bool:
+    """Whether a change row adds or edits a file (not a delete, not a zero sha)."""
+    sha = str(getattr(row, "new_sha", "") or "")
+    return str(row.status or "")[:1] != _DELETE and bool(sha) and sha.strip("0") != ""
+
+
+def _share(part: int, whole: int) -> float:
+    """``part / whole`` rounded to 4 places, 0.0 when ``whole`` is 0."""
+    return round(part / whole, 4) if whole else 0.0
+
+
+def _print_package_samples(paths: dict[str, Path], packages: pd.DataFrame) -> None:
+    """Two package versions of the lineage with the most, and two manifest rows."""
+    counts = packages.groupby("lineage_id").size().sort_values(ascending=False, kind="mergesort")
+    top = counts.index[:1].tolist()
+    print_sample_records(
+        packages.loc[packages["lineage_id"].isin(top)], "Sample package versions", 2
+    )
+    if not top:
+        return
+    rows = pq.read_table(paths["manifests"], filters=[("lineage_id", "==", top[0])]).to_pandas()
+    rows["size"] = rows["size"].astype("Int64")
+    newest = rows.loc[rows["package_version_seq"] == rows["package_version_seq"].max()]
+    print_sample_records(newest, "Sample manifest rows (newest package version)", 2)
+
+
 def _text_lists(record: dict) -> dict:
     """Turn every list field into a list of strings (YAML keys can be numbers)."""
     return {
@@ -973,12 +1632,18 @@ def _example_row(**overrides: object) -> dict[str, object]:
         "old_repo_path": None,
         "old_sha": None,
         "new_sha": "blob",
+        "new_mode": "100644",
         "commit": "c1",
         "commit_date": "2026-01-01T00:00:00Z",
         "commit_seq": 1,
     }
     row.update(overrides)
     return row
+
+
+def _example_tuple(**overrides: object) -> SimpleNamespace:
+    """``_example_row`` as an object with attributes, like a row of ``itertuples``."""
+    return SimpleNamespace(**_example_row(**overrides))
 
 
 if __name__ == "__main__":
