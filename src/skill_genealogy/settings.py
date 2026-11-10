@@ -215,6 +215,25 @@ PROGRESS_SECONDS = 30
 # 28,683; the next repo has 17,740). Same size as DELETED_FOLDERS_MAX, the
 # folder count stage 3 could still log within the machine's memory.
 COPY_HISTORY_MAX_FOLDERS = 20_000
+# Stage 7a (A34c): a copy folder whose arrival commit added at most this many
+# copy folders of its repo was chosen one by one (arrival_group "chosen").
+# Decided with the user after the stage 6 full run (G16 revision 2026-11-10):
+# edits after copying fall with batch size (34% of single-folder batches, 25%
+# for 2-4, 19% for 5-19), so 1-4 is the "picked by hand" group.
+ARRIVAL_CHOSEN_MAX = 4
+# Stage 7a (A34c): a commit that added at least this many copy folders brought
+# a bundle (arrival_group "bundle"). 78% of copied folders arrived in such a
+# commit, and edits after copying are 14% or less from 20 folders up.
+ARRIVAL_BUNDLE_MIN = 20
+# Stage 7a (A34c): a copy that arrived at most this many days after GitHub
+# created its repo came with the repo's first upload (arrival_in_first_commit).
+# A project uploaded in one squashed commit makes copies chosen one by one look
+# like a bundle; the summary counts these. One day covers a repo created and
+# filled in one sitting, in any time zone.
+ARRIVAL_REPO_START_DAYS = 1
+# Stage 7a: SKILL.md texts of the copy histories read and signed at once.
+# Same size as LINEAGE_TEXT_BATCH (about 0.4 GB of text).
+HISTORY_SIGN_BATCH = 40_000
 # Stage 6: a full run with more pending repos than this stops unless --yes.
 # Cloning 2,000 repos with 8 workers already takes hours.
 COPY_HISTORY_CONFIRM_ABOVE_REPOS = 2000
