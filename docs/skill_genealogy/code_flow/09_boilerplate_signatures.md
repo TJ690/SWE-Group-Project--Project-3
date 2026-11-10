@@ -28,7 +28,7 @@ bash scripts/skill_genealogy/tests/09_boilerplate_signatures.sh
 
 Runs `tests/skill_genealogy/test_find_copies.py` and the doctests of `find_copies.py`.
 
-`--only rehost` and `--only copies` are the parts of stages 5b and 5c. Until G13 and G14 exist they print a skip line.
+`--only rehost` is stage 5b, [registries copying each other](10_registry_rehosts.md). `--only copies` is stage 5c; until G14 exists it prints a skip line. Without `--only`, `find_copies` runs every part built so far.
 
 ## Inputs
 

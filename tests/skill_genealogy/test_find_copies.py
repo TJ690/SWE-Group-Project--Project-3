@@ -236,3 +236,300 @@ def test_iter_text_chunks_splits_rows() -> None:
     result = con.execute("SELECT range AS file_sha, 'x' AS content FROM range(5000)")
     sizes = [len(frame) for frame in stage._iter_text_chunks(result, 2100)]
     assert sizes == [2100, 2100, 800]
+
+
+# Stage 5b: registries copying each other (card G13)
+
+WORDS = (
+    "review the pull request and list every risky change with a short reason "
+    "then propose a safer patch that keeps the public interface the same and "
+    "explain how to test each fix with a small example before you merge it "
+    "check the error paths the logging and the configuration defaults as well "
+    "and write the findings as a numbered list that a new teammate can follow"
+).split()
+
+
+def skill_text(count: int = 60, change: str | None = None) -> str:
+    """A skill body of ``count`` words; ``change`` replaces the last word."""
+    words = [WORDS[index % len(WORDS)] + str(index // len(WORDS)) for index in range(count)]
+    if change:
+        words[-1] = change
+    return "---\nname: demo\n---\n" + " ".join(words)
+
+
+def rehost_inputs(rows: list[tuple[str, str, int, str, str, str]]) -> dict[str, object]:
+    """Stage 5b inputs from ``(lineage_id, repo, version_seq, date, blob, text)`` rows.
+
+    Each version is signed with ``signature_for_text`` and no boilerplate.
+    """
+    versions = pd.DataFrame(
+        [
+            (lineage, seq, blob, pd.Timestamp(date, tz="UTC"))
+            for lineage, _r, seq, date, blob, _t in rows
+        ],
+        columns=["lineage_id", "version_seq", "blob", "release_date"],
+    )
+    lineages = (
+        pd.DataFrame(
+            [(lineage, repo) for lineage, repo, *_rest in rows], columns=["lineage_id", "repo"]
+        )
+        .drop_duplicates("lineage_id")
+        .assign(is_english=True)
+    )
+    signed = [stage.signature_for_text(text, set()) for *_rest, text in rows]
+    return {
+        "lineages": lineages,
+        "versions": versions,
+        "signature_ids": [f"{lineage}#{seq}" for lineage, _r, seq, *_rest in rows],
+        "signatures": np.vstack([values for values, _size in signed]),
+        "sizes": np.asarray([size for _values, size in signed], dtype=np.int32),
+    }
+
+
+def root_of(roots: pd.DataFrame, lineage_id: str) -> dict[str, object]:
+    """The ``lineage_roots`` row of one lineage as a dict."""
+    return roots.loc[roots["lineage_id"] == lineage_id].iloc[0].to_dict()
+
+
+def test_exact_then_near_chain_to_root() -> None:
+    inputs = rehost_inputs(
+        [
+            ("A", "a/reg", 1, "2026-01-01", "blob1", skill_text()),
+            ("B", "b/reg", 1, "2026-03-01", "blob1", skill_text()),
+            ("C", "c/reg", 1, "2026-04-01", "blob2", skill_text(change="different")),
+        ]
+    )
+    roots = stage._find_roots(inputs)
+    b_row, c_row, a_row = root_of(roots, "B"), root_of(roots, "C"), root_of(roots, "A")
+    assert (b_row["copied_from_lineage"], b_row["rehost_link"], b_row["root_lineage"]) == (
+        "A",
+        "exact",
+        "A",
+    )
+    assert b_row["chain_length"] == 1 and not b_row["is_original"]
+    assert c_row["rehost_link"] == "near" and c_row["rehost_similarity"] >= 0.8
+    # C is nearer to A and B equally; the tie goes to the older date, A.
+    assert c_row["root_lineage"] == "A"
+    assert a_row["is_original"] and a_row["chain_length"] == 0 and a_row["root_lineage"] == "A"
+
+
+def test_near_copy_of_a_copy_has_chain_length_two() -> None:
+    inputs = rehost_inputs(
+        [
+            ("A", "a/reg", 1, "2026-01-01", "blob1", skill_text()),
+            ("B", "b/reg", 1, "2026-03-01", "blob1", skill_text()),
+            ("B", "b/reg", 2, "2026-03-15", "blob3", skill_text(change="extra")),
+            ("C", "c/reg", 1, "2026-04-01", "blob3", skill_text(change="extra")),
+        ]
+    )
+    c_row = root_of(stage._find_roots(inputs), "C")
+    assert (c_row["copied_from_lineage"], c_row["copied_from_seq"]) == ("B", 2)
+    assert (c_row["root_lineage"], c_row["chain_length"]) == ("A", 2)
+
+
+def test_same_date_is_no_link() -> None:
+    inputs = rehost_inputs(
+        [
+            ("A", "a/reg", 1, "2026-01-01", "blob1", skill_text()),
+            ("B", "b/reg", 1, "2026-01-01", "blob1", skill_text()),
+        ]
+    )
+    roots = stage._find_roots(inputs)
+    assert roots["is_original"].all() and roots["copied_from_lineage"].isna().all()
+
+
+def test_same_repo_two_folders_is_no_link() -> None:
+    inputs = rehost_inputs(
+        [
+            ("A1", "a/reg", 1, "2026-01-01", "blob1", skill_text()),
+            ("A2", "a/reg", 1, "2026-03-01", "blob1", skill_text()),
+        ]
+    )
+    assert stage._find_roots(inputs)["is_original"].all()
+
+
+def test_small_source_inside_larger_copy_is_near_contained() -> None:
+    inputs = rehost_inputs(
+        [
+            ("A", "a/reg", 1, "2026-01-01", "blob1", skill_text(60)),
+            ("B", "b/reg", 1, "2026-03-01", "blob2", skill_text(90)),
+        ]
+    )
+    b_row = root_of(stage._find_roots(inputs), "B")
+    assert b_row["rehost_link"] == "near_contained" and b_row["copied_from_lineage"] == "A"
+    assert b_row["rehost_similarity"] >= 0.8
+
+
+def test_tiny_source_inside_larger_copy_is_no_link() -> None:
+    # 12 words leave 8 shingles, under REHOST_CONTAINED_MIN_SHINGLES (20).
+    inputs = rehost_inputs(
+        [
+            ("A", "a/reg", 1, "2026-01-01", "blob1", skill_text(12)),
+            ("B", "b/reg", 1, "2026-03-01", "blob2", skill_text(30)),
+        ]
+    )
+    assert stage._find_roots(inputs)["is_original"].all()
+
+
+def test_cycle_by_bad_dates_ends() -> None:
+    rows = pd.DataFrame(
+        {
+            "lineage_id": ["A", "B"],
+            "copied_from_lineage": ["B", "A"],
+            "copied_from_seq": [1, 1],
+            "rehost_link": ["exact", "exact"],
+            "rehost_similarity": [1.0, 1.0],
+            "first_date": pd.to_datetime(["2026-02-01", "2026-01-01"], utc=True),
+        }
+    )
+    roots = stage.follow_to_root(rows)
+    assert roots["chain_cycle"].all()
+    assert roots["root_lineage"].tolist() == ["B", "B"]
+    assert roots["chain_length"].tolist() == [1, 0]
+    assert not roots["is_original"].any()
+
+
+def test_band_index_matches_datasketch_lsh() -> None:
+    texts = [
+        skill_text(60),
+        skill_text(60, change="x"),
+        skill_text(90),
+        skill_text(30),
+        "other words " * 20,
+    ]
+    signatures = np.vstack([stage.signature_for_text(text, set())[0] for text in texts])
+    ids = [f"L{index}#1" for index in range(len(texts))]
+    lsh = stage.build_registry_lsh(ids, signatures, 0.5)
+    bands = stage.build_band_index(signatures, 0.5)
+    for row in range(len(texts)):
+        expected = {
+            ids.index(found) for found in lsh.query(stage.minhash_from_array(signatures[row]))
+        }
+        _query, others = stage.band_candidate_pairs(bands, np.array([row]))
+        assert set(others.tolist()) == expected - {row}
+
+
+def test_containment_estimates_match_scalar() -> None:
+    from skill_genealogy.text_helpers import estimate_containment
+
+    cases = [(0.5, 4, 8), (0.0, 4, 8), (0.3, 10, 50), (0.9, 100, 90), (0.2, 0, 5)]
+    vector = stage.containment_estimates(*[np.array(column) for column in zip(*cases, strict=True)])
+    assert vector.tolist() == pytest.approx([estimate_containment(*case) for case in cases])
+
+
+def test_vectorised_sources_match_plain_rule() -> None:
+    rows = [
+        ("A", "a/reg", 1, "2026-01-01", "b1", skill_text(60)),
+        ("B", "b/reg", 1, "2026-02-01", "b2", skill_text(60, change="one")),
+        ("C", "c/reg", 1, "2026-03-01", "b3", skill_text(90)),
+        ("D", "d/reg", 1, "2026-04-01", "b1", skill_text(60)),
+        ("E", "e/reg", 1, "2026-05-01", "b4", skill_text(60, change="two")),
+        ("F", "a/reg", 1, "2026-06-01", "b5", skill_text(30)),
+    ]
+    inputs = rehost_inputs(rows)
+    roots = stage._find_roots(inputs).set_index("lineage_id")
+    table = stage.version_table(inputs["versions"], inputs["lineages"])
+    signatures, sizes = inputs["signatures"], inputs["sizes"]
+    for index, (lineage, *_rest) in enumerate(rows):
+        agree = (signatures == signatures[index]).sum(axis=1) / 128
+        candidates = table.assign(
+            jaccard=agree,
+            containment=stage.containment_estimates(agree, sizes, np.full(len(rows), sizes[index])),
+            shingles=sizes,
+        )
+        plain = stage.find_rehost_source(lineage, f"{lineage}#1", candidates)
+        found = roots.loc[lineage]
+        if plain is None:
+            assert found["is_original"]
+        else:
+            assert (found["copied_from_lineage"], found["rehost_link"]) == (
+                plain["copied_from_lineage"],
+                plain["rehost_link"],
+            )
+
+
+def kinds_table(rows: list[tuple[str, str, float | None, int]]) -> pd.DataFrame:
+    """A small ``registry_kinds`` table from ``(repo, kind, upstream_share, shared_texts)``."""
+    return pd.DataFrame(
+        [
+            {
+                "repo": repo,
+                "registry_kind": kind,
+                "confidence": 0.7,
+                "kind_basis": "date",
+                "upstream_share": share,
+                "shared_texts": shared,
+                "readme_phrase": "",
+            }
+            for repo, kind, share, shared in rows
+        ]
+    )
+
+
+def test_dated_hub_share_is_a_cross_check_only() -> None:
+    lineages = pd.DataFrame(
+        {
+            "lineage_id": [f"s{index}" for index in range(14)],
+            "repo": ["big/src"] * 10 + ["small/src"] * 4,
+            "is_english": True,
+        }
+    )
+    roots = pd.DataFrame(
+        {"lineage_id": lineages["lineage_id"], "is_original": [False] * 3 + [True] * 11}
+    )
+    shares = stage.compute_dated_hub_shares(lineages, roots).set_index("repo")
+    assert shares.loc["big/src", "dated_hub_share"] == pytest.approx(0.3)
+    assert pd.isna(shares.loc["small/src", "dated_hub_share"])
+    roles = pd.DataFrame(
+        {"repo": ["big/src", "small/src", "hub/copy"], "hub_share": [0.5, None, 0.9]}
+    )
+    kinds = kinds_table(
+        [
+            ("big/src", "source", 0.01, 384),
+            ("small/src", "source", None, 0),
+            ("hub/copy", "copier", 0.95, 49661),
+        ]
+    )
+    hubs = stage.build_registry_hubs(kinds, shares.reset_index(), roles).set_index("repo")
+    assert not hubs.loc["big/src", "is_hub"]
+    assert (
+        hubs.loc["big/src", "hub_reason"] == "source: 1% of 384 shared texts first seen elsewhere"
+    )
+    assert hubs.loc["big/src", "preview_hub_share"] == pytest.approx(0.5)
+    copier = hubs.loc["hub/copy"]
+    assert (
+        copier["is_hub"] and copier["english_lineages"] == 0 and pd.isna(copier["dated_hub_share"])
+    )
+    assert copier["hub_reason"].startswith("copier: 95% of 49,661")
+
+
+def test_update_repo_roles_uses_g38_kinds() -> None:
+    roles = pd.DataFrame(
+        {
+            "repo": ["hub/copy", "src/reg", "app/one", "app/hub"],
+            "is_registry": [True, True, False, False],
+            "is_hub": [False, False, False, True],
+            "hub_tested": [True, True, False, True],
+            "hub_share": [0.1, 0.0, None, 0.6],
+            "repo_role": ["registry", "registry", "repository", "hub"],
+        }
+    )
+    hubs = pd.DataFrame(
+        {
+            "repo": ["hub/copy", "src/reg"],
+            "registry_kind": ["copier", "source"],
+            "is_hub": [True, False],
+            "upstream_share": [0.95, 0.02],
+        }
+    )
+    final = stage.update_repo_roles(roles, hubs).set_index("repo")
+    assert len(final) == len(roles)
+    assert (
+        final.loc["hub/copy", "repo_role"] == "registry_copier" and final.loc["hub/copy", "is_hub"]
+    )
+    assert final.loc["hub/copy", "hub_share"] == pytest.approx(0.95)
+    assert final.loc["src/reg", "repo_role"] == "registry"
+    assert final.loc["app/hub", "repo_role"] == "hub" and final.loc["app/hub", "is_hub"]
+    assert final.loc["app/hub", "hub_evidence"] == "dataset_dates"
+    assert final.loc["app/one", "hub_evidence"] is None
+    assert set(final.loc[["hub/copy", "src/reg"], "hub_evidence"]) == {"registry_kinds"}

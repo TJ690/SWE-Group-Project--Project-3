@@ -117,6 +117,14 @@ NEAR_COPY_MIN_CONTAINMENT = 0.80
 # Jaccard below 0.80, so those pairs are queried at 0.5. A copy that grew
 # much larger than the source can fall below 0.5 and be missed.
 REHOST_CONTAINMENT_LSH_THRESHOLD = 0.5
+# A23 (G13): a near_contained registry link needs the older (source) text to
+# keep at least this many shingles after boilerplate removal. A smaller rest is
+# often only headings ("## Instructions", "## Safety", "## Resources") that
+# unrelated skills share, so it is contained in many texts by chance. Full run
+# 2026-11-09: contained links with a source under 20 shingles kept the skill's
+# folder name in 26-48% of cases, from 20 to 200 shingles in 78-89%. A near
+# link needs similar sizes on both sides and is not limited.
+REHOST_CONTAINED_MIN_SHINGLES = 20
 # A26: a source that agrees on this many MinHash values or fewer (J <= 0.04) is
 # chance, not evidence. It is not picked when a strong source is also eligible.
 # A small registry text inside a large copy can reach containment 1.0 from one
