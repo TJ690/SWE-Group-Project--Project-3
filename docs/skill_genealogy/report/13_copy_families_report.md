@@ -1,6 +1,6 @@
 # Copy families report
 
-Results of stage 7a, read from `src/data/skill_genealogy/` on 2026-11-10. How the step runs is in [copy families](../code_flow/13_copy_families.md); why it is built this way is in the [design note](../design/13_copy_families.md).
+Results of stages 7a and 7b, read from `src/data/skill_genealogy/` on 2026-11-10. How the step runs is in [copy families](../code_flow/13_copy_families.md); why it is built this way is in the [design note](../design/13_copy_families.md).
 
 ## How the tables were built
 
@@ -8,6 +8,7 @@ Results of stage 7a, read from `src/data/skill_genealogy/` on 2026-11-10. How th
 |---|---|---|
 | 2026-11-10 | Full run (`python -m skill_genealogy.assign_families`), 172 seconds | Read 1,637,779 own `SKILL.md` history rows of 1,096,902 copy files, signed 33,210 history texts, wrote the four tables |
 | 2026-11-10 | `--force`, 172 seconds | Same numbers; every date column of `copy_files` is now stored in microseconds |
+| 2026-11-10 | `--force` with stage 7b, 611 seconds | Same stage 7a numbers; scored 42,554 proven pairs (about 7 minutes of line diffs) and wrote `proven_pairs` and `link_method_recall` |
 
 ## Links per copy file
 
@@ -81,6 +82,36 @@ GitSkills marks only 3 of its 282,200 repos as forks, so the totals with and wit
 | no_date | 260,809 | 92.3% |
 
 12,549 files hold texts that only weak copiers (stage 3c confidence below 0.5) hold. **Most files cannot be dated**, because these files were not cloned in stage 6 and the dataset `first_commit_at` is empty for most rows. Among the dated files, the dataset repo had the text first more than three times as often as the copier. That fits copiers being crawlers.
+
+## Link method recall (stage 7b)
+
+The test set is the 42,554 copy files whose winning link is `history_exact`. Each file's newest history text is scored against every version of its linked lineage. 6,230 of these texts changed after the crawl. GitSkills marks almost no repo as a fork, so recall without forks is the same.
+
+| Method | Found | Recall | Recall on the 6,230 texts changed since the crawl |
+|---|---:|---:|---:|
+| exact (same normalised text) | 7,180 | 0.169 | 0.247 |
+| MinHash Jaccard ≥ 0.80 | 30,028 | 0.706 | 0.598 |
+| containment ≥ 0.80 | 37,794 | 0.888 | 0.818 |
+| line check ≥ 0.50 | 41,892 | 0.984 | 0.930 |
+| any text method | 41,900 | 0.985 | 0.931 |
+
+Split by the file's stage 5c link and by whether the text changed since the crawl:
+
+| Stage 5c link | Changed | Pairs | exact | Jaccard | containment | line check | missed by all |
+|---|---|---:|---:|---:|---:|---:|---:|
+| near | no | 26,918 | 0.208 | 0.977 | 0.988 | 0.994 | 157 |
+| near | yes | 4,122 | 0.269 | 0.779 | 0.896 | 0.954 | 188 |
+| near_contained | no | 5,508 | 0.000 | 0.000 | 0.965 | 0.994 | 33 |
+| near_contained | yes | 1,288 | 0.162 | 0.214 | 0.773 | 0.877 | 158 |
+| cluster | no | 3,898 | 0.010 | 0.000 | 0.202 | 0.992 | 31 |
+| cluster | yes | 820 | 0.271 | 0.293 | 0.495 | 0.894 | 87 |
+
+What the numbers say:
+
+- **The line check finds almost every proven copy, and MinHash Jaccard misses most edited ones.** A copy that grows keeps the registry lines but falls under a Jaccard of 0.80. Containment sits in between. On texts that changed after the crawl, Jaccard finds 60% and the line check 93%.
+- **Exact finds 17%, even though no file in the set has an exact blob link.** These texts equal a registry version after normalisation (spaces, line endings, blank lines) but not byte for byte, so stage 5c, which compares blobs, called them near.
+- **654 proven copies (1.5%) are missed by every method.** Most of them changed after the crawl (433). The 221 unchanged ones were linked by stage 5c to another lineage than the one their history proves, so the text matches a different registry skill. Example: `phatblat/dotfiles` `.claude/skills/brainstorm/SKILL.md` once held a blob of `Aedelon/claude-code-blueprint::skills/brainstorm`, and its current text shares no shingle and no line with any version of it.
+- **The set is not a random sample.** Stage 6 cloned only copies stage 5c had linked, so every pair was found by some text method on its crawled text. The first group (near, unchanged) is close to 1 by construction. Use the changed-since-crawl column as the method comparison.
 
 ## For later stages
 

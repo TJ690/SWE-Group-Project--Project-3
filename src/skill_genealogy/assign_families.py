@@ -8,7 +8,9 @@ link, the registry version it started from (chosen by date), and when and in
 which batch it arrived in its repo. Every English text then gets one family:
 a source lineage, a copier that holds it, an independent cluster or a
 singleton. Texts only a copier holds get a per-file date comparison with
-that copier.
+that copier. Stage 7b then takes the copies proven by their history
+(``history_exact``) as a test set and measures how many of them each text
+method (exact, MinHash Jaccard, containment, line check) still finds.
 
 Inputs (dev or full data folder): ``copy_candidates.parquet``,
 ``text_links.parquet``, ``copier_seen.parquet`` (stage 5c),
@@ -22,8 +24,10 @@ change rows. Also the GitSkills artifacts and repos and
 
 Outputs (dev or full data folder): ``copy_files.parquet`` (one row per copy
 file), ``families.parquet`` (one row per English text),
-``copier_seen_files.parquet`` (one row per file of a ``copier_seen`` text) and
-``history_link_counts.parquet``.
+``copier_seen_files.parquet`` (one row per file of a ``copier_seen`` text),
+``history_link_counts.parquet``, and for stage 7b ``proven_pairs.parquet``
+(one row per history-proven copy file) and ``link_method_recall.parquet``
+(one row per text method).
 
 Run (no network):
     python -m skill_genealogy.assign_families --dev
@@ -42,6 +46,8 @@ import numpy as np
 import pandas as pd
 
 from skill_genealogy import settings
+from skill_genealogy.build_registry_lineages import normalized_sha, read_texts
+from skill_genealogy.compare_texts import share_of_registry_lines_kept
 from skill_genealogy.download_copied_skill_history import skill_folder_of
 from skill_genealogy.file_helpers import (
     build_arg_parser,
@@ -54,16 +60,20 @@ from skill_genealogy.file_helpers import (
     write_parquet,
 )
 from skill_genealogy.find_copies import (
+    _line_shares,
     _load_one,
+    _open_line_pool,
     _open_sign_pool,
     _prepare_duckdb,
     _quote_path,
     _sign_many,
     _signature_files,
+    _texts_path,
     boilerplate_path,
     build_boilerplate_set,
     build_copy_band_index,
     choose_near_links,
+    containment_estimates,
     copier_seen_path,
     copy_candidates_path,
     dataset_signatures_dir,
@@ -74,6 +84,7 @@ from skill_genealogy.find_copies import (
     registry_signatures_path,
     repo_roles_final_path,
     search_copy_candidates,
+    signature_for_text,
     text_links_path,
     version_table,
 )
@@ -191,6 +202,43 @@ HISTORY_COLUMNS = (
     "inherited",
     "repo_created_at",
 )
+# Stage 7b (A34d): one row per history-proven copy file.
+PROVEN_PAIR_COLUMNS = (
+    "repo",
+    "path",
+    "lineage_id",
+    "current_file_sha",
+    "exact",
+    "jaccard_found",
+    "containment_found",
+    "verified_found",
+    "best_jaccard",
+    "best_containment",
+    "best_line_share",
+    "stage5_link",
+    "current_is_dataset_text",
+    "is_fork",
+)
+# Text methods of A34d and the proven_pairs column that says whether each found the copy.
+METHOD_COLUMNS = {
+    "exact": "exact",
+    "minhash_jaccard": "jaccard_found",
+    "containment": "containment_found",
+    "line_check": "verified_found",
+}
+RECALL_COLUMNS = (
+    "method",
+    "proven_pairs",
+    "found",
+    "recall",
+    "recall_without_forks",
+    "changed_pairs",
+    "recall_changed_since_crawl",
+)
+# The best score of a proven pair over its lineage's versions (A34d).
+_BEST_SCORES = {"best_jaccard": "max", "best_containment": "max", "best_line_share": "max"}
+# Proven pairs whose texts are read and scored at once (A34d).
+PROVEN_SCORE_BATCH = 2_000
 # One candidate link of one copy file (before rule 4 picks one).
 FILE_LINK_COLUMNS = (
     "repo",
@@ -410,6 +458,15 @@ QUALIFY row_number() OVER (
 ) = 1
 """
 
+# Query Q7.11, see code_flow/13_copy_families.md
+# Dataset text of the proven copies whose current text is not a stage 6 blob.
+PROVEN_DATASET_TEXTS_SQL = """
+SELECT artifacts.file_sha AS sha, any_value(artifacts.content) AS text
+FROM artifacts
+SEMI JOIN wanted_texts ON artifacts.file_sha = wanted_texts.sha
+GROUP BY artifacts.file_sha
+"""
+
 
 # Paths
 
@@ -425,13 +482,15 @@ def _registry_changes_path() -> Path:
 
 
 def output_paths(dev: bool) -> dict[str, Path]:
-    """The four stage 7a output files of this mode."""
+    """The six stage 7 output files of this mode (four of 7a, two of 7b)."""
     folder = settings.data_dir(dev)
     return {
         "copy_files": folder / "copy_files.parquet",
         "families": folder / "families.parquet",
         "copier_seen_files": folder / "copier_seen_files.parquet",
         "history_link_counts": folder / "history_link_counts.parquet",
+        "proven_pairs": folder / "proven_pairs.parquet",
+        "link_method_recall": folder / "link_method_recall.parquet",
     }
 
 
@@ -1329,11 +1388,360 @@ def count_history_links(copy_files: pd.DataFrame) -> pd.DataFrame:
     return counts.drop(columns=["link_rank"]).reset_index(drop=True)
 
 
-# Step 10: save and print the summary
+# Step 10: history-proven test set and recall per text method (Algorithm A34d)
+
+
+def newest_history_blobs(histories: pd.DataFrame) -> pd.DataFrame:
+    """The newest text of each copy file's history: ``repo, path, blob``.
+
+    Deletes are skipped. Order: a real date beats a missing one, then the
+    later date, then the higher ``commit_seq``, then the higher ``version_seq``.
+
+    >>> rows = pd.DataFrame({"repo": ["a/r"] * 3, "path": ["SKILL.md"] * 3,
+    ...     "blob": ["x", "y", None], "status": ["A", "M", "D"], "commit_seq": [1, 2, 3],
+    ...     "version_seq": [1, 2, None],
+    ...     "commit_date": pd.to_datetime(["2026-01-01", "2026-02-01", "2026-03-01"], utc=True)})
+    >>> newest_history_blobs(rows)["blob"].tolist()
+    ['y']
+    """
+    rows = histories.loc[histories["blob"].notna() & (histories["status"] != "D")]
+    ordered = rows.sort_values(
+        ["repo", "path", "commit_date", "commit_seq", "version_seq"],
+        kind="mergesort",
+        na_position="first",
+    )
+    newest = ordered.drop_duplicates(["repo", "path"], keep="last")
+    return newest.loc[:, ["repo", "path", "blob"]].reset_index(drop=True)
+
+
+def build_proven_pairs(copy_files: pd.DataFrame, histories: pd.DataFrame) -> pd.DataFrame:
+    """The history-proven test set: copy files whose winning link is ``history_exact``.
+
+    Each file is paired with its linked lineage. Its current text is the
+    newest blob of its own history, else its dataset text (``file_sha``).
+    ``current_is_dataset_text`` is true when the two are the same blob, so the
+    text stage 5c linked has not changed since the crawl. A ``copier_seen``
+    file is never here: it has no lineage link.
+
+    Outputs: ``repo, path, lineage_id, current_file_sha,
+    current_is_dataset_text, is_fork``.
+
+    >>> files = pd.DataFrame({"repo": ["a/r", "a/r"], "path": ["x/SKILL.md", "y/SKILL.md"],
+    ...     "file_sha": ["crawled", "other"], "lineage_id": ["L", "L"],
+    ...     "link": ["history_exact", "near"], "is_fork": [False, False]})
+    >>> rows = pd.DataFrame({"repo": ["a/r"], "path": ["x/SKILL.md"], "blob": ["newer"],
+    ...     "status": ["M"], "commit_seq": [1], "version_seq": [1],
+    ...     "commit_date": pd.to_datetime(["2026-01-01"], utc=True)})
+    >>> build_proven_pairs(files, rows)[["path", "current_file_sha"]].values.tolist()
+    [['x/SKILL.md', 'newer']]
+    """
+    proven = copy_files.loc[
+        copy_files["link"] == "history_exact", ["repo", "path", "file_sha", "lineage_id", "is_fork"]
+    ]
+    pairs = proven.merge(newest_history_blobs(histories), on=["repo", "path"], how="left")
+    pairs["current_file_sha"] = pairs["blob"].fillna(pairs["file_sha"])
+    pairs["current_is_dataset_text"] = pairs["current_file_sha"] == pairs["file_sha"]
+    pairs["is_fork"] = pairs["is_fork"].fillna(False).astype(bool)
+    columns = ["repo", "path", "lineage_id", "current_file_sha", "current_is_dataset_text"]
+    return pairs.loc[:, [*columns, "is_fork"]].reset_index(drop=True)
+
+
+def passes_text_methods(
+    same_text: object, jaccard: object, containment: object, line_share: object
+) -> dict[str, object]:
+    """Whether one registry version passes each text method's cutoff (scalars or arrays).
+
+    exact = same normalised text; minhash_jaccard = estimated Jaccard >=
+    ``NEAR_COPY_MIN_JACCARD``; containment = estimated containment >=
+    ``NEAR_COPY_MIN_CONTAINMENT``; line_check = share of registry lines kept
+    >= ``MIN_VERIFIED_LINE_SHARE``. A missing score (NaN) passes nothing.
+
+    >>> passes_text_methods(False, 0.5, 0.9, 0.5)
+    {'exact': False, 'minhash_jaccard': False, 'containment': True, 'line_check': True}
+    """
+    return {
+        "exact": same_text,
+        "minhash_jaccard": jaccard >= settings.NEAR_COPY_MIN_JACCARD,
+        "containment": containment >= settings.NEAR_COPY_MIN_CONTAINMENT,
+        "line_check": line_share >= settings.MIN_VERIFIED_LINE_SHARE,
+    }
+
+
+def _signature_jaccard(
+    left: np.ndarray, left_size: int, right: np.ndarray, right_size: int
+) -> float:
+    """Share of the 128 MinHash values that are equal; 0 when a text has no shingles."""
+    if left_size <= 0 or right_size <= 0:
+        return 0.0
+    return float((np.asarray(left) == np.asarray(right)).sum() / settings.MINHASH_NUM_PERM)
+
+
+# Algorithm A34d, see code_flow/13_copy_families.md
+def score_methods_on_pair(
+    registry_texts: list[str], copy_text: str, boilerplate: set[str] | frozenset[str] = frozenset()
+) -> dict[str, bool]:
+    """Which text methods find a proven copy: a method finds it when any lineage version passes.
+
+    For each registry version: exact = same ``normalized_sha`` (the stage 4a
+    version key); Jaccard and containment from the stage 5a signatures
+    (boilerplate removed, 5-word shingles, 128 values); line check = share of
+    registry body lines the copy still has. ``any_text_method`` is the or of
+    the four. This is the plain version; ``score_proven_pairs`` is the fast
+    one, tested to agree.
+
+    Example: 40 registry lines inside a copy of 100 lines (60% new) are found
+    by containment and the line check, not by exact or Jaccard (see tests).
+
+    >>> body = "\\n".join(f"line {n} says something about step {n} here" for n in range(12))
+    >>> score_methods_on_pair([body], body)["minhash_jaccard"]
+    True
+    >>> score_methods_on_pair(["a b c d e f"], "z y x w v u")["any_text_method"]
+    False
+    """
+    copy_key = normalized_sha(copy_text)
+    copy_signature, copy_size = signature_for_text(copy_text, set(boilerplate))
+    found = dict.fromkeys(METHOD_COLUMNS, False)
+    for registry_text in registry_texts:
+        signature, size = signature_for_text(registry_text, set(boilerplate))
+        jaccard = _signature_jaccard(signature, size, copy_signature, copy_size)
+        containment = containment_estimates(
+            np.array([jaccard]), np.array([size]), np.array([copy_size])
+        )[0]
+        passed = passes_text_methods(
+            normalized_sha(registry_text) == copy_key,
+            jaccard,
+            containment,
+            share_of_registry_lines_kept(registry_text, copy_text),
+        )
+        found = {method: bool(found[method] or passed[method]) for method in found}
+    return {**found, "any_text_method": any(found.values())}
+
+
+def score_proven_pairs(
+    pairs: pd.DataFrame,
+    versions: pd.DataFrame,
+    signatures: dict[str, dict[str, object]],
+    texts: dict[str, dict[str, str]],
+    pool: object | None = None,
+) -> pd.DataFrame:
+    """``score_methods_on_pair`` for many pairs at once, with stored signatures.
+
+    Every pair is scored against every version of its lineage. Jaccard and
+    containment come from the signature books (``signatures["copy"]`` by
+    sha, ``signatures["registry"]`` by ``version_id``); a missing signature
+    scores 0. A missing text gives a null line share and no exact match.
+
+    Inputs: pairs (``build_proven_pairs``); versions (``lineage_id,
+    version_id, blob, normalized_sha``); ``texts = {"copies": sha -> text,
+    "versions": blob -> text}``. Outputs: the pairs with ``exact,
+    jaccard_found, containment_found, verified_found, best_jaccard,
+    best_containment, best_line_share``.
+    """
+    rows = pairs.loc[:, ["repo", "path", "lineage_id", "current_file_sha"]].merge(
+        versions.loc[:, ["lineage_id", "version_id", "blob", "normalized_sha"]], on="lineage_id"
+    )
+    copy_keys = {sha: normalized_sha(text) for sha, text in texts["copies"].items()}
+    same_text = (rows["current_file_sha"].map(copy_keys) == rows["normalized_sha"]).to_numpy()
+    jaccard = _book_jaccard(signatures, rows)
+    copy_sizes = _book_sizes(signatures["copy"], rows["current_file_sha"])
+    registry_sizes = _book_sizes(signatures["registry"], rows["version_id"])
+    containment = containment_estimates(jaccard, registry_sizes, copy_sizes)
+    line_share = _pair_line_shares(rows, texts, pool)
+    passed = passes_text_methods(same_text, jaccard, containment, line_share)
+    for method, column in METHOD_COLUMNS.items():
+        rows[column] = np.asarray(passed[method], dtype=bool)
+    rows["best_jaccard"], rows["best_containment"] = jaccard, containment
+    rows["best_line_share"] = line_share
+    found = rows.groupby(["repo", "path"], sort=False).agg(
+        {**dict.fromkeys(METHOD_COLUMNS.values(), "any"), **_BEST_SCORES}
+    )
+    scored = pairs.merge(found.reset_index(), on=["repo", "path"], how="left")
+    for column in METHOD_COLUMNS.values():
+        scored[column] = scored[column].fillna(False).astype(bool)
+    return scored
+
+
+def _book_jaccard(signatures: dict[str, dict[str, object]], rows: pd.DataFrame) -> np.ndarray:
+    """Estimated Jaccard of each (copy sha, version id) row; 0 when a signature is missing."""
+    copy_rows = _book_rows(signatures["copy"], rows["current_file_sha"])
+    registry_rows = _book_rows(signatures["registry"], rows["version_id"])
+    jaccard = np.zeros(len(rows), dtype=np.float64)
+    both = np.flatnonzero((copy_rows >= 0) & (registry_rows >= 0))
+    for start in range(0, len(both), ORIGIN_SCORE_BLOCK):
+        block = both[start : start + ORIGIN_SCORE_BLOCK]
+        agree = (
+            signatures["copy"]["signatures"][copy_rows[block]]
+            == signatures["registry"]["signatures"][registry_rows[block]]
+        ).sum(axis=1)
+        jaccard[block] = agree / settings.MINHASH_NUM_PERM
+    return jaccard
+
+
+def _book_rows(book: dict[str, object], keys: pd.Series) -> np.ndarray:
+    """Row of each key in a signature book, -1 when it has none."""
+    return keys.astype(str).map(book["row"]).fillna(-1).to_numpy(dtype=np.int64)
+
+
+def _book_sizes(book: dict[str, object], keys: pd.Series) -> np.ndarray:
+    """Shingle count of each key's signature, 0 when it has none."""
+    rows = _book_rows(book, keys)
+    sizes = np.zeros(len(rows), dtype=np.int64)
+    sizes[rows >= 0] = np.asarray(book["sizes"])[rows[rows >= 0]]
+    return sizes
+
+
+def _pair_line_shares(
+    rows: pd.DataFrame, texts: dict[str, dict[str, str]], pool: object | None
+) -> np.ndarray:
+    """``share_of_registry_lines_kept`` per (version, copy) row; NaN when a text is missing."""
+    shares = np.full(len(rows), np.nan)
+    registry = rows["blob"].map(texts["versions"])
+    copy = rows["current_file_sha"].map(texts["copies"])
+    present = np.flatnonzero((registry.notna() & copy.notna()).to_numpy())
+    pairs = [(registry.iat[row], copy.iat[row]) for row in present]
+    shares[present] = _line_shares(pairs, pool)
+    return shares
+
+
+def score_proven_pairs_in_batches(
+    con: duckdb.DuckDBPyConnection,
+    pairs: pd.DataFrame,
+    versions: pd.DataFrame,
+    signatures: dict[str, dict[str, object]],
+    history_texts: Path,
+) -> pd.DataFrame:
+    """``score_proven_pairs`` ``PROVEN_SCORE_BATCH`` pairs at a time, reading their texts.
+
+    Registry texts come from the stage 3 texts table, copy texts from the
+    stage 6 texts table; a current text that is only a dataset text is read
+    once from the artifacts (query Q7.11). Pairs are sorted by lineage, so a
+    batch reads few registry texts.
+    """
+    ordered = pairs.sort_values(["lineage_id", "repo", "path"], kind="mergesort")
+    dataset_texts = _proven_dataset_texts(con, ordered, history_texts)
+    pool = _open_line_pool() if len(ordered) >= PROVEN_SCORE_BATCH else None
+    parts = [score_proven_pairs(ordered.iloc[:0], versions, signatures, _no_texts())]
+    try:
+        for start in range(0, len(ordered), PROVEN_SCORE_BATCH):
+            batch = ordered.iloc[start : start + PROVEN_SCORE_BATCH]
+            batch_versions = versions.loc[versions["lineage_id"].isin(batch["lineage_id"])]
+            copy_shas = sorted(set(batch["current_file_sha"]))
+            texts = {
+                "copies": {**dataset_texts, **read_texts(history_texts, copy_shas)},
+                "versions": read_texts(_texts_path(), sorted(set(batch_versions["blob"].dropna()))),
+            }
+            parts.append(score_proven_pairs(batch, batch_versions, signatures, texts, pool))
+            print(f"proven pairs: {start + len(batch)}/{len(ordered)} scored", flush=True)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _no_texts() -> dict[str, dict[str, str]]:
+    """An empty text lookup."""
+    return {"copies": {}, "versions": {}}
+
+
+def _proven_dataset_texts(
+    con: duckdb.DuckDBPyConnection, pairs: pd.DataFrame, history_texts: Path
+) -> dict[str, str]:
+    """Query Q7.11: dataset text of current texts that are not stage 6 blobs (usually none)."""
+    from skill_genealogy.find_copies import _as_text
+
+    shas = pd.DataFrame({"sha": sorted(set(pairs["current_file_sha"]))})
+    con.register("proven_shas", shas)
+    try:
+        stored = con.execute(
+            f"SELECT DISTINCT sha FROM read_parquet({_quote_path(str(history_texts))}) "
+            "SEMI JOIN proven_shas USING (sha)"
+        ).df()
+    finally:
+        con.unregister("proven_shas")
+    wanted = shas.loc[~shas["sha"].isin(stored["sha"])]
+    if wanted.empty:
+        return {}
+    con.register("wanted_texts", wanted)
+    try:
+        rows = con.execute(PROVEN_DATASET_TEXTS_SQL).fetchall()
+    finally:
+        con.unregister("wanted_texts")
+    return {str(sha): _as_text(text) for sha, text in rows}
+
+
+def measure_link_method_recall(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Recall of each text method on the proven pairs: ``found / proven_pairs``.
+
+    Rows: exact, minhash_jaccard, containment, line_check, any_text_method
+    (the or of the four), and ``tfidf`` only when a ``tfidf_found`` column
+    exists (G30). ``recall_without_forks`` leaves out fork files (a fork
+    shares the registry's history). ``recall_changed_since_crawl`` counts only
+    pairs whose current text is not the dataset text stage 5c linked.
+
+    >>> pairs = pd.DataFrame({"exact": [True, False, False],
+    ...     "jaccard_found": [True, False, False], "containment_found": [True, True, False],
+    ...     "verified_found": [True, True, False], "is_fork": [False] * 3,
+    ...     "current_is_dataset_text": [True, False, False]})
+    >>> measure_link_method_recall(pairs)[["method", "found", "recall"]].values.tolist()[-1]
+    ['any_text_method', 2, 0.6667]
+    """
+    flags = pairs.loc[:, list(METHOD_COLUMNS.values())].rename(
+        columns={column: method for method, column in METHOD_COLUMNS.items()}
+    )
+    flags["any_text_method"] = flags.any(axis=1)
+    if "tfidf_found" in pairs.columns:
+        flags["tfidf"] = pairs["tfidf_found"].fillna(False).astype(bool)
+    not_fork = ~pairs["is_fork"].fillna(False).astype(bool)
+    changed = ~pairs["current_is_dataset_text"].fillna(False).astype(bool)
+    rows = []
+    for method in flags.columns:
+        found = flags[method].astype(bool)
+        rows.append(
+            {
+                "method": method,
+                "proven_pairs": len(found),
+                "found": int(found.sum()),
+                "recall": _share(int(found.sum()), len(found)),
+                "recall_without_forks": _share(int(found[not_fork].sum()), int(not_fork.sum())),
+                "changed_pairs": int(changed.sum()),
+                "recall_changed_since_crawl": _share(int(found[changed].sum()), int(changed.sum())),
+            }
+        )
+    return pd.DataFrame(rows, columns=list(RECALL_COLUMNS))
+
+
+def build_link_method_recall(
+    con: duckdb.DuckDBPyConnection,
+    copy_files: pd.DataFrame,
+    histories: pd.DataFrame,
+    tables: dict[str, object],
+    signatures: dict[str, dict[str, object]],
+) -> dict[str, pd.DataFrame]:
+    """Stage 7b: the proven pairs, scored, and the recall table."""
+    pairs = build_proven_pairs(copy_files, histories)
+    stage5 = (
+        tables["copies"].loc[:, ["repo", "path", "link"]].rename(columns={"link": "stage5_link"})
+    )
+    pairs = pairs.merge(stage5, on=["repo", "path"], how="left")
+    keys = read_parquet(tables["paths"]["lineage_versions"]).loc[
+        :, ["lineage_id", "version_seq", "normalized_sha"]
+    ]
+    versions = tables["versions"].merge(keys, on=["lineage_id", "version_seq"], how="left")
+    versions = versions.loc[versions["lineage_id"].isin(pairs["lineage_id"])]
+    history_texts = tables["paths"]["history_texts"]
+    scored = score_proven_pairs_in_batches(con, pairs, versions, signatures, history_texts)
+    return {
+        "proven_pairs": scored.loc[:, list(PROVEN_PAIR_COLUMNS)],
+        "link_method_recall": measure_link_method_recall(scored),
+    }
+
+
+# Step 11: save and print the summary
 
 
 def save_outputs(outputs: dict[str, pd.DataFrame], dev: bool) -> None:
-    """Write the four stage 7a tables, sorted so a rerun gives the same files."""
+    """Write the six stage 7 tables, sorted so a rerun gives the same files."""
     paths = output_paths(dev)
     write_parquet(
         outputs["copy_files"].loc[:, list(COPY_FILE_COLUMNS)], paths["copy_files"], ["repo", "path"]
@@ -1345,6 +1753,21 @@ def save_outputs(outputs: dict[str, pd.DataFrame], dev: bool) -> None:
         ["repo", "path"],
     )
     write_parquet(outputs["history_link_counts"], paths["history_link_counts"])
+    write_parquet(
+        outputs["proven_pairs"].loc[:, list(PROVEN_PAIR_COLUMNS)],
+        paths["proven_pairs"],
+        ["repo", "path"],
+    )
+    write_parquet(outputs["link_method_recall"], paths["link_method_recall"])
+
+
+def print_recall(recall: pd.DataFrame, pairs: pd.DataFrame) -> None:
+    """Print the recall table and two proven pairs that no text method finds."""
+    print("stage 7b link method recall (history-proven copies)")
+    print(recall.to_string(index=False))
+    missed = pairs.loc[~pairs.loc[:, list(METHOD_COLUMNS.values())].any(axis=1)]
+    print(f"proven pairs no text method finds: {len(missed)}")
+    print_sample_records(missed.loc[:, list(PROVEN_PAIR_COLUMNS)], "missed proven pair sample")
 
 
 def _share(part: int, whole: int) -> float:
@@ -1423,10 +1846,11 @@ def print_run_summary(outputs: dict[str, pd.DataFrame], elapsed: float) -> None:
     print_sample_records(families.loc[families["family_kind"] == "source"], "family sample")
     print_sample_records(seen_files, "copier seen file sample")
     print_sample_records(outputs["history_link_counts"], "history link counts")
+    print_recall(outputs["link_method_recall"], outputs["proven_pairs"])
 
 
 def build_families(dev: bool) -> dict[str, pd.DataFrame]:
-    """Stage 7a steps 1-9; returns the four output tables. Nothing is written."""
+    """Stage 7 steps 1-10; returns the six output tables. Nothing is written."""
     work_dir = Path(tempfile.mkdtemp(prefix="genealogy_families_"))
     con = connect_duckdb()
     try:
@@ -1453,7 +1877,9 @@ def build_families(dev: bool) -> dict[str, pd.DataFrame]:
         )
         open_files = open_files.loc[open_files["_merge"] == "left_only", ["repo", "path"]]
         first = first_history_versions(histories)
+        newest = newest_history_blobs(histories.merge(history_exact.loc[:, ["repo", "path"]]))
         wanted = set(first["blob"]) | set(copies.loc[copies["link"] != "exact", "file_sha"])
+        wanted |= set(newest["blob"])
         boilerplate = build_boilerplate_set(
             read_parquet(boilerplate_path()), settings.BOILERPLATE_MIN_OWNERS
         )
@@ -1500,12 +1926,18 @@ def build_families(dev: bool) -> dict[str, pd.DataFrame]:
         seen_files = build_copier_seen_files(con, tables["copier_seen"])
         print("Step 9: families and copier results", flush=True)
         inherited_links = _inherited_history_links(copy_files, histories, versions)
+        # Step 10: history-proven test set and recall per text method (A34d, Q7.11)
+        recall = build_link_method_recall(
+            con, copy_files, histories, tables, {"copy": text_sigs, "registry": registry_book}
+        )
+        print(f"Step 10: {len(recall['proven_pairs'])} proven pairs scored", flush=True)
         return {
             "copy_files": _same_date_unit(copy_files.loc[:, list(COPY_FILE_COLUMNS)]),
             "families": families,
             "copier_seen_files": seen_files,
             "history_link_counts": count_history_links(copy_files),
             "inherited_links": inherited_links,
+            **recall,
         }
     finally:
         con.close()
@@ -1538,19 +1970,19 @@ def _inherited_history_links(
 
 
 def run(dev: bool, force: bool) -> None:
-    """Stage 7a: skip when the four outputs exist (unless ``force``), else build, save, print."""
+    """Stage 7: skip when the six outputs exist (unless ``force``), else build, save, print."""
     outputs = list(output_paths(dev).values())
     if force:
-        print("force: deleting the four stage 7a outputs", flush=True)
+        print("force: deleting the six stage 7 outputs", flush=True)
         for path in outputs:
             path.unlink(missing_ok=True)
     if outputs_exist(outputs):
-        print("skip: stage 7a outputs exist (use --force to rebuild)", flush=True)
+        print("skip: stage 7 outputs exist (use --force to rebuild)", flush=True)
         return
     started = time.perf_counter()
-    # Steps 1-9: links, origins, arrivals, families
+    # Steps 1-10: links, origins, arrivals, families, recall per text method
     result = build_families(dev)
-    # Step 10: save and print the summary
+    # Step 11: save and print the summary
     save_outputs(result, dev)
     print_run_summary(result, time.perf_counter() - started)
 
@@ -1558,7 +1990,8 @@ def run(dev: bool, force: bool) -> None:
 def main() -> None:
     """Run stage 7a from the command line (``--dev``, ``--force``)."""
     args = build_arg_parser(
-        "Stage 7a: history links, strongest link, origin version, arrival groups, families."
+        "Stage 7: history links, strongest link, origin version, arrival groups, families, "
+        "recall per text method."
     ).parse_args()
     run(bool(args.dev), bool(args.force))
 

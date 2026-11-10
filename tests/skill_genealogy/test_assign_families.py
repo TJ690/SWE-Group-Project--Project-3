@@ -434,3 +434,173 @@ def test_history_link_counts_per_link_and_source():
         ["history_near", "copied", 1],
         ["cluster", "copied", 1],
     ]
+
+
+# A34d: history-proven test set, recall per text method
+
+WORDS = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".split()
+
+
+def numbered_lines(prefix: str, count: int) -> list[str]:
+    """``count`` distinct lines of nine words each, all starting with ``prefix``."""
+    return [f"{prefix} {n} {' '.join(WORDS[(n + k) % 12] for k in range(7))}" for n in range(count)]
+
+
+REGISTRY_TEXT = "\n".join(numbered_lines("step", 40))
+UNRELATED_TEXT = "\n".join(numbered_lines("other", 40))
+COPY_TEXTS = {
+    "same": REGISTRY_TEXT,
+    "grown": REGISTRY_TEXT + "\n" + "\n".join(numbered_lines("added", 60)),
+    "reworded": "\n".join(numbered_lines("rewritten", 40)),
+    "fork": REGISTRY_TEXT,
+}
+
+
+def proven_world() -> dict[str, object]:
+    """Four history-proven copies of lineage L, its versions, texts and signature books.
+
+    L v1 is the registry text, v2 an unrelated later version. ``fork`` is an
+    unchanged copy in a fork. Each copy's newest history blob is its current
+    text; ``grown`` also has an older blob equal to v1.
+    """
+    files = pd.DataFrame(
+        {
+            "repo": ["a/r", "a/r", "a/r", "f/k", "a/r"],
+            "path": [f"{name}/SKILL.md" for name in ("same", "grown", "reworded", "fork", "near")],
+            "file_sha": ["same", "crawled", "reworded", "fork", "near"],
+            "lineage_id": ["L"] * 5,
+            "link": ["history_exact"] * 4 + ["near"],
+            "is_fork": [False, False, False, True, False],
+        }
+    )
+    rows = [
+        ("same/SKILL.md", "c1", 1, "2026-02-01", "A", "same"),
+        ("grown/SKILL.md", "c1", 1, "2026-02-01", "A", "v1blob"),
+        ("grown/SKILL.md", "c2", 2, "2026-03-01", "M", "grown"),
+        ("reworded/SKILL.md", "c3", 3, "2026-04-01", "A", "reworded"),
+    ]
+    histories = history(rows)
+    fork_row = history([("fork/SKILL.md", "c4", 1, "2026-02-01", "A", "fork")]).assign(repo="f/k")
+    histories = pd.concat([histories, fork_row], ignore_index=True)
+    versions = pd.DataFrame(
+        {
+            "lineage_id": ["L", "L"],
+            "version_seq": [1, 2],
+            "version_id": ["L#1", "L#2"],
+            "blob": ["v1blob", "v2blob"],
+            "normalized_sha": [
+                stage.normalized_sha(REGISTRY_TEXT),
+                stage.normalized_sha(UNRELATED_TEXT),
+            ],
+        }
+    )
+    texts = {"copies": COPY_TEXTS, "versions": {"v1blob": REGISTRY_TEXT, "v2blob": UNRELATED_TEXT}}
+    return {
+        "files": files,
+        "histories": histories,
+        "versions": versions,
+        "texts": texts,
+        "books": {
+            "copy": book_of(COPY_TEXTS),
+            "registry": book_of({"L#1": REGISTRY_TEXT, "L#2": UNRELATED_TEXT}),
+        },
+    }
+
+
+def book_of(texts: dict[str, str]) -> dict[str, object]:
+    """A signature book of these texts, signed like stage 5a (no boilerplate)."""
+    signed = {key: signature_for_text(text, set()) for key, text in texts.items()}
+    keys = [key for key, (_values, size) in signed.items() if size > 0]
+    return stage.signature_book(
+        keys,
+        np.vstack([signed[key][0] for key in keys]).astype(np.uint32),
+        np.asarray([signed[key][1] for key in keys]),
+    )
+
+
+def scored_world() -> pd.DataFrame:
+    """The proven pairs of ``proven_world``, scored by the fast path, keyed by path."""
+    world = proven_world()
+    pairs = stage.build_proven_pairs(world["files"], world["histories"])
+    scored = stage.score_proven_pairs(pairs, world["versions"], world["books"], world["texts"])
+    return scored.set_index("path")
+
+
+def test_link_method_recall_on_three_proven_pairs():
+    scored = scored_world()
+    assert "near/SKILL.md" not in scored.index
+    flags = list(stage.METHOD_COLUMNS.values())
+    assert scored.loc["same/SKILL.md", flags].tolist() == [True, True, True, True]
+    assert scored.loc["grown/SKILL.md", flags].tolist() == [False, False, True, True]
+    assert scored.loc["reworded/SKILL.md", flags].tolist() == [False, False, False, False]
+    # The later version v2 matches nothing; v1 still counts.
+    assert scored.loc["same/SKILL.md", "best_line_share"] == 1.0
+    no_fork = scored.loc[~scored["is_fork"]].reset_index()
+    recall = stage.measure_link_method_recall(no_fork).set_index("method")["recall"]
+    assert recall.to_dict() == {
+        "exact": 0.3333,
+        "minhash_jaccard": 0.3333,
+        "containment": 0.6667,
+        "line_check": 0.6667,
+        "any_text_method": 0.6667,
+    }
+
+
+def test_plain_scorer_agrees_with_the_fast_path():
+    scored = scored_world()
+    for path, name in (("same", "same"), ("grown", "grown"), ("reworded", "reworded")):
+        plain = stage.score_methods_on_pair([REGISTRY_TEXT, UNRELATED_TEXT], COPY_TEXTS[name])
+        fast = scored.loc[f"{path}/SKILL.md"]
+        for method, column in stage.METHOD_COLUMNS.items():
+            assert plain[method] == bool(fast[column]), (name, method)
+        assert plain["any_text_method"] == bool(fast[list(stage.METHOD_COLUMNS.values())].any())
+
+
+def test_forks_inflate_recall_and_the_newest_blob_is_scored():
+    scored = scored_world()
+    # grown's older blob is v1 itself; the scored text is the newer, grown one.
+    assert scored.loc["grown/SKILL.md", "current_file_sha"] == "grown"
+    assert not scored.loc["grown/SKILL.md", "current_is_dataset_text"]
+    recall = stage.measure_link_method_recall(scored.reset_index()).set_index("method")
+    assert recall.loc["exact", ["found", "recall", "recall_without_forks"]].tolist() == [
+        2,
+        0.5,
+        0.3333,
+    ]
+    # Only grown changed since the crawl, and only containment and the line check find it.
+    assert recall.loc["containment", "recall_changed_since_crawl"] == 1.0
+    assert recall.loc["minhash_jaccard", "recall_changed_since_crawl"] == 0.0
+
+
+def test_proven_pair_edges():
+    files = pd.DataFrame(
+        {
+            "repo": ["a/r"],
+            "path": ["x/SKILL.md"],
+            "file_sha": ["crawled"],
+            "lineage_id": ["L"],
+            "link": ["history_exact"],
+            "is_fork": [None],
+        }
+    )
+    # No history row: the dataset text is the current text.
+    pairs = stage.build_proven_pairs(files, history([]))
+    assert pairs[["current_file_sha", "current_is_dataset_text", "is_fork"]].values.tolist() == [
+        ["crawled", True, False]
+    ]
+    # Two empty texts are the same text, have no shingles and no lines to keep.
+    empty = stage.score_methods_on_pair([""], "")
+    assert empty == {
+        "exact": True,
+        "minhash_jaccard": False,
+        "containment": False,
+        "line_check": False,
+        "any_text_method": True,
+    }
+    # An empty test set has recall 0 for every method; a tfidf column adds a row.
+    none = stage.measure_link_method_recall(
+        pd.DataFrame(columns=[*stage.METHOD_COLUMNS.values(), "is_fork", "current_is_dataset_text"])
+    )
+    assert none["recall"].tolist() == [0.0] * 5
+    flagged = scored_world().reset_index().assign(tfidf_found=[True, False, False, False])
+    assert stage.measure_link_method_recall(flagged)["method"].tolist()[-1] == "tfidf"
