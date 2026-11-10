@@ -1,4 +1,5 @@
-"""Stage 5a and 5b: template lines, MinHash signatures, registries copying each other.
+"""Stage 5a, 5b and 5c: template lines, MinHash signatures, registries copying each other,
+copies in the dataset.
 
 Stage 5a (G12): count the body lines shared by many GitHub owners (template
 text such as "## when to use"), then build a MinHash signature, with those
@@ -11,13 +12,21 @@ copy), follow that chain to the root lineage, and write the registry hub
 table and the final repo roles. Registry kinds (source, copier, unclear) come
 from stage 3c (G38); the share of re-hosted lineages is a printed cross-check.
 
+Stage 5c (G14): link each English dataset text with a file outside the
+registries to one registry lineage version (exact, near, near_contained or
+cluster), check every fuzzy link with a line diff, list the copy files with
+fork and same-owner flags, and record which unlinked texts a
+copier registry holds (Pass 2, evidence only, not a link).
+
 Inputs (stage 5a, always the full data folder, also with ``--dev``): the
 GitSkills artifacts (``settings.ARTIFACTS_GLOB``), ``skill_language.parquet``
 (stage 2a) and ``registry_history/registry_history_texts.parquet`` (stage 3).
 In the dev or full data folder: ``lineage_versions.parquet`` (stage 4a).
 Stage 5b also reads ``lineages.parquet`` and ``registry_signatures.npz`` (dev
 or full) and ``repo_roles.parquet`` (stage 2c) and ``registry_kinds.parquet``
-(stage 3c) from the full data folder.
+(stage 3c) from the full data folder. Stage 5c also reads the GitSkills
+repos, ``lineage_roots.parquet`` (dev or full), the stage 3 change rows,
+and ``src/data/derived/s2_clusters.parquet``.
 
 Outputs:
 - ``boilerplate_lines.parquet`` (full data folder, shared by dev and full):
@@ -28,6 +37,8 @@ Outputs:
   ids ``lineage_id#version_seq``.
 - ``lineage_roots.parquet``, ``registry_hubs.parquet`` and
   ``repo_roles_final.parquet`` (stage 5b, dev or full data folder).
+- ``text_links.parquet``, ``copy_candidates.parquet``, ``links_dropped.parquet``
+  and ``copier_seen.parquet`` (stage 5c, dev or full data folder).
 
 The dataset outputs do not depend on the registries, so ``--dev`` changes only
 the registry file. Dataset signatures take more than an hour on full data: run
@@ -37,6 +48,7 @@ Run (no network):
     python -m skill_genealogy.find_copies --dev --only signatures
     python -m skill_genealogy.find_copies --only signatures --force
     python -m skill_genealogy.find_copies --dev --only rehost
+    python -m skill_genealogy.find_copies --dev --only copies
 """
 
 from __future__ import annotations
@@ -56,6 +68,7 @@ from datasketch import MinHashLSH
 
 from skill_genealogy import settings
 from skill_genealogy.build_registry_lineages import history_dir, read_texts
+from skill_genealogy.compare_texts import share_of_registry_lines_kept
 from skill_genealogy.file_helpers import (
     build_arg_parser,
     check_inputs_exist,
@@ -1830,28 +1843,1264 @@ def run_rehost(dev: bool, force: bool) -> None:
     )
 
 
-def main() -> None:
-    """Run stage 5a (signatures) and 5b (rehost), or one part with ``--only``.
+# Stage 5c: find copies in the dataset (card G14)
 
-    ``--only copies`` (stage 5c, card G14) is not built yet.
+# Columns of text_links.parquet, in order.
+TEXT_LINK_COLUMNS = (
+    "file_sha",
+    "lineage_id",
+    "version_seq",
+    "link",
+    "jaccard",
+    "containment",
+    "similarity_verified",
+)
+# Columns of a link while it is built. release_date is the linked version's
+# date: the cluster step uses it for ties, and it is not saved.
+_WORK_LINK_COLUMNS = (
+    "file_sha",
+    "lineage_id",
+    "version_seq",
+    "link",
+    "jaccard",
+    "containment",
+    "release_date",
+)
+# Columns of links_dropped.parquet, in order.
+DROPPED_COLUMNS = ("file_sha", "lineage_id", "link", "similarity_verified", "reason")
+# Columns of copy_candidates.parquet, in order.
+COPY_COLUMNS = (
+    "repo",
+    "path",
+    "file_sha",
+    "lineage_id",
+    "root_lineage",
+    "version_seq",
+    "link",
+    "jaccard",
+    "containment",
+    "similarity_verified",
+    "is_fork",
+    "same_owner_as_registry",
+)
+# Columns of copier_seen.parquet, in order.
+COPIER_SEEN_COLUMNS = (
+    "file_sha",
+    "copier_first_date",
+    "copier_first_repo",
+    "copier_repos",
+    "weak_copiers_only",
+)
+# The four link kinds, in the order they are tried.
+COPY_LINK_KINDS = ("exact", "near", "near_contained", "cluster")
+# Dataset texts looked up in the band index at once. About 580 band hits per
+# text on full data, so one block is about 3 million pairs before scoring.
+COPY_QUERY_BLOCK = 5_000
+# Links whose two texts are held in memory at once during the line check. A
+# batch holds at most this many dataset texts and registry texts.
+LINE_CHECK_BATCH_LINKS = 50_000
+# Lists shorter than this are diffed in this process (the path the tests use).
+LINE_CHECK_POOL_MIN = 2_000
+# Text pairs each line-check worker takes at once.
+LINE_CHECK_CHUNKSIZE = 64
+# Multiplier that folds the values of one band into one 64-bit key (the
+# 64-bit FNV prime). Any odd number spreads the keys; this one is well known.
+BAND_KEY_MULTIPLIER = np.uint64(1099511628211)
+
+# Query Q5.4, see code_flow/11_dataset_copies.md
+# Distinct English texts with at least one file outside every registry repo.
+# registry_repos holds all registries of stage 3c, copiers included.
+COPY_TEXTS_SQL = """
+SELECT DISTINCT artifacts.file_sha AS file_sha
+FROM artifacts
+JOIN skill_language ON artifacts.file_sha = skill_language.file_sha
+ANTI JOIN registry_repos ON artifacts.repo_full_name = registry_repos.repo
+WHERE skill_language.is_english
+  AND artifacts.file_sha IS NOT NULL
+  AND artifacts.file_sha <> ''
+"""
+
+# Query Q5.5, see code_flow/11_dataset_copies.md
+# A text equal to a version blob takes the oldest such version (then
+# lineage_id, then version_seq).
+EXACT_LINKS_SQL = """
+SELECT
+    copy_texts.file_sha AS file_sha,
+    versions.lineage_id AS lineage_id,
+    versions.version_seq AS version_seq,
+    versions.release_date AS release_date
+FROM copy_texts
+JOIN versions ON copy_texts.file_sha = versions.blob
+QUALIFY row_number() OVER (
+    PARTITION BY copy_texts.file_sha
+    ORDER BY versions.release_date, versions.lineage_id, versions.version_seq
+) = 1
+"""
+
+# Query Q5.6, see code_flow/11_dataset_copies.md
+# An unlinked text of a cluster takes the lineage with the most linked texts in
+# that cluster (ties: the lineage whose linked version is oldest, then id), and
+# that lineage's oldest linked version in the cluster.
+CLUSTER_LINKS_SQL = """
+WITH members AS (
+    SELECT file_sha, cluster_id
+    FROM clusters
+    WHERE abs(threshold - {threshold}) < 1e-9
+),
+votes AS (
+    SELECT
+        members.cluster_id AS cluster_id,
+        linked.lineage_id AS lineage_id,
+        count(*) AS texts,
+        min(linked.release_date) AS oldest
+    FROM members
+    JOIN linked ON members.file_sha = linked.file_sha
+    GROUP BY members.cluster_id, linked.lineage_id
+),
+winners AS (
+    SELECT cluster_id, lineage_id
+    FROM votes
+    QUALIFY row_number() OVER (
+        PARTITION BY cluster_id ORDER BY texts DESC, oldest, lineage_id
+    ) = 1
+),
+winner_versions AS (
+    SELECT
+        members.cluster_id AS cluster_id,
+        linked.lineage_id AS lineage_id,
+        linked.version_seq AS version_seq,
+        linked.release_date AS release_date
+    FROM members
+    JOIN linked ON members.file_sha = linked.file_sha
+    JOIN winners
+      ON winners.cluster_id = members.cluster_id
+     AND winners.lineage_id = linked.lineage_id
+    QUALIFY row_number() OVER (
+        PARTITION BY members.cluster_id ORDER BY linked.release_date, linked.version_seq
+    ) = 1
+)
+SELECT
+    members.file_sha AS file_sha,
+    winner_versions.lineage_id AS lineage_id,
+    winner_versions.version_seq AS version_seq,
+    winner_versions.release_date AS release_date
+FROM members
+JOIN winner_versions ON members.cluster_id = winner_versions.cluster_id
+JOIN copy_texts ON members.file_sha = copy_texts.file_sha
+ANTI JOIN linked ON members.file_sha = linked.file_sha
+"""
+
+# Query Q5.7, see code_flow/11_dataset_copies.md
+# One content string per dataset text the line check needs.
+LINE_CHECK_TEXTS_SQL = """
+SELECT artifacts.file_sha AS file_sha, any_value(artifacts.content) AS content
+FROM artifacts
+SEMI JOIN needed_shas ON artifacts.file_sha = needed_shas.file_sha
+GROUP BY artifacts.file_sha
+"""
+
+# Query Q5.8, see code_flow/11_dataset_copies.md
+# Pass 2: texts still unlinked that a copier registry holds as a SKILL.md
+# (any row that is not a delete). Exact blob only.
+COPIER_SEEN_SQL = """
+WITH held AS (
+    SELECT
+        changes.new_sha AS file_sha,
+        changes.repo AS repo,
+        min(TRY_CAST(changes.commit_date AS TIMESTAMPTZ)) AS first_date,
+        any_value(copiers.confidence) AS confidence
+    FROM changes
+    JOIN copiers ON changes.repo = copiers.repo
+    WHERE changes.is_skill_md
+      AND changes.status <> 'D'
+      AND changes.new_sha IS NOT NULL
+    GROUP BY changes.new_sha, changes.repo
+)
+SELECT
+    held.file_sha AS file_sha,
+    min(held.first_date) AS copier_first_date,
+    first(held.repo ORDER BY held.first_date ASC NULLS LAST, held.repo) AS copier_first_repo,
+    list(held.repo ORDER BY held.repo) AS copier_repos,
+    bool_and(held.confidence < {weak_below}) AS weak_copiers_only
+FROM held
+SEMI JOIN unlinked ON held.file_sha = unlinked.file_sha
+GROUP BY held.file_sha
+"""
+
+# Query Q5.9, see code_flow/11_dataset_copies.md
+# One row per file of a kept text, outside every registry repo.
+COPY_FILES_SQL = """
+SELECT
+    artifacts.repo_full_name AS repo,
+    artifacts.path AS path,
+    kept.file_sha AS file_sha,
+    kept.lineage_id AS lineage_id,
+    coalesce(lineage_roots.root_lineage, kept.lineage_id) AS root_lineage,
+    kept.version_seq AS version_seq,
+    kept.link AS link,
+    kept.jaccard AS jaccard,
+    kept.containment AS containment,
+    kept.similarity_verified AS similarity_verified
+FROM artifacts
+JOIN kept ON artifacts.file_sha = kept.file_sha
+LEFT JOIN lineage_roots ON kept.lineage_id = lineage_roots.lineage_id
+ANTI JOIN registry_repos ON artifacts.repo_full_name = registry_repos.repo
+WHERE artifacts.repo_full_name IS NOT NULL AND artifacts.path IS NOT NULL
+"""
+
+# Query Q5.10, see code_flow/11_dataset_copies.md
+# Fork from repos (a repo missing there is not a fork); same owner compares the
+# text before the first "/" in lower case.
+FLAG_COPIES_SQL = """
+SELECT
+    copy_rows.*,
+    coalesce(forks.is_fork, 0) = 1 AS is_fork,
+    lower(split_part(copy_rows.repo, '/', 1))
+        = lower(split_part(coalesce(lineage_repos.repo, ''), '/', 1)) AS same_owner_as_registry
+FROM copy_rows
+LEFT JOIN (
+    SELECT full_name, max(is_fork) AS is_fork FROM repos GROUP BY full_name
+) AS forks ON copy_rows.repo = forks.full_name
+LEFT JOIN (
+    SELECT lineage_id, any_value(repo) AS repo FROM lineages GROUP BY lineage_id
+) AS lineage_repos ON copy_rows.lineage_id = lineage_repos.lineage_id
+"""
+
+
+def text_links_path(dev: bool) -> Path:
+    """``text_links.parquet`` (stage 5c) in the dev or full data folder."""
+    return settings.data_dir(dev) / "text_links.parquet"
+
+
+def copy_candidates_path(dev: bool) -> Path:
+    """``copy_candidates.parquet`` (stage 5c) in the dev or full data folder."""
+    return settings.data_dir(dev) / "copy_candidates.parquet"
+
+
+def links_dropped_path(dev: bool) -> Path:
+    """``links_dropped.parquet`` (stage 5c) in the dev or full data folder."""
+    return settings.data_dir(dev) / "links_dropped.parquet"
+
+
+def copier_seen_path(dev: bool) -> Path:
+    """``copier_seen.parquet`` (stage 5c) in the dev or full data folder."""
+    return settings.data_dir(dev) / "copier_seen.parquet"
+
+
+def _copy_outputs(dev: bool) -> list[Path]:
+    """The four stage 5c output files of this mode."""
+    return [
+        text_links_path(dev),
+        copy_candidates_path(dev),
+        links_dropped_path(dev),
+        copier_seen_path(dev),
+    ]
+
+
+def _changes_path() -> Path:
+    """The stage 3 change rows; there is no dev registry history."""
+    return history_dir() / "registry_history_changes.parquet"
+
+
+def _dev_registries_path() -> Path:
+    """``dev_registries.parquet`` (stage 2c) in the full data folder."""
+    return settings.data_dir(False) / "dev_registries.parquet"
+
+
+def _empty_links() -> pd.DataFrame:
+    """An empty working link table (``_WORK_LINK_COLUMNS``)."""
+    return pd.DataFrame(
+        {
+            "file_sha": pd.Series(dtype="object"),
+            "lineage_id": pd.Series(dtype="object"),
+            "version_seq": pd.Series(dtype="int64"),
+            "link": pd.Series(dtype="object"),
+            "jaccard": pd.Series(dtype="float64"),
+            "containment": pd.Series(dtype="float64"),
+            "release_date": pd.Series(dtype="datetime64[ns, UTC]"),
+        }
+    )
+
+
+def _as_links(frame: pd.DataFrame, link: str) -> pd.DataFrame:
+    """``frame`` (file_sha, lineage_id, version_seq, release_date, scores) as working links.
+
+    Missing score columns become null; ``link`` is set on every row.
+    """
+    if frame.empty:
+        return _empty_links()
+    links = frame.copy()
+    links["link"] = link
+    for column in ("jaccard", "containment"):
+        if column not in links.columns:
+            links[column] = np.nan
+    links["version_seq"] = links["version_seq"].astype("int64")
+    links["jaccard"] = links["jaccard"].astype("float64")
+    links["containment"] = links["containment"].astype("float64")
+    links["release_date"] = pd.to_datetime(links["release_date"], utc=True)
+    return links.loc[:, list(_WORK_LINK_COLUMNS)].reset_index(drop=True)
+
+
+def _stack_links(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Stack working link tables; no rows gives the empty table."""
+    kept = [frame for frame in frames if len(frame)]
+    return pd.concat(kept, ignore_index=True) if kept else _empty_links()
+
+
+# Step 10: read the stage 5c inputs and list the texts outside the registries
+
+
+def read_copy_inputs(con: duckdb.DuckDBPyConnection, dev: bool) -> dict[str, object]:
+    """Check the stage 5c inputs, register the DuckDB views and load the small tables.
+
+    Views: ``artifacts``, ``repos``, ``skill_language``, ``clusters``,
+    ``changes``, ``lineages``, ``lineage_roots``. Tables:
+    ``registry_repos`` (every stage 3c registry, copiers included) and
+    ``copiers`` (copier registries with their confidence; in dev only those
+    among the dev registries). Returns the version table, the registry
+    signatures and the registry kinds. A missing file raises
+    ``FileNotFoundError`` naming the command that builds it.
+    """
+    flag = " --dev" if dev else ""
+    paths: dict[str, Path | str] = {
+        "artifacts": settings.ARTIFACTS_GLOB,
+        "repos": settings.REPOS_GLOB,
+        "skill_language": _language_path(),
+        "clusters": settings.CLUSTERS_PATH,
+        "changes": _changes_path(),
+        "registry_history_texts": _texts_path(),
+        "registry_kinds": _registry_kinds_path(),
+        "lineages": lineages_path(dev),
+        "lineage_versions": _versions_path(dev),
+        "lineage_roots": lineage_roots_path(dev),
+        "registry_signatures": registry_signatures_path(dev),
+        "dataset_signatures": dataset_signatures_dir(),
+    }
+    if dev:
+        paths["dev_registries"] = _dev_registries_path()
+    check_inputs_exist(
+        paths,
+        {
+            "artifacts": "python src/data/download_data.py",
+            "repos": "python src/data/download_data.py",
+            "skill_language": "python -m skill_genealogy.select_registries --force-languages",
+            "clusters": "main pipeline step 5a (skillsig-dedup)",
+            "changes": "python -m skill_genealogy.download_registry_history",
+            "registry_history_texts": "python -m skill_genealogy.download_registry_history",
+            "registry_kinds": "python -m skill_genealogy.label_registry_kinds",
+            "lineages": f"python -m skill_genealogy.build_registry_lineages{flag}",
+            "lineage_versions": f"python -m skill_genealogy.build_registry_lineages{flag}",
+            "lineage_roots": f"python -m skill_genealogy.find_copies{flag} --only rehost",
+            "registry_signatures": f"python -m skill_genealogy.find_copies{flag} --only signatures",
+            "dataset_signatures": "python -m skill_genealogy.find_copies --only signatures",
+            "dev_registries": "python -m skill_genealogy.select_registries",
+        },
+    )
+    for name in (
+        "artifacts",
+        "repos",
+        "skill_language",
+        "clusters",
+        "changes",
+        "lineages",
+        "lineage_roots",
+    ):
+        con.execute(
+            f"CREATE OR REPLACE VIEW {name} AS "
+            f"SELECT * FROM read_parquet({_quote_path(str(paths[name]))})"
+        )
+    kinds = read_parquet(_registry_kinds_path())
+    copiers = kinds.loc[kinds["registry_kind"] == "copier", ["repo", "confidence"]]
+    if dev:
+        copiers = copiers.loc[copiers["repo"].isin(read_parquet(_dev_registries_path())["repo"])]
+    con.register("registry_repos_frame", kinds.loc[:, ["repo"]].drop_duplicates())
+    con.execute("CREATE OR REPLACE TABLE registry_repos AS SELECT * FROM registry_repos_frame")
+    con.register("copiers_frame", copiers.reset_index(drop=True))
+    con.execute("CREATE OR REPLACE TABLE copiers AS SELECT * FROM copiers_frame")
+    lineages = read_parquet(paths["lineages"])
+    ids, signatures, sizes = load_signatures(registry_signatures_path(dev))
+    return {
+        "versions": version_table(read_parquet(paths["lineage_versions"]), lineages),
+        "signature_ids": ids,
+        "signatures": signatures,
+        "sizes": sizes,
+        "registry_kinds": kinds,
+        "copier_count": len(copiers),
+    }
+
+
+def list_copy_texts(con: duckdb.DuckDBPyConnection) -> int:
+    """Query Q5.4: create table ``copy_texts`` and return its row count.
+
+    ``copy_texts`` holds each distinct English ``file_sha`` that has at least
+    one file outside every registry repo. Only these texts are linked: a text
+    seen only inside registries has no dataset copy to link.
+    """
+    con.execute(f"CREATE OR REPLACE TABLE copy_texts AS {COPY_TEXTS_SQL}")
+    # fetchall, not fetchone: DuckDB keeps a result open after one row, and the
+    # next statement on the connection then fails.
+    rows = con.execute("SELECT count(*) FROM copy_texts").fetchall()
+    return int(rows[0][0])
+
+
+# Step 11: exact links (query Q5.5)
+
+
+def find_exact_links(con: duckdb.DuckDBPyConnection, versions: pd.DataFrame) -> pd.DataFrame:
+    """Link each text of ``copy_texts`` that equals a registry version blob.
+
+    The dataset ``file_sha`` and the version ``blob`` are both git blob ids,
+    so equal ids mean equal bytes. When several versions have that blob, the
+    oldest ``release_date`` wins, then the smallest ``lineage_id``, then
+    ``version_seq``. Copiers have no lineages, so a copier never wins.
+
+    Inputs: a connection with ``copy_texts``; the version table
+    (``lineage_id, version_seq, blob, release_date``).
+    Outputs: working links with ``link = "exact"`` and both scores 1.0.
+
+    >>> con = connect_duckdb()
+    >>> _ = con.execute("CREATE TABLE copy_texts AS SELECT 'sha' AS file_sha")
+    >>> versions = pd.DataFrame({"lineage_id": ["New", "Old"], "version_seq": [1, 3],
+    ...     "blob": ["sha", "sha"],
+    ...     "release_date": pd.to_datetime(["2026-05-01", "2026-01-01"], utc=True)})
+    >>> find_exact_links(con, versions)[["lineage_id", "version_seq", "link"]].values.tolist()
+    [['Old', 3, 'exact']]
+    """
+    con.register("versions", versions.loc[:, ["lineage_id", "version_seq", "blob", "release_date"]])
+    try:
+        found = con.execute(EXACT_LINKS_SQL).df()
+    finally:
+        con.unregister("versions")
+    found["jaccard"] = 1.0
+    found["containment"] = 1.0
+    return _as_links(found, "exact")
+
+
+# Steps 12 and 13: near and contained links (Algorithms A25, A26)
+
+
+def band_keys(signatures: np.ndarray, bands: int, rows_per_band: int) -> np.ndarray:
+    """One 64-bit key per band of each signature: ``[n, bands]`` ``uint64``.
+
+    The ``rows_per_band`` values of a band are folded into one number
+    (key = key * BAND_KEY_MULTIPLIER + value, wrapping at 2^64). Equal bands
+    always give equal keys. Two different bands can, very rarely, give the
+    same key; that only adds a candidate, which is then scored exactly.
+
+    >>> rows = np.array([[1, 2, 3, 4], [1, 2, 9, 9]], dtype=np.uint64)
+    >>> keys = band_keys(rows, 2, 2)
+    >>> bool(keys[0, 0] == keys[1, 0]), bool(keys[0, 1] == keys[1, 1])
+    (True, False)
+    """
+    values = np.ascontiguousarray(signatures, dtype=np.uint64)
+    keys = np.zeros((len(values), bands), dtype=np.uint64)
+    with np.errstate(over="ignore"):
+        for band in range(bands):
+            for column in range(band * rows_per_band, (band + 1) * rows_per_band):
+                keys[:, band] = keys[:, band] * BAND_KEY_MULTIPLIER + values[:, column]
+    return keys
+
+
+def build_copy_band_index(registry_signatures: np.ndarray) -> dict[str, object]:
+    """The registry signatures as LSH bands for lookups by dataset texts.
+
+    The layout (bands, values per band) is what datasketch's ``MinHashLSH``
+    chooses for ``COPY_SEARCH_LSH_THRESHOLD`` (64 x 2 at 0.1). Per band the
+    registry keys are sorted, so a lookup is a binary search. The full index
+    of 816,534 versions takes about 0.6 GB.
+
+    Outputs: ``{"bands", "rows_per_band", "sorted_keys" [bands, n], "order" [bands, n]}``.
+    """
+    shape = MinHashLSH(
+        threshold=float(settings.COPY_SEARCH_LSH_THRESHOLD), num_perm=settings.MINHASH_NUM_PERM
+    )
+    keys = band_keys(registry_signatures, shape.b, shape.r)
+    order = np.argsort(keys, axis=0, kind="stable").T.astype(np.int64)
+    sorted_keys = np.take_along_axis(keys, order.T, axis=0).T
+    return {
+        "bands": shape.b,
+        "rows_per_band": shape.r,
+        "sorted_keys": np.ascontiguousarray(sorted_keys),
+        "order": np.ascontiguousarray(order),
+    }
+
+
+def copy_candidate_pairs(
+    index: dict[str, object], query_signatures: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Every ``(query row, registry row)`` that shares at least one whole band, once.
+
+    The same pairs a datasketch ``MinHashLSH`` at ``COPY_SEARCH_LSH_THRESHOLD``
+    returns (a test checks it). Pairs come back sorted by query row, then
+    registry row.
+    """
+    sorted_keys: np.ndarray = index["sorted_keys"]
+    order: np.ndarray = index["order"]
+    registry_count = sorted_keys.shape[1] if sorted_keys.ndim == 2 else 0
+    keys = band_keys(query_signatures, index["bands"], index["rows_per_band"])
+    found = []
+    for band in range(index["bands"] if registry_count else 0):
+        low = np.searchsorted(sorted_keys[band], keys[:, band], side="left")
+        counts = np.searchsorted(sorted_keys[band], keys[:, band], side="right") - low
+        offsets = np.arange(int(counts.sum())) - np.repeat(np.cumsum(counts) - counts, counts)
+        others = order[band][np.repeat(low, counts) + offsets]
+        queries = np.repeat(np.arange(len(keys), dtype=np.int64), counts)
+        found.append(queries * registry_count + others)
+    if not found:
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty.copy()
+    unique = np.unique(np.concatenate(found))
+    return unique // registry_count, unique % registry_count
+
+
+def score_copy_pairs(
+    query_signatures: np.ndarray,
+    query_sizes: np.ndarray,
+    registry_signatures: np.ndarray,
+    registry_sizes: np.ndarray,
+    query: np.ndarray,
+    other: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Equal values, estimated Jaccard and containment of the registry text in the copy.
+
+    Jaccard = equal values / 128. Containment = ``containment_estimates``
+    with the registry text as the source and the dataset text as the copy.
+    """
+    agree = np.zeros(len(query), dtype=np.int64)
+    for start in range(0, len(query), PAIR_SCORE_BLOCK):
+        stop = start + PAIR_SCORE_BLOCK
+        equal = query_signatures[query[start:stop]] == registry_signatures[other[start:stop]]
+        agree[start:stop] = equal.sum(axis=1)
+    jaccard = agree / settings.MINHASH_NUM_PERM
+    containment = containment_estimates(jaccard, registry_sizes[other], query_sizes[query])
+    return agree, jaccard, containment
+
+
+def search_copy_candidates(
+    dataset_sigs: tuple[list[str], np.ndarray, np.ndarray],
+    registry_index: dict[str, object],
+    registry_sigs: dict[str, object],
+) -> pd.DataFrame:
+    """Scored candidate pairs of dataset texts and registry versions, block by block.
+
+    ``dataset_sigs`` is ``(ids, signatures, sizes)``. ``registry_sigs`` has
+    ``signatures``, ``sizes`` and ``versions`` (one row per signature row:
+    ``lineage_id, version_seq, release_date``). Only pairs that could become a
+    near or contained link are returned: Jaccard at least
+    ``NEAR_COPY_MIN_JACCARD``, or containment at least
+    ``NEAR_COPY_MIN_CONTAINMENT``.
+
+    Outputs: ``file_sha, lineage_id, version_seq, release_date, agree,
+    jaccard, containment, source_shingles``.
+    """
+    ids, signatures, sizes = dataset_sigs
+    registry_signatures: np.ndarray = registry_sigs["signatures"]
+    registry_sizes: np.ndarray = np.asarray(registry_sigs["sizes"])
+    frames = []
+    for start in range(0, len(ids), COPY_QUERY_BLOCK):
+        block = slice(start, start + COPY_QUERY_BLOCK)
+        query, other = copy_candidate_pairs(registry_index, signatures[block])
+        agree, jaccard, containment = score_copy_pairs(
+            signatures[block],
+            np.asarray(sizes[block]),
+            registry_signatures,
+            registry_sizes,
+            query,
+            other,
+        )
+        keep = (jaccard >= settings.NEAR_COPY_MIN_JACCARD) | (
+            containment >= settings.NEAR_COPY_MIN_CONTAINMENT
+        )
+        frames.append(
+            _candidate_rows(
+                [ids[start + int(row)] for row in query[keep]],
+                registry_sigs["versions"],
+                other[keep],
+                agree[keep],
+                jaccard[keep],
+                containment[keep],
+                registry_sizes[other[keep]],
+            )
+        )
+    kept = [frame for frame in frames if len(frame)]
+    return pd.concat(kept, ignore_index=True) if kept else _candidate_rows([], None, *[[]] * 5)
+
+
+def _candidate_rows(
+    file_shas: list[str],
+    versions: pd.DataFrame | None,
+    rows: np.ndarray,
+    agree: np.ndarray,
+    jaccard: np.ndarray,
+    containment: np.ndarray,
+    source_shingles: np.ndarray,
+) -> pd.DataFrame:
+    """Candidate pairs as a table; ``rows`` are positions in ``versions``."""
+    if versions is None or not len(file_shas):
+        empty = _empty_links().drop(columns=["link"])
+        return empty.assign(
+            agree=pd.Series(dtype="int64"), source_shingles=pd.Series(dtype="int64")
+        )
+    picked = versions.iloc[np.asarray(rows, dtype=np.int64)].reset_index(drop=True)
+    return pd.DataFrame(
+        {
+            "file_sha": file_shas,
+            "lineage_id": picked["lineage_id"],
+            "version_seq": picked["version_seq"].astype("int64"),
+            "release_date": picked["release_date"],
+            "agree": np.asarray(agree, dtype=np.int64),
+            "jaccard": np.asarray(jaccard, dtype=np.float64),
+            "containment": np.asarray(containment, dtype=np.float64),
+            "source_shingles": np.asarray(source_shingles, dtype=np.int64),
+        }
+    )
+
+
+# Algorithm A25, see code_flow/11_dataset_copies.md
+def choose_near_links(candidates: pd.DataFrame) -> pd.DataFrame:
+    """One ``near`` link per text: the version with the highest estimated Jaccard.
+
+    A candidate counts when its Jaccard is at least NEAR_COPY_MIN_JACCARD.
+    Ties go to the oldest release date, then ``lineage_id``, then
+    ``version_seq``.
+
+    >>> rows = pd.DataFrame({"file_sha": ["c", "c", "c"], "lineage_id": ["New", "Old", "Low"],
+    ...     "version_seq": [1, 1, 1], "jaccard": [0.9, 0.9, 0.5], "containment": [0.9] * 3,
+    ...     "release_date": pd.to_datetime(["2026-05-01", "2026-01-01", "2025-01-01"], utc=True)})
+    >>> choose_near_links(rows)[["lineage_id", "link"]].values.tolist()
+    [['Old', 'near']]
+    """
+    near = candidates.loc[candidates["jaccard"] >= settings.NEAR_COPY_MIN_JACCARD]
+    ordered = near.sort_values(
+        ["file_sha", "jaccard", "release_date", "lineage_id", "version_seq"],
+        ascending=[True, False, True, True, True],
+        kind="mergesort",
+    )
+    return _as_links(ordered.drop_duplicates("file_sha"), "near")
+
+
+# Algorithm A26, see code_flow/11_dataset_copies.md
+def choose_contained_links(candidates: pd.DataFrame, linked: set[str]) -> pd.DataFrame:
+    """One ``near_contained`` link per text not in ``linked``: the registry text most inside it.
+
+    A candidate counts when containment (share of the registry text's
+    shingles inside the dataset text) is at least NEAR_COPY_MIN_CONTAINMENT
+    and the registry text keeps at least REHOST_CONTAINED_MIN_SHINGLES
+    shingles. When a text has a strong candidate (at least
+    STRONG_MATCH_MIN_VALUES equal values), its weak candidates (at most
+    WEAK_MATCH_MAX_VALUES) are left out. Best: highest containment, then
+    highest Jaccard (the version that covers more of the copy), then oldest
+    date, ``lineage_id``, ``version_seq``.
+
+    >>> rows = pd.DataFrame({"file_sha": ["c", "c"], "lineage_id": ["Tiny", "Real"],
+    ...     "version_seq": [1, 1], "agree": [1, 40], "jaccard": [1 / 128, 40 / 128],
+    ...     "containment": [1.0, 0.95], "source_shingles": [30, 40],
+    ...     "release_date": pd.to_datetime(["2025-01-01", "2026-01-01"], utc=True)})
+    >>> choose_contained_links(rows, set())[["lineage_id", "link"]].values.tolist()
+    [['Real', 'near_contained']]
+    """
+    eligible = candidates.loc[
+        ~candidates["file_sha"].isin(linked)
+        & (candidates["containment"] >= settings.NEAR_COPY_MIN_CONTAINMENT)
+        & (candidates["source_shingles"] >= settings.REHOST_CONTAINED_MIN_SHINGLES)
+    ]
+    has_strong = eligible.groupby("file_sha")["agree"].transform("max") >= (
+        settings.STRONG_MATCH_MIN_VALUES
+    )
+    eligible = eligible.loc[~(has_strong & (eligible["agree"] <= settings.WEAK_MATCH_MAX_VALUES))]
+    ordered = eligible.sort_values(
+        ["file_sha", "containment", "jaccard", "release_date", "lineage_id", "version_seq"],
+        ascending=[True, False, False, True, True, True],
+        kind="mergesort",
+    )
+    return _as_links(ordered.drop_duplicates("file_sha"), "near_contained")
+
+
+def find_near_links(
+    dataset_sigs: tuple[list[str], np.ndarray, np.ndarray],
+    registry_index: dict[str, object],
+    registry_sigs: dict[str, object],
+) -> pd.DataFrame:
+    """Step 12 for a set of dataset texts: their ``near`` links (Algorithm A25).
+
+    ``registry_index`` comes from ``build_copy_band_index``; ``registry_sigs``
+    is described in ``search_copy_candidates``.
+    """
+    return choose_near_links(search_copy_candidates(dataset_sigs, registry_index, registry_sigs))
+
+
+def find_contained_links(
+    dataset_sigs: tuple[list[str], np.ndarray, np.ndarray],
+    registry_index: dict[str, object],
+    registry_sigs: dict[str, object],
+) -> pd.DataFrame:
+    """Step 13 for a set of dataset texts: ``near_contained`` links of texts with no near link.
+
+    One band index serves steps 12 and 13 (Algorithm A26).
+    """
+    candidates = search_copy_candidates(dataset_sigs, registry_index, registry_sigs)
+    near = choose_near_links(candidates)
+    return choose_contained_links(candidates, set(near["file_sha"]))
+
+
+def registry_signature_table(
+    versions: pd.DataFrame, signature_ids: list[str], signatures: np.ndarray, sizes: np.ndarray
+) -> dict[str, object]:
+    """The registry signatures with their version rows, aligned row by row.
+
+    A signature whose version is not in ``versions`` is left out. Values are
+    stored as ``uint32`` (MinHash values are below 2^32), which halves the
+    memory the pair scoring reads.
+    """
+    position = pd.DataFrame({"version_id": signature_ids, "row": np.arange(len(signature_ids))})
+    aligned = versions.merge(position, on="version_id", how="inner").sort_values("row")
+    rows = aligned["row"].to_numpy(dtype=np.int64)
+    return {
+        "signatures": np.asarray(signatures[rows], dtype=np.uint32),
+        "sizes": np.asarray(sizes[rows], dtype=np.int64),
+        "versions": aligned.loc[:, ["lineage_id", "version_seq", "release_date"]].reset_index(
+            drop=True
+        ),
+    }
+
+
+def search_dataset_parts(
+    search_shas: set[str], registry_sigs: dict[str, object]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Steps 12-13 over every dataset signature part: near links and contained links.
+
+    Only texts in ``search_shas`` (English, outside the registries, no exact
+    link) are looked up. One part (about 45,000 texts) is in memory at a time.
+    """
+    index = build_copy_band_index(registry_sigs["signatures"])
+    print(
+        f"registry band index: {len(registry_sigs['versions'])} versions, "
+        f"{index['bands']} bands of {index['rows_per_band']} values",
+        flush=True,
+    )
+    wanted = pd.Index(list(search_shas))
+    near_parts, contained_parts = [], []
+    files = _signature_files(dataset_signatures_dir())
+    for number, path in enumerate(files, start=1):
+        started = time.perf_counter()
+        ids, signatures, sizes = _load_one(path)
+        keep = np.flatnonzero(pd.Index(ids).isin(wanted))
+        part = ([ids[row] for row in keep], signatures[keep].astype(np.uint32), sizes[keep])
+        candidates = search_copy_candidates(part, index, registry_sigs)
+        near = choose_near_links(candidates)
+        contained = choose_contained_links(candidates, set(near["file_sha"]))
+        near_parts.append(near)
+        contained_parts.append(contained)
+        print(
+            f"dataset part {number}/{len(files)}: searched {len(keep)}, near {len(near)}, "
+            f"contained {len(contained)}, {time.perf_counter() - started:.1f}s",
+            flush=True,
+        )
+    return _stack_links(near_parts), _stack_links(contained_parts)
+
+
+# Step 14: cluster links (Algorithm A27, query Q5.6)
+
+
+# Algorithm A27, see code_flow/11_dataset_copies.md
+def find_cluster_links(con: duckdb.DuckDBPyConnection, linked: pd.DataFrame) -> pd.DataFrame:
+    """Give an unlinked text the lineage most common among the linked texts of its cluster.
+
+    Clusters are the ``s2_clusters`` rows at ``CLUSTER_LINK_THRESHOLD``
+    (0.80); the 0.60 rows are not used. Votes: linked texts per lineage in
+    the cluster. Ties: the lineage whose linked version is oldest, then
+    ``lineage_id``. The version is that lineage's oldest linked version in
+    the cluster. Only texts in ``copy_texts`` get a link. Scores are null:
+    the pair was never compared; the line check (A28) still applies.
+
+    Inputs: a connection with ``clusters`` and ``copy_texts``; working links.
+    Outputs: working links with ``link = "cluster"``.
+
+    >>> con = connect_duckdb()
+    >>> _ = con.execute("CREATE TABLE clusters AS SELECT * FROM (VALUES ('a', 1, 0.8), "
+    ...     "('b', 1, 0.8), ('c', 1, 0.8), ('u', 1, 0.8), ('u', 7, 0.6)) "
+    ...     "t(file_sha, cluster_id, threshold)")
+    >>> _ = con.execute("CREATE TABLE copy_texts AS SELECT * FROM (VALUES ('u')) t(file_sha)")
+    >>> linked = _as_links(pd.DataFrame({"file_sha": ["a", "b", "c"],
+    ...     "lineage_id": ["A", "A", "B"], "version_seq": [2, 1, 1],
+    ...     "release_date": ["2026-03-01", "2026-02-01", "2026-01-01"]}), "exact")
+    >>> find_cluster_links(con, linked)[["file_sha", "lineage_id", "version_seq"]].values.tolist()
+    [['u', 'A', 1]]
+    """
+    if linked.empty:
+        return _empty_links()
+    con.register("linked", linked.loc[:, ["file_sha", "lineage_id", "version_seq", "release_date"]])
+    try:
+        sql = CLUSTER_LINKS_SQL.format(threshold=float(settings.CLUSTER_LINK_THRESHOLD))
+        found = con.execute(sql).df()
+    finally:
+        con.unregister("linked")
+    return _as_links(found.sort_values("file_sha", kind="mergesort"), "cluster")
+
+
+# Step 15: line-diff check (Algorithm A28, query Q5.7)
+
+
+def _line_share(pair: tuple[str, str]) -> float:
+    """``share_of_registry_lines_kept`` for one ``(registry_text, copy_text)`` pair."""
+    return share_of_registry_lines_kept(*pair)
+
+
+def _line_shares(
+    pairs: list[tuple[str, str]], pool: multiprocessing.pool.Pool | None = None
+) -> list[float]:
+    """The line share of each pair, in order; a pool for long lists."""
+    if pool is None or len(pairs) < LINE_CHECK_POOL_MIN:
+        return [_line_share(pair) for pair in pairs]
+    import skill_genealogy.find_copies as module
+
+    return pool.map(module._line_share, pairs, chunksize=LINE_CHECK_CHUNKSIZE)
+
+
+# Algorithm A28, see code_flow/11_dataset_copies.md
+def verify_links_with_line_diff(
+    links: pd.DataFrame,
+    texts_lookup: dict[str, dict[str, str]],
+    pool: multiprocessing.pool.Pool | None = None,
+) -> pd.DataFrame:
+    """Add ``similarity_verified`` and ``reason`` to each link.
+
+    ``exact``: 1.0, no text is read. Other links: the share of the registry
+    version's body lines that the dataset text still has unchanged
+    (``share_of_registry_lines_kept``, a line diff after normalisation). A
+    share below MIN_VERIFIED_LINE_SHARE gets ``reason =
+    "line_share_below_min"``; exactly 0.50 stays. A text missing from the
+    lookup gets ``reason = "missing_text"`` and a null share. Kept rows have
+    a null ``reason``.
+
+    Inputs: working links; ``texts_lookup = {"copies": file_sha -> text,
+    "versions": "lineage_id#version_seq" -> text}``.
+
+    >>> links = _as_links(pd.DataFrame({"file_sha": ["c", "d"], "lineage_id": ["A", "A"],
+    ...     "version_seq": [1, 1], "release_date": ["2026-01-01"] * 2}), "near")
+    >>> lookup = {"copies": {"c": "keep\\nchanged", "d": "new\\nwords"},
+    ...     "versions": {"A#1": "keep\\ndrop"}}
+    >>> checked = verify_links_with_line_diff(links, lookup)
+    >>> checked[["similarity_verified", "reason"]].values.tolist()
+    [[0.5, None], [0.0, 'line_share_below_min']]
+    """
+    checked = links.reset_index(drop=True).copy()
+    shares = np.full(len(checked), np.nan)
+    reasons: list[str | None] = [None] * len(checked)
+    is_exact = (checked["link"] == "exact").to_numpy()
+    shares[is_exact] = 1.0
+    pairs, positions = [], []
+    for position in np.flatnonzero(~is_exact):
+        row = checked.iloc[position]
+        registry_text = texts_lookup["versions"].get(f"{row['lineage_id']}#{row['version_seq']}")
+        copy_text = texts_lookup["copies"].get(row["file_sha"])
+        if registry_text is None or copy_text is None:
+            reasons[position] = "missing_text"
+            continue
+        pairs.append((registry_text, copy_text))
+        positions.append(position)
+    for position, share in zip(positions, _line_shares(pairs, pool), strict=True):
+        shares[position] = share
+        if share < settings.MIN_VERIFIED_LINE_SHARE:
+            reasons[position] = "line_share_below_min"
+    checked["similarity_verified"] = shares
+    checked["reason"] = pd.Series(reasons, dtype="object")
+    return checked
+
+
+def _stage_copy_texts(con: duckdb.DuckDBPyConnection, shas: pd.Series, dest: Path) -> None:
+    """Query Q5.7: write ``file_sha, content`` of the given dataset texts to ``dest``.
+
+    One scan of the artifacts; each line-check batch then reads only its texts.
+    """
+    con.register("needed_shas", pd.DataFrame({"file_sha": shas.drop_duplicates()}))
+    try:
+        con.execute(
+            f"COPY ({LINE_CHECK_TEXTS_SQL}) TO {_quote_path(str(dest))} "
+            f"(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE {settings.TEXT_ROW_GROUP})"
+        )
+    finally:
+        con.unregister("needed_shas")
+
+
+def _read_staged_texts(staged: Path, shas: list[str]) -> dict[str, str]:
+    """``file_sha -> content`` from the staged file, for these shas only."""
+    reader = connect_duckdb()
+    try:
+        reader.register("wanted", pd.DataFrame({"file_sha": shas}))
+        rows = reader.execute(
+            f"SELECT file_sha, content FROM read_parquet({_quote_path(str(staged))}) "
+            "SEMI JOIN wanted USING (file_sha)"
+        ).fetchall()
+    finally:
+        reader.close()
+    return {str(sha): _as_text(content) for sha, content in rows}
+
+
+def check_links_in_batches(
+    con: duckdb.DuckDBPyConnection, links: pd.DataFrame, versions: pd.DataFrame, work_dir: Path
+) -> pd.DataFrame:
+    """``verify_links_with_line_diff`` on every link, ``LINE_CHECK_BATCH_LINKS`` at a time.
+
+    Links are sorted by registry blob, so a batch reads few registry texts
+    (stage 3 texts, query Q4.2). Dataset texts come from one staged scan
+    (Q5.7). Exact links need no text.
+    """
+    exact = links.loc[links["link"] == "exact"]
+    fuzzy = links.loc[links["link"] != "exact"].merge(
+        versions.loc[:, ["lineage_id", "version_seq", "blob"]],
+        on=["lineage_id", "version_seq"],
+        how="left",
+    )
+    fuzzy = fuzzy.sort_values(["blob", "file_sha"], kind="mergesort").reset_index(drop=True)
+    parts = [verify_links_with_line_diff(exact, {"copies": {}, "versions": {}})]
+    if fuzzy.empty:
+        return parts[0]
+    staged = work_dir / "line_check_texts.parquet"
+    print(f"line check: staging {fuzzy['file_sha'].nunique()} dataset texts", flush=True)
+    _stage_copy_texts(con, fuzzy["file_sha"], staged)
+    pool = _open_line_pool() if len(fuzzy) >= LINE_CHECK_POOL_MIN else None
+    try:
+        for start in range(0, len(fuzzy), LINE_CHECK_BATCH_LINKS):
+            batch = fuzzy.iloc[start : start + LINE_CHECK_BATCH_LINKS]
+            blob_texts = read_texts(_texts_path(), sorted(set(batch["blob"].dropna())))
+            lookup = {
+                "copies": _read_staged_texts(staged, batch["file_sha"].unique().tolist()),
+                "versions": {
+                    f"{row.lineage_id}#{row.version_seq}": blob_texts[row.blob]
+                    for row in batch.itertuples(index=False)
+                    if row.blob in blob_texts
+                },
+            }
+            parts.append(verify_links_with_line_diff(batch.drop(columns=["blob"]), lookup, pool))
+            print(f"line check: {start + len(batch)}/{len(fuzzy)} links", flush=True)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _open_line_pool() -> multiprocessing.pool.Pool:
+    """``DOWNLOAD_WORKERS`` processes for the line diffs."""
+    return multiprocessing.Pool(processes=settings.DOWNLOAD_WORKERS)
+
+
+def split_checked_links(checked: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Kept links (``reason`` null) and the dropped ones in ``DROPPED_COLUMNS``.
+
+    A dropped link does not fall back to a later method: the text stays
+    unlinked in Pass 1 and goes to the copier pass.
+    """
+    dropped = checked["reason"].notna()
+    kept = checked.loc[~dropped].drop(columns=["reason"]).reset_index(drop=True)
+    return kept, checked.loc[dropped, list(DROPPED_COLUMNS)].reset_index(drop=True)
+
+
+# Step 16: copier pass, Pass 2 (Algorithm A28b, query Q5.8)
+
+
+# Algorithm A28b, see code_flow/11_dataset_copies.md
+def find_copier_seen(con: duckdb.DuckDBPyConnection, kept: pd.DataFrame) -> pd.DataFrame:
+    """For each text of ``copy_texts`` with no kept link, the copier registries that hold it.
+
+    A copier (``registry_kind = copier`` in stage 3c) holds a text when one
+    of its ``SKILL.md`` change rows (not a delete) has ``new_sha`` equal to
+    the text's ``file_sha``. Per text: the earliest commit date in UTC, the
+    copier that had it first (ties: repo name), every copier that holds it,
+    and ``weak_copiers_only`` (every one has confidence below
+    WEAK_COPIER_BELOW). This is evidence for stage 7a, not a link.
+
+    Inputs: a connection with ``copy_texts``, ``changes`` and ``copiers``;
+    the kept links. Outputs: ``COPIER_SEEN_COLUMNS``, one row per text.
+
+    >>> con = connect_duckdb()
+    >>> _ = con.execute("CREATE TABLE copy_texts AS "
+    ...     "SELECT * FROM (VALUES ('u'), ('k')) t(file_sha)")
+    >>> _ = con.execute("CREATE TABLE copiers AS SELECT * FROM (VALUES ('h/one', 0.9), "
+    ...     "('h/two', 0.3)) t(repo, confidence)")
+    >>> _ = con.execute("CREATE TABLE changes AS SELECT * FROM (VALUES "
+    ...     "('h/two', 'u', '2026-02-01T00:00:00+00:00', 'A', true), "
+    ...     "('h/one', 'u', '2026-03-01T00:00:00+00:00', 'M', true), "
+    ...     "('h/one', 'k', '2026-01-01T00:00:00+00:00', 'A', true)) "
+    ...     "t(repo, new_sha, commit_date, status, is_skill_md)")
+    >>> kept = pd.DataFrame({"file_sha": ["k"]})
+    >>> row = find_copier_seen(con, kept).iloc[0]
+    >>> row["file_sha"], row["copier_first_repo"], list(row["copier_repos"])
+    ('u', 'h/two', ['h/one', 'h/two'])
+    >>> bool(row["weak_copiers_only"])
+    False
+    """
+    con.register("kept_shas", kept.loc[:, ["file_sha"]].drop_duplicates())
+    try:
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE unlinked AS "
+            "SELECT file_sha FROM copy_texts ANTI JOIN kept_shas USING (file_sha)"
+        )
+        sql = COPIER_SEEN_SQL.format(weak_below=float(settings.WEAK_COPIER_BELOW))
+        found = con.execute(sql).df()
+    finally:
+        con.unregister("kept_shas")
+    found["copier_first_date"] = pd.to_datetime(found["copier_first_date"], utc=True)
+    found["copier_repos"] = [list(repos) for repos in found["copier_repos"]]
+    found["weak_copiers_only"] = found["weak_copiers_only"].astype(bool)
+    return (
+        found.loc[:, list(COPIER_SEEN_COLUMNS)]
+        .sort_values("file_sha", kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+
+# Step 17: copy files and flags (queries Q5.9, Q5.10)
+
+
+def list_copy_files(con: duckdb.DuckDBPyConnection, kept: pd.DataFrame) -> pd.DataFrame:
+    """Query Q5.9: one row per dataset file of a kept text, outside every registry repo.
+
+    ``root_lineage`` is the stage 5b root of the linked lineage (the lineage
+    itself when it has no root row). A file inside any registry repo, a
+    copier included, is the registry's own file and is not listed.
+    """
+    con.register("kept", kept.loc[:, list(TEXT_LINK_COLUMNS)])
+    try:
+        return con.execute(COPY_FILES_SQL).df()
+    finally:
+        con.unregister("kept")
+
+
+def flag_forks_and_same_owner(copies: pd.DataFrame, con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Query Q5.10: add ``is_fork`` and ``same_owner_as_registry``.
+
+    ``is_fork``: ``repos.is_fork`` is 1 (a repo missing from repos is not a
+    fork). ``same_owner_as_registry``: the copy's owner (text before the
+    first ``/``, any letter case) owns the linked lineage's registry.
+    Nothing is dropped. Outputs: ``COPY_COLUMNS``.
+
+    >>> con = connect_duckdb()
+    >>> _ = con.execute("CREATE TABLE repos AS SELECT * FROM (VALUES ('a/other', 0), "
+    ...     "('c/fork', 1)) t(full_name, is_fork)")
+    >>> _ = con.execute("CREATE TABLE lineages AS SELECT 'A' AS lineage_id, 'A/reg' AS repo")
+    >>> rows = pd.DataFrame({"repo": ["a/other", "c/fork"], "path": ["s/SKILL.md"] * 2,
+    ...     "file_sha": ["x", "x"], "lineage_id": ["A", "A"], "root_lineage": ["A", "A"],
+    ...     "version_seq": [1, 1], "link": ["exact"] * 2, "jaccard": [1.0] * 2,
+    ...     "containment": [1.0] * 2, "similarity_verified": [1.0] * 2})
+    >>> flagged = flag_forks_and_same_owner(rows, con)
+    >>> flagged[["is_fork", "same_owner_as_registry"]].values.tolist()
+    [[False, True], [True, False]]
+    """
+    con.register("copy_rows", copies)
+    try:
+        flagged = con.execute(FLAG_COPIES_SQL).df()
+    finally:
+        con.unregister("copy_rows")
+    for column in ("is_fork", "same_owner_as_registry"):
+        flagged[column] = flagged[column].fillna(False).astype(bool)
+    flagged["version_seq"] = flagged["version_seq"].astype("int64")
+    return (
+        flagged.loc[:, list(COPY_COLUMNS)]
+        .sort_values(["repo", "path"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+
+# Step 18: save the stage 5c outputs and print the summary
+
+
+def save_copy_outputs(
+    kept: pd.DataFrame,
+    copies: pd.DataFrame,
+    dropped: pd.DataFrame,
+    copier_seen: pd.DataFrame,
+    dev: bool,
+) -> None:
+    """Write the four stage 5c tables for this mode."""
+    write_parquet(kept.loc[:, list(TEXT_LINK_COLUMNS)], text_links_path(dev), ["file_sha"])
+    write_parquet(copies.loc[:, list(COPY_COLUMNS)], copy_candidates_path(dev), ["repo", "path"])
+    write_parquet(
+        dropped.loc[:, list(DROPPED_COLUMNS)], links_dropped_path(dev), ["file_sha", "lineage_id"]
+    )
+    write_parquet(
+        copier_seen.loc[:, list(COPIER_SEEN_COLUMNS)], copier_seen_path(dev), ["file_sha"]
+    )
+
+
+def build_copy_candidates(dev: bool) -> dict[str, pd.DataFrame]:
+    """Stage 5c steps 10-17: link dataset texts to registry versions and list the copy files.
+
+    Pass 1 (steps 11-15): exact, near, near_contained, cluster, then the line
+    check. Pass 2 (step 16): texts with no kept link that a copier holds.
+    Step 17: one row per copy file, with flags. Nothing is written.
+
+    Outputs: ``{"kept", "dropped", "copies", "copier_seen"}`` plus counts
+    used by the summary (``"before_check"``, ``"copy_texts"``,
+    ``"copier_seen_files"``).
+    """
+    work_dir = Path(tempfile.mkdtemp(prefix="genealogy_copies_"))
+    con = connect_duckdb()
+    try:
+        _prepare_duckdb(con, work_dir / "duckdb")
+        # Step 10: read the inputs and list the English texts outside the registries (Q5.4)
+        print("Step 10: read inputs, list English texts outside the registries", flush=True)
+        inputs = read_copy_inputs(con, dev)
+        copy_text_count = list_copy_texts(con)
+        print(f"English texts with a file outside the registries: {copy_text_count}", flush=True)
+        # Step 11: exact links (Q5.5)
+        exact = find_exact_links(con, inputs["versions"])
+        print(f"Step 11: exact links: {len(exact)}", flush=True)
+        # Steps 12-13: near (A25) and contained (A26) links from one band index
+        print("Steps 12-13: near and contained links (Algorithms A25, A26)", flush=True)
+        search = set(con.execute("SELECT file_sha FROM copy_texts").df()["file_sha"])
+        search -= set(exact["file_sha"])
+        registry_sigs = registry_signature_table(
+            inputs["versions"], inputs["signature_ids"], inputs["signatures"], inputs["sizes"]
+        )
+        near, contained = search_dataset_parts(search, registry_sigs)
+        del registry_sigs, search
+        # Step 14: cluster links (A27, Q5.6)
+        linked = _stack_links([exact, near, contained])
+        cluster = find_cluster_links(con, linked)
+        print(f"Step 14: cluster links: {len(cluster)}", flush=True)
+        # Step 15: line-diff check (A28, Q5.7)
+        print("Step 15: line-diff check (Algorithm A28)", flush=True)
+        candidates = _stack_links([linked, cluster])
+        checked = check_links_in_batches(con, candidates, inputs["versions"], work_dir)
+        kept, dropped = split_checked_links(checked)
+        print(f"kept links: {len(kept)}, dropped: {len(dropped)}", flush=True)
+        # Step 16: copier pass, Pass 2 (A28b, Q5.8)
+        copier_seen = find_copier_seen(con, kept)
+        print(
+            f"Step 16: copier pass over {inputs['copier_count']} copiers: "
+            f"{len(copier_seen)} unlinked texts held by a copier",
+            flush=True,
+        )
+        # Step 17: copy files and flags (Q5.9, Q5.10)
+        copies = flag_forks_and_same_owner(list_copy_files(con, kept), con)
+        print(f"Step 17: copy files: {len(copies)}", flush=True)
+        return {
+            "kept": kept,
+            "dropped": dropped,
+            "copies": copies,
+            "copier_seen": copier_seen,
+            "before_check": candidates["link"].value_counts(),
+            "copy_texts": copy_text_count,
+            "copier_seen_files": _count_files(con, copier_seen),
+        }
+    finally:
+        con.close()
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _count_files(con: duckdb.DuckDBPyConnection, texts: pd.DataFrame) -> dict[str, int]:
+    """Files outside the registries of these texts: all, and those of weak-only texts."""
+    con.register("seen", texts.loc[:, ["file_sha", "weak_copiers_only"]])
+    try:
+        row = con.execute(
+            """
+            SELECT count(*), count(*) FILTER (WHERE seen.weak_copiers_only)
+            FROM artifacts
+            JOIN seen ON artifacts.file_sha = seen.file_sha
+            ANTI JOIN registry_repos ON artifacts.repo_full_name = registry_repos.repo
+            """
+        ).fetchall()[0]
+    finally:
+        con.unregister("seen")
+    return {"files": int(row[0]), "weak_files": int(row[1] or 0)}
+
+
+def _per_link(frame: pd.DataFrame, prefix: str) -> dict[str, int]:
+    """``{prefix_<link>: rows}`` for the four link kinds."""
+    counts = frame["link"].value_counts() if len(frame) else pd.Series(dtype="int64")
+    return {f"{prefix}_{kind}": int(counts.get(kind, 0)) for kind in COPY_LINK_KINDS}
+
+
+def _print_copy_summary(dev: bool, result: dict[str, object], elapsed: float) -> None:
+    """Print the stage 5c counts and two sample records of each table."""
+    kept: pd.DataFrame = result["kept"]
+    dropped: pd.DataFrame = result["dropped"]
+    copies: pd.DataFrame = result["copies"]
+    seen: pd.DataFrame = result["copier_seen"]
+    before: pd.Series = result["before_check"]
+    print_summary(
+        "stage 5c find copies in the dataset",
+        {
+            "english_texts_outside_registries": result["copy_texts"],
+            **{f"candidates_{kind}": int(before.get(kind, 0)) for kind in COPY_LINK_KINDS},
+            "linked_texts": len(kept),
+            **_per_link(kept, "texts"),
+            "dropped_by_line_check": len(dropped),
+            **_per_link(dropped, "dropped"),
+            "dropped_missing_text": int((dropped["reason"] == "missing_text").sum()),
+            "copy_files": len(copies),
+            **_per_link(copies, "files"),
+            "copy_repos": int(copies["repo"].nunique()),
+            "fork_files": int(copies["is_fork"].sum()),
+            "same_owner_files": int(copies["same_owner_as_registry"].sum()),
+            "copier_seen_texts": len(seen),
+            "copier_seen_texts_weak_only": int(seen["weak_copiers_only"].sum()),
+            "copier_seen_files": result["copier_seen_files"].get("files", 0),
+            "copier_seen_files_weak_only": result["copier_seen_files"].get("weak_files", 0),
+            "seconds": round(elapsed, 1),
+        },
+    )
+    if dev:
+        print(
+            "dev: only lineages of the dev registries are indexed and only their copiers are "
+            "checked, so copies of other registries are not found.",
+            flush=True,
+        )
+    fuzzy = kept.loc[kept["link"] != "exact"]
+    sample = pd.concat([kept.head(1), fuzzy.head(1)]).loc[:, list(TEXT_LINK_COLUMNS)]
+    print_sample_records(sample, "text link sample")
+    print_sample_records(copies, "copy file sample")
+    print_sample_records(dropped, "dropped link sample")
+    print_sample_records(seen, "copier seen sample")
+
+
+def run_copies(dev: bool, force: bool) -> None:
+    """Stage 5c: steps 10-18. Skips when all four outputs exist, unless ``force``."""
+    outputs = _copy_outputs(dev)
+    if force:
+        print(
+            "force: deleting text_links, copy_candidates, links_dropped and copier_seen",
+            flush=True,
+        )
+        for path in outputs:
+            path.unlink(missing_ok=True)
+    if outputs_exist(outputs):
+        print("skip: stage 5c outputs exist (use --force to rebuild)", flush=True)
+        return
+    started = time.perf_counter()
+    # Steps 10-17: links (Pass 1), copier pass (Pass 2), copy files
+    result = build_copy_candidates(dev)
+    # Step 18: save and print the summary
+    save_copy_outputs(
+        result["kept"], result["copies"], result["dropped"], result["copier_seen"], dev
+    )
+    _print_copy_summary(dev, result, time.perf_counter() - started)
+
+
+def main() -> None:
+    """Run stage 5a (signatures), 5b (rehost) and 5c (copies), or one part with ``--only``.
+
+    ``--force`` rebuilds only the part or parts that run.
     """
     parser = build_arg_parser(
-        "Stage 5: template lines, MinHash signatures, registries copying each other."
+        "Stage 5: template lines, MinHash signatures, registries copying each other, "
+        "copies in the dataset."
     )
     parser.add_argument(
         "--only",
         choices=["signatures", "rehost", "copies"],
-        help="run one part of stage 5; the default runs every part built so far",
+        help="run one part of stage 5; the default runs all three in order",
     )
     args = parser.parse_args()
     dev, force = bool(args.dev), bool(args.force)
-    if args.only == "copies":
-        print("skip: --only copies is stage 5c (card G14), not built yet")
-        return
     if args.only in (None, "signatures"):
         run_signatures(dev, force)
     if args.only in (None, "rehost"):
         run_rehost(dev, force)
+    if args.only in (None, "copies"):
+        run_copies(dev, force)
 
 
 if __name__ == "__main__":

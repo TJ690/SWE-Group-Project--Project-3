@@ -28,7 +28,7 @@ bash scripts/skill_genealogy/tests/10_registry_rehosts.sh
 
 Runs `tests/skill_genealogy/test_find_copies.py` and the doctests of `find_copies.py` (stages 5a and 5b share the file).
 
-`find_copies` without `--only` runs stage 5a and then 5b.
+`find_copies` without `--only` runs stages 5a, 5b and then [5c](11_dataset_copies.md).
 
 ## Inputs
 

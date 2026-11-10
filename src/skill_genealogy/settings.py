@@ -124,7 +124,20 @@ REHOST_CONTAINMENT_LSH_THRESHOLD = 0.5
 # 2026-11-09: contained links with a source under 20 shingles kept the skill's
 # folder name in 26-48% of cases, from 20 to 200 shingles in 78-89%. A near
 # link needs similar sizes on both sides and is not limited.
+# A26 (G14) uses the same minimum for a registry text contained in a dataset
+# text, for the same reason: the line check cannot catch it, because a copy
+# that has those headings keeps every line of such a registry text.
 REHOST_CONTAINED_MIN_SHINGLES = 20
+# A25/A26 (G14): the LSH band layout that gathers dataset-copy candidates.
+# datasketch's MinHashLSH picks 64 bands of 2 values for this threshold. A
+# pair with Jaccard j shares a band with probability 1 - (1 - j^2)^64: 0.93 at
+# 0.2, 0.997 at 0.3, 1.0 at 0.4. A registry text of 40 lines inside a copy of
+# 100 lines (Jaccard about 0.4, containment 1.0) is found; with the 25 bands of
+# 5 values of REHOST_CONTAINMENT_LSH_THRESHOLD it is found 1 time in 5. A copy
+# with containment 0.8 is found reliably while it is at most about 5 times the
+# registry text. Measured 2026-11-09 on 20,000 dataset texts against the full
+# registry index: 581 band hits per text (25 x 5 bands: 97; one value: 2,917).
+COPY_SEARCH_LSH_THRESHOLD = 0.1
 # A26: a source that agrees on this many MinHash values or fewer (J <= 0.04) is
 # chance, not evidence. It is not picked when a strong source is also eligible.
 # A small registry text inside a large copy can reach containment 1.0 from one
@@ -132,6 +145,10 @@ REHOST_CONTAINED_MIN_SHINGLES = 20
 WEAK_MATCH_MAX_VALUES = 5
 # A26: a source that agrees on at least this many MinHash values (J >= 0.16).
 STRONG_MATCH_MIN_VALUES = 20
+# A28b (G14): a copier registry with stage 3c confidence below this is weak.
+# A text held only by weak copiers is flagged weak_copiers_only. Same cutoff
+# as the stage 3c review sheet (KIND_REVIEW_BELOW).
+WEAK_COPIER_BELOW = 0.5
 # Line-diff check after a near match. A link below this share of registry
 # body lines is dropped. 0.50 keeps a copy that still has half the source lines.
 MIN_VERIFIED_LINE_SHARE = 0.50
