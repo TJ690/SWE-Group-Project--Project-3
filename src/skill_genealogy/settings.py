@@ -208,6 +208,16 @@ HISTORY_DUCKDB_MEMORY_LIMIT = "4GB"
 DELETED_FOLDERS_MAX = 20_000
 # Seconds between progress lines for a long step inside one repo.
 PROGRESS_SECONDS = 30
+# Stage 6 (A29): a copy repo with more target skill folders than this is not
+# cloned; its status is ``too_large``. Only mirrors reach it (on full data
+# majiayu000/claude-skill-registry-data has 52,358 copy folders,
+# gabrielmoreira/agent-skills-mirror 50,481, David-Li0406/meta-skill-evloving
+# 28,683; the next repo has 17,740). Same size as DELETED_FOLDERS_MAX, the
+# folder count stage 3 could still log within the machine's memory.
+COPY_HISTORY_MAX_FOLDERS = 20_000
+# Stage 6: a full run with more pending repos than this stops unless --yes.
+# Cloning 2,000 repos with 8 workers already takes hours.
+COPY_HISTORY_CONFIRM_ABOVE_REPOS = 2000
 # Script files.
 SCRIPT_EXTENSIONS: tuple[str, ...] = (
     ".py",

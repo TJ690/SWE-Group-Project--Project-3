@@ -152,6 +152,13 @@ All four in the dev or full data folder.
 
 **Copy history comes from stage 6 only.** The registry side already has its full history (stage 3). The copy side, the dataset repos, keeps only a first and a last commit in GitSkills, so stage 6 clones every copy repo. The main pipeline's `wild_history` (the `SKILL.md` history of busy dataset files, mined on 2026-10-29) is not used: it covers 1,230 of the 1,414,080 copy files and would save about 21 of 60,958 clones, while it holds only `SKILL.md` and not the skill folder, is an older snapshot, and its code cannot be rebuilt from this repository. One history source keeps stages 7 to 10 simple.
 
+**Why an old dataset snapshot is fine for linking.** The two sides are not the same kind of data. The dataset side is one snapshot: the text each file had when GitSkills was crawled. The registry side is the whole history: every distinct `SKILL.md` text a registry skill had, up to the stage 3 download, is a lineage version. A dataset text is compared with all of them, so a text copied long before the crawl still meets the exact version it was copied from, and the oldest matching version wins exact and near ties. A link answers "where did this text come from", and the answer does not depend on when the snapshot was taken. The age of the snapshot matters only in four places, none of which changes a link:
+
+- copies made after the crawl are not in the dataset, so they are outside the study (a scope limit, not a bias);
+- repos changed or deleted since the crawl: the copy is linked, but stage 6 may find it `gone` (9% of repos in the dev run) or the folder without history;
+- a registry version released after the dataset saw the file cannot be its source; stage 7a checks link dates;
+- staleness (stage 10) must compare the copy and the registry at the same date, either both at the snapshot or both at the download, never the snapshot copy with today's registry, which would count updates the copy could not yet have taken.
+
 ## Limits
 
 - **Only source registries are linked.** A text copied from a small repo that is not a registry is unlinked here; stage 7a finds such copies from history.
