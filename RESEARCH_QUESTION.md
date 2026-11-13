@@ -1,6 +1,6 @@
 # Research Question
 
-## Question 
+## Previous Question: 
 Can we distinguish likely human-authored, agent-assisted, and highly templated skills by observing structural, linguistic, and commit-metadata patterns in GitSkills artifacts, and how reliable is that signal?
 
 ## Background/Motivation
@@ -11,6 +11,10 @@ Skills may be written by developers, drafted with agent assistance, or adapted f
 The difficulty is that a finished skill does not necessarily reveal how it was created. Similar wording could come from a shared template, common writing conventions, or agent assistance. Human revision can also obscure the distinction between an initial draft and the final artifact. This creates an open question about whether visible characteristics of a skill and its repository history can provide meaningful evidence of its production process, and how much confidence that evidence deserves.
 
 This uncertainty motivated our research question. Establishing whether these distinctions can be made reliably would help developers interpret authorship claims and make more informed decisions about reviewing and reusing skills. Establishing where the distinctions cannot be supported would be equally valuable, because it would clarify the limits of inferring authorship from public software artifacts.
+
+## Updated Research Question: \*\*How accurately can we detect authorship signals (human-authored, agent-assisted, and templated skills) in the GitSkills dataset, and how do registry lineages, package versions, and reuse patterns explain the propagation of these skills?\*\*
+
+## Reasoning: Detecting AI text directly is notoriously difficult and unreliable, especially for structured technical files like `SKILL.md` where human writing is already formulaic. Finding out whether these files have have co-authored by AI through these methods would prove rather difficult as this has been an ongoing topic to be addressed for along time. Focusing on propagation and reuse would make a better case for it since all of the files have text content, repository locations, and package metadata. We can run hashing, cluster analysis, and registry tracking across every single one of the git skill files.
 
 ## Historical taxonomy and independent evidence
 The original classification used three categories:
