@@ -68,6 +68,14 @@ def test_front_matter_only_edit_keeps_body_unchanged_and_flags_permissions():
     assert row["allowed_tools_added"] == ["Bash"]
 
 
+def test_project_name_added_only_in_front_matter_is_not_customization():
+    edited = BASE.replace("name: demo", "name: demo\nmetadata:\n  acme:\n    tags: [x]")
+    row = _compare(edited)
+    assert row["state"] == "unchanged"
+    assert "acme" in row["names_added"]  # names_added still reads the whole file
+    assert not row["customized"]
+
+
 def test_cosmetic_copy():
     row = _compare(BASE.replace("Line 3 of the skill.", "Line 3 of this skill."))
     assert row["state"] == "cosmetic"
@@ -107,6 +115,8 @@ def test_heading_overlap_cases():
     assert heading_overlap_with_registry(["Deploy", "Deploy"], ["deploy "]) == 1.0
     assert heading_overlap_with_registry(["Deploy"], []) == 0.0
     assert math.isnan(heading_overlap_with_registry([], []))
+    # A copy that added no heading has no direction, even when the registry added some.
+    assert math.isnan(heading_overlap_with_registry([], ["Tests"]))
 
 
 def test_headings_added_after_skips_the_update_that_made_the_origin():
@@ -185,11 +195,21 @@ def test_history_edit_to_another_lineage_is_other_source():
     assert edits["change_kind"].tolist() == ["other_source"]
 
 
-def test_inherited_commit_is_left_out_and_pairs_skip_it():
+def test_inherited_commit_is_left_out_but_the_next_edit_starts_from_it():
     history = _history(["v1", "mine", "v2"], inherited=[False, True, False])
     edits = classify_history_edits(history, VERSIONS, EDIT_TEXTS)
-    assert edits["from_blob"].tolist() == ["v1"]
+    assert edits["from_blob"].tolist() == ["mine"]
     assert edits["to_blob"].tolist() == ["v2"]
+
+
+def test_first_local_edit_of_a_fork_is_kept():
+    # A fork: two inherited registry commits, then the copy's own edit.
+    history = _history(["v1", "v2", "mine"], inherited=[True, True, False])
+    texts = {**EDIT_TEXTS, "mine": EDIT_TEXTS["v2"] + "\nMy fork line."}
+    edits = classify_history_edits(history, VERSIONS, texts)
+    assert edits["from_blob"].tolist() == ["v2"]
+    assert edits["to_blob"].tolist() == ["mine"]
+    assert edits["change_kind"].tolist() == ["local"]
 
 
 def test_same_blob_deletes_and_missing_texts_are_not_edits():
@@ -203,6 +223,15 @@ def test_same_blob_deletes_and_missing_texts_are_not_edits():
     missing = classify_history_edits(_history(["v1", "unknown"]), VERSIONS, EDIT_TEXTS)
     assert missing.empty
     assert missing.attrs["no_text"] == 1
+
+
+def test_whitespace_only_edit_is_not_an_edit():
+    # Trailing spaces and an extra blank line: stage 4a would not count a new version.
+    texts = {**EDIT_TEXTS, "spaced": EDIT_TEXTS["v1"].replace("\n", "  \n", 3) + "\n\n"}
+    edits = classify_history_edits(_history(["v1", "spaced", "mine"]), VERSIONS, texts)
+    assert edits["from_blob"].tolist() == ["spaced"]
+    assert edits["to_blob"].tolist() == ["mine"]
+    assert edits.attrs["whitespace_only"] == 1
 
 
 def test_history_edit_flags_a_permission_change():
@@ -329,3 +358,24 @@ def test_copies_needing_dataset_text_are_those_without_a_stored_newest_blob(tmp_
     newest = {("r", "a"): "stored", ("r", "b"): "nulltext", ("r", "c"): "absent"}  # d: no history
     needs = module.find_copies_needing_dataset_text(True, copies, newest)
     assert needs.tolist() == [False, True, True, True]
+
+
+def test_progress_prints_batches_and_writes_the_file(tmp_path, capsys):
+    import json
+
+    from skill_genealogy.measure_copy_changes import Progress
+
+    path = tmp_path / "progress.json"
+    progress = Progress(True, path=path)
+    progress.stage("compare", "2 batches")
+    progress.start_compare()
+    progress.batch(1, 2, 50, 100, 3, "history")
+    state = json.loads(path.read_text())
+    assert state["copies_done"] == 50
+    assert state["percent"] == 50.0
+    assert state["eta_seconds"] is not None
+    progress.finish()
+    assert json.loads(path.read_text())["done"] is True
+    out = capsys.readouterr().out
+    assert "compare: 2 batches" in out
+    assert "batch 1/2 (history): copies 50/100 (50.0%)" in out

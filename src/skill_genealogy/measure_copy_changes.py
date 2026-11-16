@@ -24,11 +24,13 @@ Design note: docs/skill_genealogy/design/15_copy_changes.md.
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from collections import ChainMap, defaultdict
 from collections.abc import Mapping
 from dataclasses import fields
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -40,11 +42,13 @@ from skill_genealogy.assign_families import (
     newest_history_blobs,
     read_copy_histories,
 )
-from skill_genealogy.build_registry_lineages import history_dir
+from skill_genealogy.build_registry_lineages import history_dir, normalized_sha
 from skill_genealogy.compare_texts import (
     TextChange,
+    _body,
     compare_front_matter,
     compare_texts,
+    find_project_names_added,
 )
 from skill_genealogy.file_helpers import (
     build_arg_parser,
@@ -151,6 +155,99 @@ def output_paths(dev: bool) -> dict[str, Path]:
     }
 
 
+# Progress
+
+
+class Progress:
+    """Progress lines in the log and a progress file for a long run.
+
+    ``stage`` prints one timestamped line per setup step. ``batch`` prints one
+    line per finished batch: copies done, edits found, copies per second and
+    an estimated time left. The same numbers go to
+    ``logs/measure_copy_changes_<dev|full>.progress.json`` (replaced in one
+    step, so a reader never sees half a file).
+    """
+
+    def __init__(self, dev: bool, path: Path | None = None) -> None:
+        self.start = time.perf_counter()
+        self.compare_start: float | None = None
+        self.path = path or settings.REPO_ROOT / "logs" / (
+            f"measure_copy_changes_{'dev' if dev else 'full'}.progress.json"
+        )
+        self.state: dict[str, object] = {"stage": "starting", "done": False}
+
+    def _elapsed(self) -> float:
+        return time.perf_counter() - self.start
+
+    def _print(self, text: str) -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{stamp} +{self._elapsed():7.1f}s] {text}", flush=True)
+
+    def _write(self) -> None:
+        self.state["updated"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.state["elapsed_seconds"] = round(self._elapsed(), 1)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.path.with_suffix(".tmp")
+            temp.write_text(json.dumps(self.state, indent=2, default=str))
+            temp.replace(self.path)
+        except OSError:
+            pass  # progress must never stop the build
+
+    def stage(self, name: str, detail: str = "") -> None:
+        """Start a named step and print one line."""
+        self.state.update({"stage": name, "detail": detail})
+        self._print(f"{name}: {detail}".rstrip(": "))
+        self._write()
+
+    def batch(
+        self,
+        number: int,
+        batches: int,
+        copies_done: int,
+        copies_total: int,
+        edits: int,
+        source: str,
+    ) -> None:
+        """Record a finished batch and print one line with the rate and time left."""
+        now = time.perf_counter()
+        if self.compare_start is None:
+            self.compare_start = now
+        seconds = max(now - self.compare_start, 1e-9)
+        rate = copies_done / seconds if copies_done else 0.0
+        left = (copies_total - copies_done) / rate if rate > 0 else float("nan")
+        percent = round(100 * copies_done / max(copies_total, 1), 1)
+        self.state.update(
+            {
+                "stage": "compare",
+                "batch": number,
+                "batches": batches,
+                "copies_done": copies_done,
+                "copies_total": copies_total,
+                "percent": percent,
+                "history_edits": edits,
+                "text_source": source,
+                "copies_per_second": round(rate, 1),
+                "eta_seconds": None if rate <= 0 else round(left),
+            }
+        )
+        eta = f"{left / 60:.1f} min" if rate > 0 else "?"
+        self._print(
+            f"batch {number}/{batches} ({source}): copies {copies_done:,}/{copies_total:,}"
+            f" ({percent}%) · edits {edits:,} · {rate:.0f} copies/s · ETA {eta}"
+        )
+        self._write()
+
+    def start_compare(self) -> None:
+        """Start the clock for the rate (after the setup steps)."""
+        self.compare_start = time.perf_counter()
+
+    def finish(self) -> None:
+        """Mark the run finished."""
+        self.state.update({"stage": "done", "done": True})
+        self._write()
+
+
 # Small value helpers
 
 
@@ -177,10 +274,27 @@ def _heading_key(heading: str) -> str:
 # Step 3: customisation and heading overlap
 
 
+def body_names_added(old_text: str, new_text: str, repo: str, path: str) -> list[str]:
+    """Project names the new text adds to its body, front matter left out.
+
+    ``names_added`` of ``compare_texts`` reads the whole file, so a name added
+    only as a front-matter key (``metadata: acme:``) is in it while the body,
+    and so the state, is unchanged. ``customized`` uses this body-only list.
+
+    >>> old = "---\\nname: x\\n---\\nUse it."
+    >>> body_names_added(old, old.replace("name: x", "name: x\\nacme: 1"), "acme/r", "s/SKILL.md")
+    []
+    >>> body_names_added(old, old + "\\nFor acme.", "acme/r", "s/SKILL.md")
+    ['acme']
+    """
+    return find_project_names_added(_body(old_text), _body(new_text), repo, path)
+
+
 def is_customized(change: Mapping[str, object]) -> bool:
     """True when a name, script mention, step, command or heading was added.
 
-    A removed step (``steps_added`` below 0) is not customisation.
+    A removed step (``steps_added`` below 0) is not customisation. The caller
+    passes the body-only names (``body_names_added``) as ``names_added``.
 
     >>> base = {"names_added": [], "scripts_mentioned_added": [], "steps_added": 0,
     ...         "commands_added": [], "headings_added": []}
@@ -205,19 +319,21 @@ def heading_overlap_with_registry(
     """Jaccard overlap of the headings the copy added and the registry added later.
 
     The size of the shared headings divided by the size of all headings, each
-    counted once and compared trimmed and case-folded. Both empty is NaN (no
-    heading was added on either side), one empty side is 0.
+    counted once and compared trimmed and case-folded. A copy that added no
+    heading has no direction to compare, so the overlap is NaN, whatever the
+    registry added. A copy that added headings while the registry added none
+    is 0.
 
     >>> heading_overlap_with_registry(["Deploy"], ["Deploy", "Tests"])
     0.5
     >>> heading_overlap_with_registry(["Deploy"], [])
     0.0
-    >>> math.isnan(heading_overlap_with_registry([], []))
+    >>> math.isnan(heading_overlap_with_registry([], ["Tests"]))
     True
     """
     copy_set = {_heading_key(heading) for heading in copy_headings_added}
     registry_set = {_heading_key(heading) for heading in registry_headings_added_later}
-    if not copy_set and not registry_set:
+    if not copy_set:
         return float("nan")
     return len(copy_set & registry_set) / len(copy_set | registry_set)
 
@@ -315,6 +431,7 @@ def compare_copy_with_origin(
         change = compare_texts(origin_text, current_text, copy["repo"], copy["path"]).to_dict()
         front = compare_front_matter(origin_text, current_text)
         later = headings_added_after(later_headings, copy["lineage_id"], origin_seq)
+        body_names = body_names_added(origin_text, current_text, copy["repo"], copy["path"])
         rows.append(
             {
                 "repo": copy["repo"],
@@ -325,7 +442,7 @@ def compare_copy_with_origin(
                 "current_basis": basis,
                 **change,
                 **front,
-                "customized": is_customized(change),
+                "customized": is_customized({**change, "names_added": body_names}),
                 "heading_overlap": heading_overlap_with_registry(change["headings_added"], later),
             }
         )
@@ -373,14 +490,21 @@ def classify_history_edits(
     """Label each edit in a copy's history ``sync``, ``other_source`` or ``local``.
 
     ``histories`` has one row per change of a copy file (``repo, path,
-    lineage_id, blob, commit, commit_date, commit_seq, status, inherited``). A
-    commit that a registry history also holds is inherited and dropped first;
-    deletes have no blob and are dropped too. The remaining rows of a file are
-    paired in order. A pair with the same blob is not an edit, and a pair whose
-    text is not stored is left out. The new blob is ``sync`` when it is a
-    version of the copy's own lineage, ``other_source`` when it is a version of
-    another lineage, else ``local``. Each edit also gets its ``TextChange`` and
-    ``permissions_changed``. Skipped pairs are counted in ``.attrs["no_text"]``.
+    lineage_id, blob, commit, commit_date, commit_seq, status, inherited``).
+    Deletes have no blob and are dropped. The remaining rows of a file are
+    paired in order, inherited rows included, so an edit made right after a
+    fork's inherited commits is compared with the text it actually changed. A
+    pair whose new commit is inherited (a registry history also holds it) is
+    not the copy's own edit and is left out. A pair with the same blob is not
+    an edit, and a pair whose text is not stored is left out. A pair whose
+    texts differ only in spaces, line endings, quotes or blank lines (the same
+    ``normalized_sha``) is not an edit either: stage 4a does not count such a
+    change as a registry version, and the profile sets the two side by side.
+    The new blob is ``sync`` when it is a version of the copy's own lineage,
+    ``other_source`` when it is a version of another lineage, else ``local``.
+    Each edit also gets its ``TextChange`` and ``permissions_changed``. Pairs
+    left out for a missing text are counted in ``.attrs["no_text"]``, pairs
+    left out as whitespace only in ``.attrs["whitespace_only"]``.
 
     >>> versions = pd.DataFrame({"lineage_id": ["L"], "blob": ["v2"]})
     >>> rows = pd.DataFrame({
@@ -393,23 +517,26 @@ def classify_history_edits(
     ['local', 'sync']
     """
     lineages_by_blob = index_lineages_by_blob(registry_versions)
-    kept = histories.loc[~histories["inherited"].astype(bool) & histories["blob"].notna()]
-    kept = kept.loc[kept["status"] != "D"]
+    kept = histories.loc[histories["blob"].notna() & (histories["status"] != "D")]
     kept = kept.sort_values(
         ["repo", "path", "commit_date", "commit_seq"], kind="mergesort", na_position="first"
     )
-    edits, no_text = [], 0
+    edits, no_text, whitespace_only = [], 0, 0
     for (_repo, _path), file_rows in kept.groupby(["repo", "path"], sort=False):
         records = file_rows.to_dict("records")
         for before, after in zip(records, records[1:], strict=False):
-            if before["blob"] == after["blob"]:
+            if bool(after["inherited"]) or before["blob"] == after["blob"]:
                 continue
             if before["blob"] not in texts or after["blob"] not in texts:
                 no_text += 1
                 continue
+            if normalized_sha(texts[before["blob"]]) == normalized_sha(texts[after["blob"]]):
+                whitespace_only += 1
+                continue
             edits.append(build_edit_row(before, after, texts, lineages_by_blob))
     frame = pd.DataFrame(edits, columns=HISTORY_EDIT_COLUMNS)
     frame.attrs["no_text"] = no_text
+    frame.attrs["whitespace_only"] = whitespace_only
     return frame
 
 
@@ -664,17 +791,20 @@ def find_copies_needing_dataset_text(
 
 
 def build_copy_measures(
-    dev: bool, inputs: Mapping[str, object]
+    dev: bool, inputs: Mapping[str, object], progress: Progress | None = None
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     """Steps 1-5: compare copies with origins, label history edits, build the profile.
 
     Returns ``copy_changes``, ``history_edits``, ``profile`` and a dict of
     counts (copies selected, compared, left out for a missing text, edits
-    left out for a missing text).
+    left out for a missing text). ``progress`` (optional) gets a line per
+    setup step and per batch.
     """
+    progress = progress or Progress(dev)
     versions, registry_changes = inputs["versions"], inputs["registry_changes"]
     # Step 1: the copies, their histories and the origin texts (read once: a few hundred MB)
     copies = select_copies(inputs["copy_files"], inputs["families"], inputs["english"])
+    progress.stage("read copy histories", f"{len(copies):,} copies selected")
     histories = read_copy_histories(dev, copies)
     histories = histories.merge(copies.loc[:, ["repo", "path", "lineage_id"]], on=["repo", "path"])
     newest_blobs = {
@@ -689,14 +819,27 @@ def build_copy_measures(
         for lineage, seq in zip(copies["lineage_id"], copies["origin_seq"], strict=True)
         if (lineage, int(seq)) in origin_blobs
     }
+    progress.stage(
+        "read origin texts",
+        f"{len(histories):,} history rows, {len(wanted_origins):,} origin versions",
+    )
     origin_texts = load_stored_texts(_text_path(dev, "registry"), wanted_origins)
     later = index_later_headings(registry_changes)
+    progress.stage("find copies without a stored history text")
     needs_dataset = find_copies_needing_dataset_text(dev, copies, newest_blobs)
     groups = [(copies.loc[~needs_dataset], False), (copies.loc[needs_dataset], True)]
+    size = settings.COPY_CHANGE_FILE_BATCH
+    batches = sum(math.ceil(len(group) / size) for group, _uses in groups)
+    progress.stage(
+        "compare",
+        f"{int((~needs_dataset).sum()):,} copies with a history text,"
+        f" {int(needs_dataset.sum()):,} read from the dataset; {batches} batches of {size:,}",
+    )
+    progress.start_compare()
     changes, edits = [], []
-    no_edit_text = 0
+    no_edit_text, whitespace_edits, copies_done, edits_found, number = 0, 0, 0, 0, 0
     for group, uses_dataset in groups:
-        for batch in batches_of_files(group, settings.COPY_CHANGE_FILE_BATCH):
+        for batch in batches_of_files(group, size):
             keys = batch.loc[:, ["repo", "path"]]
             batch_history = histories.merge(keys, on=["repo", "path"])
             history_texts = load_stored_texts(
@@ -711,7 +854,19 @@ def build_copy_measures(
             # Step 4: the edits inside each history (A39)
             batch_edits = classify_history_edits(batch_history, versions, texts)
             no_edit_text += batch_edits.attrs.get("no_text", 0)
+            whitespace_edits += batch_edits.attrs.get("whitespace_only", 0)
             edits.append(batch_edits)
+            number += 1
+            copies_done += len(batch)
+            edits_found += len(batch_edits)
+            progress.batch(
+                number,
+                batches,
+                copies_done,
+                len(copies),
+                edits_found,
+                "dataset" if uses_dataset else "history",
+            )
     copy_changes = (
         pd.concat(changes, ignore_index=True)
         if changes
@@ -728,6 +883,7 @@ def build_copy_measures(
         "copies_compared": len(copy_changes),
         "copies_left_out_no_text": len(copies) - len(copy_changes),
         "edits_left_out_no_text": no_edit_text,
+        "edits_left_out_whitespace_only": whitespace_edits,
     }
     return copy_changes, history_edits, profile, counts
 
@@ -850,10 +1006,14 @@ def run(dev: bool, force: bool) -> None:
         print("skip: stage 9a outputs exist (use --force to rebuild)", flush=True)
         return
     started = time.perf_counter()
+    progress = Progress(dev)
+    progress.stage("read inputs", "dev" if dev else "full")
     inputs = read_inputs(dev)
-    copy_changes, history_edits, profile, counts = build_copy_measures(dev, inputs)
+    copy_changes, history_edits, profile, counts = build_copy_measures(dev, inputs, progress)
     # Step 6: save and print
+    progress.stage("save outputs")
     save_outputs(copy_changes, history_edits, profile, dev)
+    progress.finish()
     print_run_summary(copy_changes, history_edits, profile, counts, time.perf_counter() - started)
 
 
