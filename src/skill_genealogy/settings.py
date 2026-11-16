@@ -335,6 +335,11 @@ BLOB_READ_BATCH = 2000
 # (2026-11-07), more than this machine's 16 GB holds as Python strings. 40,000
 # blobs is about 0.4 GB (median text 5 KB, mean 10 KB).
 LINEAGE_TEXT_BATCH = 40_000
+# Stage 9a (G19): copy files compared per batch. Each batch loads the stage 6
+# texts of its histories (about 3 versions per file, median 5 KB) next to the
+# origin texts, so 20,000 files stay well under 1 GB. A file's history is never
+# split, so edits are always read in order.
+COPY_CHANGE_FILE_BATCH = 20_000
 # Stage 4 (G10 rule 0): registry kinds from stage 3c (registry_kinds.parquet)
 # that become lineages. A copier is never a lineage, root or origin, so every
 # later stage, which reads the stage 4 tables, leaves copiers out without a
