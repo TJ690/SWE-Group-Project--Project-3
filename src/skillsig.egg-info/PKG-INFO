@@ -13,8 +13,15 @@ Requires-Dist: scipy==1.18.1
 Requires-Dist: scikit-learn==1.9.1
 Requires-Dist: statsmodels==0.15.0
 Requires-Dist: datasketch==2.0.0
+Requires-Dist: lingua-language-detector==2.2.0
 Requires-Dist: httpx==0.28.1
 Requires-Dist: matplotlib==3.11.2
+Requires-Dist: openpyxl==3.1.5
+Provides-Extra: data
+Requires-Dist: huggingface_hub==2.0.0; extra == "data"
+Provides-Extra: notebook
+Requires-Dist: ipykernel==7.3.0; extra == "notebook"
+Requires-Dist: seaborn==0.13.2; extra == "notebook"
 Provides-Extra: dev
 Requires-Dist: pytest==9.1.1; extra == "dev"
 Requires-Dist: pytest-cov==7.1.0; extra == "dev"
