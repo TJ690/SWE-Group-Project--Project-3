@@ -176,6 +176,11 @@ SUBSTANTIVE_BODY_CHANGE_PCT = 5
 SECTION_KEPT_MIN_SHARE = 0.9
 # Same as rq2.grace_days.
 STALE_AFTER_DAYS = 30
+# Stage 10 as-of date (rule 2): the first day any registry history was mined (stage 3).
+# The first 3,566 registries were mined on 2026-11-02, the rest on 2026-11-06 and
+# 2026-11-07. A registry's snapshot is the later of this day and its newest commit,
+# so it is never before a release the history holds and at most 5 days early.
+REGISTRY_MINED_FROM = "2026-11-02"
 # A52: the copy-chain walk stops after this many nodes, counting the skill.
 # A family tree can be deeper than one terminal line should print.
 MAX_CHAIN_STEPS = 50
