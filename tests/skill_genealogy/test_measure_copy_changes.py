@@ -379,3 +379,303 @@ def test_progress_prints_batches_and_writes_the_file(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "compare: 2 batches" in out
     assert "batch 1/2 (history): copies 50/100 (50.0%)" in out
+
+
+# Stage 9b: copy version similarity
+
+
+def _registry_versions() -> pd.DataFrame:
+    """Registry v1 10 Jan, v2 1 Mar, v3 15 May (the card's worked example)."""
+    return pd.DataFrame(
+        {
+            "lineage_id": ["L"] * 3,
+            "version_seq": [1, 2, 3],
+            "blob": ["v1", "v2", "v3"],
+            "release_date": pd.to_datetime(["2026-01-10", "2026-03-01", "2026-05-15"], utc=True),
+        }
+    )
+
+
+def test_comparison_targets_follow_the_c1_to_c4_timeline():
+    from skill_genealogy.measure_copy_changes import (
+        index_lineage_releases,
+        pick_comparison_targets,
+        targets_from_index,
+    )
+
+    versions = _registry_versions()
+    dates = ["2026-02-01", "2026-03-10", "2026-04-20", "2026-06-30"]
+    expected = [(None, 1, 1, 3), (1, 1, 2, 3), (2, 1, 2, 3), (3, 1, 3, 3)]
+    releases = index_lineage_releases(versions)
+    for seq, (date, want) in enumerate(zip(dates, expected, strict=True), start=1):
+        copy = {"lineage_id": "L", "version_seq": seq, "commit_date": pd.Timestamp(date, tz="UTC")}
+        targets = pick_comparison_targets(copy, versions, 1)
+        got = (
+            targets["prev_version_seq"],
+            targets["origin_seq"],
+            targets["at_date_seq"],
+            targets["newest_seq"],
+        )
+        assert got == want
+        assert targets_from_index(releases, "L", seq, copy["commit_date"], 1) == targets
+
+
+def test_targets_before_every_release_or_undated_have_no_at_date():
+    from skill_genealogy.measure_copy_changes import (
+        index_lineage_releases,
+        pick_comparison_targets,
+        targets_from_index,
+    )
+
+    versions = _registry_versions()
+    releases = index_lineage_releases(versions)
+    for date in (pd.Timestamp("2026-01-01", tz="UTC"), pd.NaT):
+        copy = {"lineage_id": "L", "version_seq": 1, "commit_date": date}
+        targets = pick_comparison_targets(copy, versions, 2)
+        assert targets["at_date_seq"] is None and targets["newest_seq"] == 3
+        assert targets_from_index(releases, "L", 1, date, 2) == targets
+
+
+def test_fast_target_lookup_agrees_with_the_plain_one_on_microsecond_dates():
+    from skill_genealogy.measure_copy_changes import (
+        index_lineage_releases,
+        pick_comparison_targets,
+        targets_from_index,
+    )
+
+    versions = _registry_versions()
+    versions["release_date"] = versions["release_date"].dt.as_unit("us")
+    releases = index_lineage_releases(versions)
+    days = pd.date_range("2025-12-25", "2026-07-01", freq="7D", tz="UTC")
+    for date in list(days) + list(versions["release_date"]):
+        copy = {"lineage_id": "L", "version_seq": 2, "commit_date": date}
+        assert targets_from_index(releases, "L", 2, date, 1) == pick_comparison_targets(
+            copy, versions, 1
+        )
+
+
+def test_score_pair_on_identical_text_is_one():
+    from skill_genealogy.measure_copy_changes import score_pair
+
+    scores = score_pair(BASE, BASE)
+    assert scores == {
+        "jaccard": 1.0,
+        "containment": 1.0,
+        "verified": 1.0,
+        "lines_added": 0,
+        "lines_removed": 0,
+        "body_change_pct": 0.0,
+    }
+
+
+def test_score_pair_matches_compare_texts_and_keeps_shared_lines():
+    from skill_genealogy.compare_texts import compare_texts, share_of_registry_lines_kept
+    from skill_genealogy.measure_copy_changes import score_pair
+
+    edited = BASE.replace("Line 3 of the skill.", "A new line.") + "\nAnother added line here."
+    scores = score_pair(BASE, edited)
+    change = compare_texts(BASE, edited)
+    assert scores["lines_added"] == change.lines_added == 2
+    assert scores["lines_removed"] == change.lines_removed == 1
+    assert scores["body_change_pct"] == change.body_change_pct
+    assert scores["verified"] == share_of_registry_lines_kept(BASE, edited)
+    assert 0 < scores["jaccard"] < scores["containment"] < 1
+    # A line many owners share still counts: adding one lowers Jaccard.
+    with_line = BASE + "\nPlease install the tool first"
+    assert score_pair(BASE, with_line)["jaccard"] < 1.0
+
+
+def test_score_rules_identical_and_too_short():
+    """Rule 1: identical texts are 1, even with no body; rule 3: only nothing to measure is null."""
+    from skill_genealogy.measure_copy_changes import IDENTICAL_SCORES, PairScorer, score_pair
+
+    tiny = "---\nname: t\n---\nInsert instructions below"
+    empty = "---\nname: t\n---\n"
+    assert score_pair(empty, empty) == IDENTICAL_SCORES
+    scorer = PairScorer({"a": empty, "b": empty.replace("name: t", "name: u"), "c": tiny})
+    assert scorer.score("a", "a") == IDENTICAL_SCORES
+    scores = scorer.score("a", "b")  # no body on either side, front matter differs
+    assert scores["jaccard"] is None and scores["containment"] is None
+    assert scores["verified"] is None and scores["body_change_pct"] is None
+    added = scorer.score("a", "c")  # body added to an empty template
+    assert added["jaccard"] == 0.0 and added["containment"] is None
+    assert added["verified"] is None and added["body_change_pct"] is None
+    deleted = scorer.score("c", "a")  # whole body deleted: measurable, 0
+    assert deleted["jaccard"] == deleted["containment"] == deleted["verified"] == 0.0
+    assert scorer.score("c", "c") == IDENTICAL_SCORES
+
+
+def test_name_note_ignores_project_word_in_old_front_matter():
+    """A body line adding the repo word is a name note even when the front matter had it."""
+    from skill_genealogy.measure_copy_changes import change_notes_for_step
+
+    old = "---\nname: acme-helper\n---\nUse it."
+    notes = change_notes_for_step(old, old + "\nBuilt for ACME.", "acme/tools", "SKILL.md")
+    assert [(note["line"], note["kind"]) for note in notes] == [(5, "name")]
+
+
+def test_one_line_edit_of_long_text_scores_high():
+    """A one-line edit of a 25-line text keeps a high Jaccard (the frontend-design case)."""
+    from skill_genealogy.measure_copy_changes import score_pair
+
+    lines = [f"Step {n}: write the component and check the colours carefully." for n in range(25)]
+    old = "\n".join(lines)
+    new = "\n".join(lines[:-1] + ["Use soft colours for every element in the page."])
+    scores = score_pair(old, new)
+    assert scores["jaccard"] > 0.8 and scores["verified"] == 24 / 25
+
+
+def _version_inputs():
+    copies = pd.DataFrame(
+        [
+            _copy_row(repo="a/r", file_sha="h2"),
+            _copy_row(repo="b/r", file_sha="d1"),
+            _copy_row(repo="c/r", file_sha="gone"),
+        ]
+    )
+    copies["lineage_id"] = "L"
+    history = pd.DataFrame(
+        {
+            "repo": ["a/r"] * 4,
+            "path": ["skills/demo/SKILL.md"] * 4,
+            "blob": ["h1", "h1b", "h2", None],
+            "status": ["A", "M", "M", "D"],
+            "commit": ["c1", "c2", "c3", "c4"],
+            "commit_seq": [1, 2, 3, 4],
+            "inherited": [False] * 4,
+            "commit_date": pd.to_datetime(
+                ["2026-02-01", "2026-03-10", "2026-04-20", "2026-06-30"], utc=True
+            ),
+        }
+    )
+    dates = pd.DataFrame(
+        {
+            "repo": ["b/r"],
+            "path": ["skills/demo/SKILL.md"],
+            "file_sha": ["d1"],
+            "last_commit_at": pd.to_datetime(["2026-04-01"], utc=True),
+        }
+    )
+    texts = {
+        "h1": BASE,
+        "h1b": BASE + "\n\n",  # whitespace only: not a new version
+        "h2": BASE + "\n## Deploy\ncurl https://x",
+        "d1": BASE,
+        "v1": BASE,
+        "v2": BASE + "\nMore.",
+        "v3": BASE + "\nMore.\nEven more.",
+    }
+    return copies, history, dates, texts
+
+
+def test_copy_versions_collapse_whitespace_and_skip_deletes():
+    from skill_genealogy.measure_copy_changes import list_copy_versions
+
+    copies, history, dates, texts = _version_inputs()
+    versions = list_copy_versions(copies, history, dates, texts)
+    rows = versions[["repo", "version_seq", "blob", "basis"]].values.tolist()
+    assert rows == [["a/r", 1, "h1", "history"], ["a/r", 2, "h2", "history"],
+                    ["b/r", 1, "d1", "dataset"]]  # fmt: skip
+    assert versions.attrs["whitespace_only"] == 1
+    assert versions.attrs["no_version"] == 1  # c/r: no history and no dataset text
+
+
+def test_history_versions_are_numbered_by_date():
+    from skill_genealogy.measure_copy_changes import list_copy_versions
+
+    copies, history, dates, texts = _version_inputs()
+    shuffled = history.iloc[::-1].reset_index(drop=True)
+    versions = list_copy_versions(copies.iloc[:1], shuffled, dates, texts)
+    assert versions["blob"].tolist() == ["h1", "h2"]
+
+
+def test_copy_without_history_is_one_row_with_null_previous():
+    import json
+
+    from skill_genealogy.measure_copy_changes import (
+        PairScorer,
+        _registry_blob_index,
+        index_lineage_releases,
+        index_lineages_by_blob,
+        list_copy_versions,
+        score_copy_versions,
+    )
+
+    copies, history, dates, texts = _version_inputs()
+    registry = _registry_versions()
+    versions = list_copy_versions(copies, history, dates, texts)
+    scored = score_copy_versions(
+        versions,
+        index_lineage_releases(registry),
+        _registry_blob_index(registry),
+        index_lineages_by_blob(registry),
+        PairScorer(texts),
+    )
+    dataset_row = scored.loc[scored["repo"] == "b/r"].iloc[0]
+    assert dataset_row["change_kind"] == "copy"
+    assert pd.isna(dataset_row["prev_jaccard"]) and pd.isna(dataset_row["prev_lines_added"])
+    assert dataset_row["origin_jaccard"] == 1.0
+    assert dataset_row["at_date_seq"] == 2 and dataset_row["newest_seq"] == 3
+    assert json.loads(dataset_row["change_notes"]) == []
+    second = scored.loc[(scored["repo"] == "a/r") & (scored["version_seq"] == 2)].iloc[0]
+    assert second["change_kind"] == "local"
+    assert second["prev_lines_added"] == 2
+    assert second["at_date_seq"] == 2
+    assert [note["kind"] for note in json.loads(second["change_notes"])] == ["heading", "network"]
+
+
+def test_change_notes_mark_added_heading_and_network_lines():
+    from skill_genealogy.measure_copy_changes import change_notes_for_step
+
+    old = "Keep this line."
+    notes = change_notes_for_step(old, old + "\n## Deploy\ncurl https://x", "a/r", "SKILL.md")
+    assert notes == [
+        {"line": 2, "kind": "heading", "text": "## Deploy"},
+        {"line": 3, "kind": "network", "text": "⚠ curl https://x"},
+    ]
+    fenced = old + "\n```\n## Deploy\n```"
+    assert change_notes_for_step(old, fenced, "a/r", "SKILL.md") == []
+    assert change_notes_for_step(old, old, "a/r", "SKILL.md") == []
+
+
+def test_change_notes_count_lines_after_front_matter_and_flag_permissions():
+    from skill_genealogy.measure_copy_changes import change_notes_for_step
+
+    old = "---\nname: x\n---\nKeep."
+    new = "---\nname: x\nallowed-tools: Bash\n---\nKeep.\n```bash\nnpm test\n```\nFor acme."
+    notes = change_notes_for_step(old, new, "acme/tools", "skills/x/SKILL.md")
+    assert [(note["line"], note["kind"]) for note in notes] == [
+        (3, "permission"),
+        (7, "command"),
+        (9, "name"),
+    ]
+
+
+def test_drift_and_share_behind():
+    from skill_genealogy.measure_copy_changes import drift_of_origin_jaccard, share_behind_at_date
+
+    rows = pd.DataFrame(
+        {
+            "repo": ["a", "a", "b"],
+            "path": ["p"] * 3,
+            "lineage_id": ["L"] * 3,
+            "version_seq": [1, 2, 1],
+            "origin_seq": [1, 1, 1],
+            "at_date_seq": pd.array([1, 2, None], dtype="Int64"),
+            "blob": ["v1", "mine", "v1"],
+            "origin_jaccard": [1.0, 0.5, 1.0],
+        }
+    )
+    assert drift_of_origin_jaccard(rows)["drift"] == -0.5
+    assert share_behind_at_date(rows, {("L", 1): "v1", ("L", 2): "v2"}) == 0.5
+
+
+def test_save_version_outputs_replaces_the_file(tmp_path, monkeypatch):
+    from skill_genealogy import measure_copy_changes as module
+
+    target = tmp_path / "copy_version_similarity.parquet"
+    monkeypatch.setattr(module, "version_output_path", lambda dev: target)
+    frame = pd.DataFrame({"repo": ["b", "a"], "path": ["p", "p"], "version_seq": [1, 1]})
+    module.save_version_outputs(frame, True)
+    assert pd.read_parquet(target)["repo"].tolist() == ["a", "b"]
+    assert not list(tmp_path.glob("*.tmp"))

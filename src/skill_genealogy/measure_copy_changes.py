@@ -1,12 +1,16 @@
-"""Stage 9a: how a copy differs from the registry version it started from (RQ2).
+"""Stages 9a and 9b: how a copy differs from the registry version it started from (RQ2).
 
-What: stage 7 gave every dated copy an origin, one registry version. This stage
-compares the copy's current text with that origin (unchanged, cosmetic or
-substantive, what was added, front matter on its own), asks whether the headings
-the copy added are the ones the registry added later (algorithm A38), labels each
-edit inside the copy's own history ``sync``, ``other_source`` or ``local``
-(algorithm A39), and sets the four kinds of change side by side in one profile
-table. A label describes the text. It does not say who typed the file.
+What: stage 7 gave every dated copy an origin, one registry version. Part
+``origin`` (9a) compares the copy's current text with that origin (unchanged,
+cosmetic or substantive, what was added, front matter on its own), asks whether
+the headings the copy added are the ones the registry added later (algorithm
+A38), labels each edit inside the copy's own history ``sync``, ``other_source``
+or ``local`` (algorithm A39), and sets the four kinds of change side by side in
+one profile table. Part ``versions`` (9b) scores every version of every copy
+against four texts chosen by date: its previous version, the origin, the
+registry version current that day and the newest registry version (algorithm
+A40), and lists the notable lines each step added (algorithm A41). A label
+describes the text. It does not say who typed the file.
 
 Inputs (dev or full data folder): ``copy_files.parquet`` and ``families.parquet``
 (stage 7), ``lineage_versions.parquet`` and ``lineage_changes.parquet`` (4a).
@@ -15,15 +19,16 @@ Shared full folder: ``skill_language.parquet`` (2a), ``registry_history/`` texts
 text of a copy that has no stored history text.
 
 Outputs: ``copy_changes.parquet`` (one row per copy file), ``copy_history_edits.parquet``
-(one row per edit in a copy's history) and ``change_profile.parquet`` (one row per
-population).
+(one row per edit in a copy's history), ``change_profile.parquet`` (one row per
+population) and ``copy_version_similarity.parquet`` (one row per copy version).
 
-Run: ``python -m skill_genealogy.measure_copy_changes [--dev] [--force] [--only origin]``.
+Run: ``python -m skill_genealogy.measure_copy_changes [--dev] [--force] [--only origin|versions]``.
 Design note: docs/skill_genealogy/design/15_copy_changes.md.
 """
 
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import time
@@ -46,9 +51,15 @@ from skill_genealogy.build_registry_lineages import history_dir, normalized_sha
 from skill_genealogy.compare_texts import (
     TextChange,
     _body,
+    _diff_line_lists,
+    _fence_state,
+    _has_word,
     compare_front_matter,
     compare_texts,
+    find_headings,
+    find_network_refs,
     find_project_names_added,
+    find_script_mentions,
 )
 from skill_genealogy.file_helpers import (
     build_arg_parser,
@@ -61,6 +72,13 @@ from skill_genealogy.file_helpers import (
     write_parquet,
 )
 from skill_genealogy.find_copies import _quote_path
+from skill_genealogy.text_helpers import (
+    body_lines,
+    exact_containment,
+    exact_jaccard,
+    make_word_shingles,
+    normalize_text,
+)
 
 TEXT_FIELDS = [item.name for item in fields(TextChange)]
 FRONT_FIELDS = [
@@ -113,6 +131,43 @@ POPULATIONS = ("registry_update", "copy_local_edit", "copy_sync", "copy_vs_origi
 # What an edit inside a copy's own history can be (algorithm A39).
 EDIT_KINDS = ("sync", "other_source", "local")
 
+# Stage 9b: the four texts each copy version is scored against (algorithm A40).
+TARGETS = ("prev", "origin", "at_date", "newest")
+# The scores of one pair; output columns are ``<target>_<score>``.
+SCORE_FIELDS = (
+    "jaccard",
+    "containment",
+    "verified",
+    "lines_added",
+    "lines_removed",
+    "body_change_pct",
+)
+# What a copy version is: the first one, a step inherited from a registry
+# history (a fork), or an edit labelled by A39.
+VERSION_KINDS = ("copy", "inherited", *EDIT_KINDS)
+# Change-note kinds (algorithm A41), in the order that picks one kind per line.
+NOTE_KINDS = ("network", "script", "command", "heading", "name")
+NETWORK_MARK = "⚠ "
+COPY_VERSION_COLUMNS = [
+    "repo",
+    "path",
+    "lineage_id",
+    "link",
+    "origin_seq",
+    "basis",
+    "version_seq",
+    "commit_date",
+    "blob",
+    "change_kind",
+    *[f"prev_{score}" for score in SCORE_FIELDS],
+    *[f"origin_{score}" for score in SCORE_FIELDS],
+    "at_date_seq",
+    *[f"at_date_{score}" for score in SCORE_FIELDS],
+    "newest_seq",
+    *[f"newest_{score}" for score in SCORE_FIELDS],
+    "change_notes",
+]
+
 
 # Query Q9.1, see docs/skill_genealogy/code_flow/15_copy_changes.md
 # Stored text of the wanted shas in a text parquet (registry or copied-skill history).
@@ -141,6 +196,32 @@ SEMI JOIN wanted_shas ON artifacts.file_sha = wanted_shas.sha
 GROUP BY artifacts.file_sha
 """
 
+# Query Q9.4, see docs/skill_genealogy/code_flow/15_copy_changes.md
+# Dataset text and last commit date of copy files with no stored history text (stage 9b).
+# The date is the file's own row; the text is any row with the same blob, because
+# the file's own row can lack the content that another repo's row of the blob has.
+DATASET_FILES_SQL = """
+WITH file_dates AS (
+    SELECT artifacts.repo_full_name AS repo, artifacts.path AS path, artifacts.file_sha AS sha,
+           max(artifacts.last_commit_at) AS last_commit_at
+    FROM read_parquet({path}) AS artifacts
+    SEMI JOIN wanted_files
+      ON artifacts.repo_full_name = wanted_files.repo
+     AND artifacts.path = wanted_files.path
+     AND artifacts.file_sha = wanted_files.sha
+    GROUP BY artifacts.repo_full_name, artifacts.path, artifacts.file_sha
+),
+blob_texts AS (
+    SELECT artifacts.file_sha AS sha, any_value(artifacts.content) AS text
+    FROM read_parquet({path}) AS artifacts
+    SEMI JOIN wanted_files ON artifacts.file_sha = wanted_files.sha
+    WHERE artifacts.content IS NOT NULL
+    GROUP BY artifacts.file_sha
+)
+SELECT file_dates.repo, file_dates.path, file_dates.sha, blob_texts.text, file_dates.last_commit_at
+FROM file_dates LEFT JOIN blob_texts ON file_dates.sha = blob_texts.sha
+"""
+
 
 # Paths
 
@@ -153,6 +234,11 @@ def output_paths(dev: bool) -> dict[str, Path]:
         "copy_history_edits": folder / "copy_history_edits.parquet",
         "change_profile": folder / "change_profile.parquet",
     }
+
+
+def version_output_path(dev: bool) -> Path:
+    """The stage 9b output file of this mode."""
+    return settings.data_dir(dev) / "copy_version_similarity.parquet"
 
 
 # Progress
@@ -208,8 +294,13 @@ class Progress:
         copies_total: int,
         edits: int,
         source: str,
+        found_label: str = "history_edits",
     ) -> None:
-        """Record a finished batch and print one line with the rate and time left."""
+        """Record a finished batch and print one line with the rate and time left.
+
+        ``edits`` is what the batches found so far, named ``found_label``
+        (``history_edits`` in stage 9a, ``versions`` in stage 9b).
+        """
         now = time.perf_counter()
         if self.compare_start is None:
             self.compare_start = now
@@ -225,7 +316,7 @@ class Progress:
                 "copies_done": copies_done,
                 "copies_total": copies_total,
                 "percent": percent,
-                "history_edits": edits,
+                found_label: edits,
                 "text_source": source,
                 "copies_per_second": round(rate, 1),
                 "eta_seconds": None if rate <= 0 else round(left),
@@ -234,7 +325,7 @@ class Progress:
         eta = f"{left / 60:.1f} min" if rate > 0 else "?"
         self._print(
             f"batch {number}/{batches} ({source}): copies {copies_done:,}/{copies_total:,}"
-            f" ({percent}%) · edits {edits:,} · {rate:.0f} copies/s · ETA {eta}"
+            f" ({percent}%) · {found_label} {edits:,} · {rate:.0f} copies/s · ETA {eta}"
         )
         self._write()
 
@@ -888,6 +979,832 @@ def build_copy_measures(
     return copy_changes, history_edits, profile, counts
 
 
+# Stage 9b, step 1: the versions of each copy
+
+
+def _ordered_history_rows(histories: pd.DataFrame) -> pd.DataFrame:
+    """History rows with a blob, deletes left out, in the order A39 pairs them."""
+    kept = histories.loc[histories["blob"].notna() & (histories["status"] != "D")]
+    return kept.sort_values(
+        ["repo", "path", "commit_date", "commit_seq"], kind="mergesort", na_position="first"
+    )
+
+
+def _versions_of_one_file(
+    file_rows: list[dict], texts: Mapping[str, str], counts: dict[str, int]
+) -> list[dict]:
+    """The kept versions of one file's ordered history rows.
+
+    A row is left out when its text is not stored (``no_text``), when it has
+    the same blob as the last kept version, or when its text differs from it
+    only in spaces, line endings, quotes or blank lines (``whitespace_only``,
+    the same ``normalized_sha``; A20, A39).
+    """
+    kept: list[dict] = []
+    last_blob, last_sha = None, None
+    for row in file_rows:
+        blob = str(row["blob"])
+        if blob not in texts:
+            counts["no_text"] += 1
+            continue
+        if blob == last_blob:
+            continue
+        text_sha = normalized_sha(texts[blob])
+        if text_sha == last_sha:
+            counts["whitespace_only"] += 1
+            continue
+        kept.append(row)
+        last_blob, last_sha = blob, text_sha
+    return kept
+
+
+def list_copy_versions(
+    copy_files: pd.DataFrame,
+    histories: pd.DataFrame,
+    dataset_files: pd.DataFrame,
+    texts: Mapping[str, str],
+) -> pd.DataFrame:
+    """One row per version of each copy file, numbered 1, 2, ... in date order.
+
+    A copy's versions are its stage 6 history rows (``_versions_of_one_file``).
+    A copy with no kept history version gets one row: its dataset text
+    (``file_sha``) dated ``last_commit_at`` from ``dataset_files`` (``repo,
+    path, file_sha, last_commit_at``), basis ``dataset``. A copy with neither
+    has no row. Counts of left-out rows are in ``.attrs``.
+
+    >>> copies = pd.DataFrame({"repo": ["a/r", "b/r"], "path": ["SKILL.md"] * 2,
+    ...     "file_sha": ["x", "d"], "lineage_id": ["L"] * 2, "link": ["exact"] * 2,
+    ...     "origin_seq": [1, 1]})
+    >>> history = pd.DataFrame({"repo": ["a/r"] * 3, "path": ["SKILL.md"] * 3,
+    ...     "blob": ["x", "x", "y"], "status": ["A", "M", "M"], "commit_seq": [1, 2, 3],
+    ...     "commit": ["c1", "c2", "c3"], "inherited": [False] * 3,
+    ...     "commit_date": pd.to_datetime(["2026-01-01", "2026-02-01", "2026-03-01"], utc=True)})
+    >>> dates = pd.DataFrame({"repo": ["b/r"], "path": ["SKILL.md"], "file_sha": ["d"],
+    ...     "last_commit_at": pd.to_datetime(["2026-04-01"], utc=True)})
+    >>> rows = list_copy_versions(copies, history, dates, {"x": "One", "y": "Two", "d": "Old"})
+    >>> rows[["repo", "version_seq", "blob", "basis"]].values.tolist()
+    [['a/r', 1, 'x', 'history'], ['a/r', 2, 'y', 'history'], ['b/r', 1, 'd', 'dataset']]
+    """
+    counts = {"no_text": 0, "whitespace_only": 0, "no_version": 0}
+    by_file: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in _ordered_history_rows(histories).to_dict("records"):
+        by_file[(row["repo"], row["path"])].append(row)
+    dated = {
+        (row.repo, row.path, row.file_sha): row.last_commit_at
+        for row in dataset_files.itertuples(index=False)
+    }
+    rows = []
+    for copy in copy_files.to_dict("records"):
+        key = (copy["repo"], copy["path"])
+        base = {name: copy[name] for name in ("repo", "path", "lineage_id", "link", "origin_seq")}
+        kept = _versions_of_one_file(by_file.get(key, []), texts, counts)
+        for number, version in enumerate(kept, start=1):
+            rows.append(
+                {
+                    **base,
+                    "basis": "history",
+                    "version_seq": number,
+                    "commit_date": version["commit_date"],
+                    "blob": str(version["blob"]),
+                    "inherited": bool(version["inherited"]),
+                }
+            )
+        if kept:
+            continue
+        file_sha = str(copy["file_sha"])
+        if file_sha in texts and (*key, file_sha) in dated:
+            rows.append(
+                {
+                    **base,
+                    "basis": "dataset",
+                    "version_seq": 1,
+                    "commit_date": dated[(*key, file_sha)],
+                    "blob": file_sha,
+                    "inherited": False,
+                }
+            )
+        else:
+            counts["no_version"] += 1
+    columns = ["repo", "path", "lineage_id", "link", "origin_seq", "basis", "version_seq",
+               "commit_date", "blob", "inherited"]  # fmt: skip
+    frame = pd.DataFrame(rows, columns=columns)
+    frame["commit_date"] = pd.to_datetime(frame["commit_date"], utc=True)
+    frame.attrs.update(counts)
+    return frame
+
+
+# Stage 9b, step 2: the four comparison targets
+
+
+# Algorithm A40, see docs/skill_genealogy/code_flow/15_copy_changes.md
+def pick_comparison_targets(
+    copy_version: Mapping[str, object], lineage_versions: pd.DataFrame, origin_seq: int
+) -> dict[str, int | None]:
+    """The four texts a copy version is scored against, chosen by date.
+
+    ``prev`` is the copy's previous version (none for version 1). ``origin`` is
+    the version stage 7 picked, the same for every version of the copy.
+    ``at_date`` is the newest lineage version released on or before the copy
+    version's date (the one with the latest release date, then the highest
+    ``version_seq``); none when nothing was released by then or the date is
+    missing. ``newest`` is the lineage's highest ``version_seq``.
+
+    Registry v1 is 10 Jan, v2 1 Mar, v3 15 May; copy c3 is 20 Apr, version 3:
+
+    >>> versions = pd.DataFrame({"lineage_id": ["L"] * 3, "version_seq": [1, 2, 3],
+    ...     "release_date": pd.to_datetime(["2026-01-10", "2026-03-01", "2026-05-15"], utc=True)})
+    >>> c3 = {"lineage_id": "L", "version_seq": 3,
+    ...       "commit_date": pd.Timestamp("2026-04-20", tz="UTC")}
+    >>> pick_comparison_targets(c3, versions, 1)
+    {'prev_version_seq': 2, 'origin_seq': 1, 'at_date_seq': 2, 'newest_seq': 3}
+    """
+    own = lineage_versions.loc[lineage_versions["lineage_id"] == copy_version["lineage_id"]]
+    version_seq = int(copy_version["version_seq"])
+    date = copy_version["commit_date"]
+    at_date = None
+    if not pd.isna(date):
+        released = own.loc[own["release_date"] <= date]
+        if len(released):
+            last = released.sort_values(["release_date", "version_seq"]).iloc[-1]
+            at_date = int(last["version_seq"])
+    return {
+        "prev_version_seq": version_seq - 1 if version_seq > 1 else None,
+        "origin_seq": int(origin_seq),
+        "at_date_seq": at_date,
+        "newest_seq": int(own["version_seq"].max()) if len(own) else None,
+    }
+
+
+def index_lineage_releases(lineage_versions: pd.DataFrame) -> dict[str, tuple[list, list, int]]:
+    """Per lineage: release dates (ns, sorted), the matching seqs and the newest seq.
+
+    The fast form of the lookups in ``pick_comparison_targets``; versions are
+    sorted by release date, then ``version_seq``. Dates are nanoseconds since
+    1970 whatever the column's unit, so they compare with ``Timestamp.value``.
+    A version without a release date is never an at-date target, but still
+    counts for the newest seq.
+
+    >>> versions = pd.DataFrame({"lineage_id": ["L", "L", "L"], "version_seq": [2, 1, 3],
+    ...     "release_date": pd.to_datetime(["2026-03-01", "2026-01-10", None], utc=True)})
+    >>> index_lineage_releases(versions)["L"][1:]
+    ([1, 2], 3)
+    """
+    ordered = lineage_versions.sort_values(["lineage_id", "release_date", "version_seq"])
+    index: dict[str, tuple[list, list, int]] = {}
+    for lineage_id, rows in ordered.groupby("lineage_id", sort=False):
+        dated = rows.loc[rows["release_date"].notna()]
+        dates = dated["release_date"].dt.as_unit("ns").astype("int64").tolist()
+        seqs = [int(seq) for seq in dated["version_seq"]]
+        index[str(lineage_id)] = (dates, seqs, int(rows["version_seq"].max()))
+    return index
+
+
+def targets_from_index(
+    releases: Mapping[str, tuple[list, list, int]],
+    lineage_id: str,
+    version_seq: int,
+    commit_date: pd.Timestamp,
+    origin_seq: int,
+) -> dict[str, int | None]:
+    """``pick_comparison_targets`` with a binary search on the indexed release dates.
+
+    >>> versions = pd.DataFrame({"lineage_id": ["L"] * 3, "version_seq": [1, 2, 3],
+    ...     "release_date": pd.to_datetime(["2026-01-10", "2026-03-01", "2026-05-15"], utc=True)})
+    >>> targets_from_index(index_lineage_releases(versions), "L", 1,
+    ...                    pd.Timestamp("2026-01-01", tz="UTC"), 1)["at_date_seq"] is None
+    True
+    """
+    dates, seqs, newest = releases.get(lineage_id, ([], [], None))
+    at_date = None
+    if not pd.isna(commit_date) and dates:
+        position = bisect.bisect_right(dates, pd.Timestamp(commit_date).value)
+        at_date = seqs[position - 1] if position else None
+    return {
+        "prev_version_seq": version_seq - 1 if version_seq > 1 else None,
+        "origin_seq": int(origin_seq),
+        "at_date_seq": at_date,
+        "newest_seq": newest,
+    }
+
+
+# Stage 9b, step 3: scores of one pair
+
+
+# Rule 1: the scores of two identical texts.
+IDENTICAL_SCORES: dict[str, float | int] = {
+    "jaccard": 1.0,
+    "containment": 1.0,
+    "verified": 1.0,
+    "lines_added": 0,
+    "lines_removed": 0,
+    "body_change_pct": 0.0,
+}
+
+
+def comparable_shingles(text: str) -> set[str]:
+    """The 5-word shingles of the whole body (front matter left out).
+
+    No boilerplate line is removed. Stage 5a removes lines many owners share so
+    that unrelated texts are not linked through them; here the two texts are
+    already known to be related, and in a popular skill nearly every line is
+    such a line.
+
+    >>> sorted(comparable_shingles("---\\nname: x\\n---\\na b c d e f"))
+    ['a b c d e', 'b c d e f']
+    """
+    return make_word_shingles("\n".join(body_lines(text)))
+
+
+def scores_from_parts(
+    target_lines: list[str],
+    copy_lines: list[str],
+    target_shingles: set[str],
+    copy_shingles: set[str],
+) -> dict[str, float | int | None]:
+    """The six scores of a pair of different texts from their body lines and shingle sets.
+
+    One line diff gives the lines kept, added and removed; the target's line
+    count is kept plus removed. ``verified`` is the share of target lines the
+    copy kept (A10), ``body_change_pct`` is (added + removed) / target lines
+    * 100, as in ``compare_texts``. Rule 3, nothing to measure is null, not 0:
+    Jaccard is null when neither body has a word, containment when the target
+    has none, ``verified`` and ``body_change_pct`` when the target has no body
+    line. A copy that deleted its whole body has something to measure: 0.
+
+    >>> deleted = scores_from_parts(["Old step one two three"], [], {"step one two three"}, set())
+    >>> deleted["jaccard"], deleted["containment"], deleted["verified"]
+    (0.0, 0.0, 0.0)
+    >>> empty_target = scores_from_parts([], ["New"], set(), set())
+    >>> empty_target["verified"], empty_target["body_change_pct"]
+    (None, None)
+    """
+    diff = _diff_line_lists(target_lines, copy_lines)
+    kept = sum(operation == " " for operation, _line in diff)
+    added = sum(operation == "+" for operation, _line in diff)
+    removed = sum(operation == "-" for operation, _line in diff)
+    target_count = kept + removed
+    return {
+        "jaccard": (
+            exact_jaccard(target_shingles, copy_shingles)
+            if target_shingles or copy_shingles
+            else None
+        ),
+        "containment": (
+            exact_containment(target_shingles, copy_shingles) if target_shingles else None
+        ),
+        "verified": kept / target_count if target_count else None,
+        "lines_added": added,
+        "lines_removed": removed,
+        "body_change_pct": (added + removed) / target_count * 100 if target_count else None,
+    }
+
+
+def score_pair(old_text: str, new_text: str) -> dict[str, float | int | None]:
+    """Exact Jaccard, containment, verified share and line counts of a target and a copy text.
+
+    ``old_text`` is the target (previous version or registry text): containment
+    is the share of its shingles the copy holds, ``verified`` the share of its
+    body lines the copy kept unchanged. Rule 1: identical texts score
+    ``IDENTICAL_SCORES`` whatever their length.
+
+    >>> [score_pair("Hi", "Hi")[name] for name in SCORE_FIELDS]
+    [1.0, 1.0, 1.0, 0, 0, 0.0]
+    """
+    if old_text == new_text:
+        return dict(IDENTICAL_SCORES)
+    return scores_from_parts(
+        body_lines(old_text),
+        body_lines(new_text),
+        comparable_shingles(old_text),
+        comparable_shingles(new_text),
+    )
+
+
+class PairScorer:
+    """``score_pair`` and ``change_notes_for_step`` on blobs, each pair computed once.
+
+    Many copies are the same text as their origin, so the same pair of blobs
+    comes back often. Body lines and shingles are kept per blob, scores and
+    notes per pair. ``texts`` maps blob to text; a missing text gives None.
+    """
+
+    def __init__(self, texts: Mapping[str, str]) -> None:
+        self.texts = texts
+        self.parts: dict[str, tuple[list[str], set[str]]] = {}
+        self.scores: dict[tuple[str, str], dict[str, float | int | None]] = {}
+        self.notes: dict[tuple[str, str, str, str], str] = {}
+
+    def _parts(self, blob: str) -> tuple[list[str], set[str]]:
+        if blob not in self.parts:
+            text = self.texts[blob]
+            self.parts[blob] = (body_lines(text), comparable_shingles(text))
+        return self.parts[blob]
+
+    def score(
+        self, target_blob: str | None, copy_blob: str
+    ) -> dict[str, float | int | None] | None:
+        """The six scores of target against copy, or None when a text is missing.
+
+        Rule 1: the same blob is the same text, so it scores ``IDENTICAL_SCORES``.
+        """
+        if target_blob is None or target_blob not in self.texts or copy_blob not in self.texts:
+            return None
+        if target_blob == copy_blob:
+            return IDENTICAL_SCORES
+        key = (target_blob, copy_blob)
+        if key not in self.scores:
+            target_lines, target_shingles = self._parts(target_blob)
+            copy_lines, copy_shingles = self._parts(copy_blob)
+            self.scores[key] = scores_from_parts(
+                target_lines, copy_lines, target_shingles, copy_shingles
+            )
+        return self.scores[key]
+
+    def change_notes(self, prev_blob: str | None, blob: str, repo: str, path: str) -> str:
+        """The A41 notes of the step from ``prev_blob`` as a JSON string; ``[]`` without one."""
+        if prev_blob is None or prev_blob not in self.texts:
+            return "[]"
+        key = (prev_blob, blob, repo, path)
+        if key not in self.notes:
+            notes = change_notes_for_step(self.texts[prev_blob], self.texts[blob], repo, path)
+            self.notes[key] = json.dumps(notes, ensure_ascii=False)
+        return self.notes[key]
+
+
+# Stage 9b, step 4: change notes
+
+
+def _body_start(lines: list[str]) -> int:
+    """Index of the first body line of normalised text lines (after the front matter).
+
+    >>> _body_start(["---", "name: x", "---", "Body"]), _body_start(["Body"])
+    (3, 0)
+    """
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return index + 1
+    return 0
+
+
+def _numbered_body_lines(text: str) -> list[tuple[int, str]]:
+    """``(line number, line)`` of the non-blank body lines of the normalised text.
+
+    The lines are those of ``body_lines``; numbers are 1-based in the whole
+    normalised text, front matter included.
+
+    >>> _numbered_body_lines("---\\nname: x\\n---\\nOne\\n\\nTwo")
+    [(4, 'One'), (6, 'Two')]
+    """
+    lines = normalize_text(text).split("\n")
+    start = _body_start(lines)
+    return [
+        (index + 1, line) for index, line in enumerate(lines[start:], start=start) if line.strip()
+    ]
+
+
+def _added_line_positions(old_text: str, numbered: list[tuple[int, str]]) -> set[int]:
+    """Positions in ``numbered`` (the new body) of the lines the line diff marks as added."""
+    diff = _diff_line_lists(body_lines(old_text), [line for _number, line in numbered])
+    added, position = set(), 0
+    for operation, _line in diff:
+        if operation == "-":
+            continue
+        if operation == "+":
+            added.add(position)
+        position += 1
+    return added
+
+
+def _note_kind(line: str, fence: str, names_added: list[str]) -> str | None:
+    """The first matching kind of ``NOTE_KINDS`` for one added body line, or None.
+
+    ``fence`` is ``""`` outside a code fence, ``"shell"`` inside a bash/sh/shell
+    fence, ``"other"`` inside any other fence. ``names_added`` are the project
+    words the step's new text has and its old text lacks (A11), worked out once
+    per step: a line is a ``name`` note when it holds one of them. Checking the
+    old text again for every added line took hours on one very large file.
+
+    >>> _note_kind("curl https://x", "", [])
+    'network'
+    >>> _note_kind("## Deploy", "other", [])
+    >>> _note_kind("Built for ACME.", "", ["acme"])
+    'name'
+    """
+    stripped = line.strip()
+    found = {
+        "network": bool(find_network_refs(stripped)),
+        "script": bool(find_script_mentions(stripped)),
+        "command": fence == "shell" or (fence == "" and stripped.startswith("$ ")),
+        "heading": fence == "" and bool(find_headings(stripped)),
+        "name": any(_has_word(stripped, word) for word in names_added),
+    }
+    return next((kind for kind in NOTE_KINDS if found[kind]), None)
+
+
+def _permission_note(old_text: str, new_text: str) -> dict[str, object] | None:
+    """A ``permission`` note when ``allowed-tools`` changed, on the line of that key (else 1)."""
+    front = compare_front_matter(old_text, new_text)
+    if not front["permissions_changed"]:
+        return None
+    lines = normalize_text(new_text).split("\n")
+    end = _body_start(lines)
+    line_number = next(
+        (index + 1 for index in range(end) if lines[index].startswith("allowed-tools")), 1
+    )
+    added = ", ".join(front["allowed_tools_added"]) or "-"
+    removed = ", ".join(front["allowed_tools_removed"]) or "-"
+    text = f"allowed-tools added: {added}; removed: {removed}"
+    return {"line": line_number, "kind": "permission", "text": text}
+
+
+# Algorithm A41, see docs/skill_genealogy/code_flow/15_copy_changes.md
+def change_notes_for_step(old_text: str, new_text: str, repo: str, path: str) -> list[dict]:
+    """Notes on the added lines of one step: ``[{line, kind, text}]``, sorted by line.
+
+    A body line the line diff marks as added gets one note, of the first kind
+    that matches in this order: ``network`` (a URL, curl or wget; the text
+    starts with ``⚠``), ``script`` (a script path), ``command`` (a line in a
+    shell fence or starting with ``$ ``), ``heading`` (outside a fence),
+    ``name`` (a project word of repo or path that the old body lacks). A
+    changed ``allowed-tools`` adds a ``permission`` note. ``line`` is 1-based
+    in the normalised new text. Any other added line has no note.
+
+    >>> notes = change_notes_for_step("Keep this line.",
+    ...     "Keep this line.\\n## Deploy\\ncurl https://x", "a/r", "SKILL.md")
+    >>> [(note["line"], note["kind"], note["text"]) for note in notes]
+    [(2, 'heading', '## Deploy'), (3, 'network', '⚠ curl https://x')]
+    """
+    numbered = _numbered_body_lines(new_text)
+    added = _added_line_positions(old_text, numbered)
+    names_added = body_names_added(old_text, new_text, repo, path) if added else []
+    notes: list[dict[str, object]] = []
+    fence = ""
+    for position, (line_number, line) in enumerate(numbered):
+        updated = _fence_state(line, fence)
+        if updated is not None:
+            fence = updated
+            continue
+        if position not in added:
+            continue
+        kind = _note_kind(line, fence, names_added)
+        if kind is not None:
+            text = (NETWORK_MARK if kind == "network" else "") + line.strip()
+            notes.append({"line": line_number, "kind": kind, "text": text})
+    permission = _permission_note(old_text, new_text)
+    if permission is not None:
+        notes.append(permission)
+    return sorted(notes, key=lambda note: note["line"])
+
+
+# Stage 9b, step 5: one row per scored copy version
+
+
+def _version_kind(version: Mapping[str, object], lineages_by_blob: Mapping[str, set[str]]) -> str:
+    """``copy`` for version 1, ``inherited`` for a registry-history commit, else the A39 label.
+
+    >>> owners = {"v2": {"L"}}
+    >>> row = {"version_seq": 2, "inherited": False, "blob": "v2", "lineage_id": "L"}
+    >>> _version_kind(row, owners), _version_kind({**row, "version_seq": 1}, owners)
+    ('sync', 'copy')
+    """
+    if int(version["version_seq"]) == 1:
+        return "copy"
+    if bool(version["inherited"]):
+        return "inherited"
+    return label_edit(str(version["blob"]), str(version["lineage_id"]), lineages_by_blob)
+
+
+def _registry_blob_index(lineage_versions: pd.DataFrame) -> dict[tuple[str, int], str]:
+    """``(lineage_id, version_seq) -> blob`` of every registry version."""
+    return {
+        (str(row.lineage_id), int(row.version_seq)): str(row.blob)
+        for row in lineage_versions.loc[:, ["lineage_id", "version_seq", "blob"]].itertuples()
+    }
+
+
+def score_copy_versions(
+    versions: pd.DataFrame,
+    releases: Mapping[str, tuple[list, list, int]],
+    registry_blobs: Mapping[tuple[str, int], str],
+    lineages_by_blob: Mapping[str, set[str]],
+    scorer: PairScorer,
+) -> pd.DataFrame:
+    """Score every copy version against its four targets (A40) and add its notes (A41).
+
+    ``versions`` comes from ``list_copy_versions`` (rows of a file in order).
+    A target whose text is missing has null scores. Outputs: ``COPY_VERSION_COLUMNS``.
+    """
+    rows = []
+    prev_blob: str | None = None
+    for version in versions.to_dict("records"):
+        if int(version["version_seq"]) == 1:
+            prev_blob = None
+        lineage_id, blob = str(version["lineage_id"]), str(version["blob"])
+        targets = targets_from_index(
+            releases, lineage_id, int(version["version_seq"]), version["commit_date"],
+            int(version["origin_seq"]),
+        )  # fmt: skip
+        target_blobs = {
+            "prev": prev_blob,
+            "origin": registry_blobs.get((lineage_id, targets["origin_seq"])),
+            "at_date": registry_blobs.get((lineage_id, targets["at_date_seq"])),
+            "newest": registry_blobs.get((lineage_id, targets["newest_seq"])),
+        }
+        row = {name: version[name] for name in COPY_VERSION_COLUMNS[:9]}
+        row["change_kind"] = _version_kind(version, lineages_by_blob)
+        row["at_date_seq"], row["newest_seq"] = targets["at_date_seq"], targets["newest_seq"]
+        for target in TARGETS:
+            scores = scorer.score(target_blobs[target], blob) or {}
+            row.update({f"{target}_{name}": scores.get(name) for name in SCORE_FIELDS})
+        row["change_notes"] = scorer.change_notes(prev_blob, blob, version["repo"], version["path"])
+        rows.append(row)
+        prev_blob = blob
+    frame = pd.DataFrame(rows, columns=COPY_VERSION_COLUMNS)
+    for column in ("origin_seq", "version_seq", "at_date_seq", "newest_seq"):
+        frame[column] = frame[column].astype("Int64")
+    for target in TARGETS:
+        for name in SCORE_FIELDS:
+            kind = "Int64" if name.startswith("lines_") else "float64"
+            frame[f"{target}_{name}"] = frame[f"{target}_{name}"].astype(kind)
+    return frame
+
+
+# Stage 9b: reading texts and running the batches
+
+
+def load_dataset_files(copies: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Query Q9.4: the dataset text and ``last_commit_at`` of these copy files.
+
+    Returns ``repo, path, file_sha, last_commit_at`` (UTC) and ``file_sha -> text``.
+    """
+    columns = ["repo", "path", "file_sha", "last_commit_at"]
+    if copies.empty:
+        return pd.DataFrame(columns=columns), {}
+    con = connect_duckdb()
+    try:
+        con.execute(f"SET memory_limit = '{settings.DUCKDB_MEMORY_LIMIT}'")
+        wanted = copies.loc[:, ["repo", "path", "file_sha"]].rename(columns={"file_sha": "sha"})
+        con.register("wanted_files", wanted.drop_duplicates())
+        rows = con.execute(
+            DATASET_FILES_SQL.format(path=_quote_path(settings.ARTIFACTS_GLOB))
+        ).fetchall()
+    finally:
+        con.close()
+    texts = only_stored_text([(sha, text) for _repo, _path, sha, text, _date in rows])
+    dates = pd.DataFrame(
+        [(repo, path, sha, date) for repo, path, sha, _text, date in rows], columns=columns
+    )
+    dates["last_commit_at"] = pd.to_datetime(dates["last_commit_at"], utc=True, errors="coerce")
+    return dates, texts
+
+
+def find_copies_without_history_text(
+    dev: bool, copies: pd.DataFrame, histories: pd.DataFrame
+) -> pd.Series:
+    """True for copies whose history has no blob with a stored text (query Q9.2).
+
+    These copies get the dataset text (query Q9.4) and are batched apart.
+    """
+    rows = _ordered_history_rows(histories)
+    stored = stored_shas(_text_path(dev, "history"), set(rows["blob"]))
+    stored_rows = rows.loc[rows["blob"].isin(stored)]
+    with_text = set(zip(stored_rows["repo"], stored_rows["path"], strict=True))
+    keys = zip(copies["repo"], copies["path"], strict=True)
+    return pd.Series([key not in with_text for key in keys], index=copies.index, dtype=bool)
+
+
+def registry_blobs_needed(
+    copies: pd.DataFrame,
+    histories: pd.DataFrame,
+    releases: Mapping[str, tuple[list, list, int]],
+    registry_blobs: Mapping[tuple[str, int], str],
+) -> set[str]:
+    """Registry blobs the history versions can be scored against: origin, newest, at-date.
+
+    Every history row's date is looked up, so the set covers every version kept
+    later. The dataset versions add their at-date blobs per batch.
+    """
+    wanted: set[str] = set()
+    origins = dict(zip(zip(copies["repo"], copies["path"], strict=True), copies["origin_seq"],
+                       strict=True))  # fmt: skip
+    for lineage_id, origin_seq in zip(copies["lineage_id"], copies["origin_seq"], strict=True):
+        newest = releases.get(lineage_id, ([], [], None))[2]
+        for seq in (int(origin_seq), newest):
+            if (lineage_id, seq) in registry_blobs:
+                wanted.add(registry_blobs[(lineage_id, seq)])
+    rows = _ordered_history_rows(histories)
+    for row in rows.loc[:, ["repo", "path", "lineage_id", "commit_date"]].itertuples(index=False):
+        origin_seq = origins.get((row.repo, row.path))
+        if origin_seq is None:
+            continue
+        seq = targets_from_index(releases, row.lineage_id, 1, row.commit_date, origin_seq)
+        blob = registry_blobs.get((row.lineage_id, seq["at_date_seq"]))
+        if blob is not None:
+            wanted.add(blob)
+    return wanted
+
+
+def add_missing_texts(cache: dict[str, str], path: Path, shas: set[str]) -> None:
+    """Load into ``cache`` the wanted shas it does not hold yet (query Q9.1)."""
+    missing = {sha for sha in shas if sha not in cache}
+    cache.update(load_stored_texts(path, missing))
+
+
+def build_copy_version_similarity(
+    dev: bool, inputs: Mapping[str, object] | None = None, progress: Progress | None = None
+) -> pd.DataFrame:
+    """Stage 9b steps 1-5: list, target and score every copy version.
+
+    The copies are those of stage 9a (``select_copies``). Registry texts are
+    loaded once for the history versions; copy texts are read per batch of
+    ``COPY_CHANGE_FILE_BATCH`` files. Copies with no stored history text are
+    batched apart and read the dataset (Q9.4). Counts are in ``.attrs``.
+    """
+    inputs = inputs or read_inputs(dev)
+    progress = progress or Progress(dev)
+    lineage_versions = inputs["versions"]
+    # Step 1: the copies and their histories
+    copies = select_copies(inputs["copy_files"], inputs["families"], inputs["english"])
+    progress.stage("read copy histories", f"{len(copies):,} copies selected")
+    histories = read_copy_histories(dev, copies)
+    histories = histories.merge(copies.loc[:, ["repo", "path", "lineage_id"]], on=["repo", "path"])
+    # Step 2: the target lookups (A40) and the registry texts they need
+    releases = index_lineage_releases(lineage_versions)
+    registry_blobs = _registry_blob_index(lineage_versions)
+    lineages_by_blob = index_lineages_by_blob(lineage_versions)
+    registry_texts: dict[str, str] = {}
+    wanted = registry_blobs_needed(copies, histories, releases, registry_blobs)
+    progress.stage("read registry texts", f"{len(wanted):,} registry versions")
+    add_missing_texts(registry_texts, _text_path(dev, "registry"), wanted)
+    progress.stage("find copies without a stored history text")
+    needs_dataset = find_copies_without_history_text(dev, copies, histories)
+    groups = [(copies.loc[~needs_dataset], False), (copies.loc[needs_dataset], True)]
+    size = settings.COPY_CHANGE_FILE_BATCH
+    batches = sum(math.ceil(len(group) / size) for group, _uses in groups)
+    progress.stage(
+        "score versions",
+        f"{int((~needs_dataset).sum()):,} copies with history texts,"
+        f" {int(needs_dataset.sum()):,} read from the dataset; {batches} batches of {size:,}",
+    )
+    progress.start_compare()
+    frames, counts = [], {"no_text": 0, "whitespace_only": 0, "no_version": 0}
+    copies_done, versions_found, number = 0, 0, 0
+    for group, uses_dataset in groups:
+        for batch in batches_of_files(group, size):
+            batch_history = histories.merge(batch.loc[:, ["repo", "path"]], on=["repo", "path"])
+            history_texts = load_stored_texts(
+                _text_path(dev, "history"), set(batch_history["blob"].dropna())
+            )
+            dates, dataset_texts = load_dataset_files(batch if uses_dataset else batch.iloc[0:0])
+            # Step 3: the versions of each copy
+            versions = list_copy_versions(
+                batch, batch_history, dates, ChainMap(history_texts, dataset_texts)
+            )
+            for name in counts:
+                counts[name] += versions.attrs.get(name, 0)
+            if uses_dataset:
+                add_missing_texts(
+                    registry_texts,
+                    _text_path(dev, "registry"),
+                    registry_blobs_needed(batch, _as_history(versions), releases, registry_blobs),
+                )
+            # Steps 4-5: targets (A40), scores and change notes (A41)
+            texts = ChainMap(history_texts, dataset_texts, registry_texts)
+            scorer = PairScorer(texts)
+            frames.append(
+                score_copy_versions(versions, releases, registry_blobs, lineages_by_blob, scorer)
+            )
+            number += 1
+            copies_done += len(batch)
+            versions_found += len(frames[-1])
+            progress.batch(
+                number, batches, copies_done, len(copies), versions_found,
+                "dataset" if uses_dataset else "history", found_label="versions",
+            )  # fmt: skip
+    frame = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else pd.DataFrame(columns=COPY_VERSION_COLUMNS)
+    )
+    frame.attrs.update(
+        {
+            "copies_selected": len(copies),
+            "copies_with_versions": int(frame.drop_duplicates(["repo", "path"]).shape[0]),
+            "copies_left_out_no_text": counts["no_version"],
+            "history_rows_left_out_no_text": counts["no_text"],
+            "history_rows_left_out_whitespace_only": counts["whitespace_only"],
+        }
+    )
+    return frame
+
+
+def _as_history(versions: pd.DataFrame) -> pd.DataFrame:
+    """Dataset version rows in the shape ``registry_blobs_needed`` reads (one dated row each)."""
+    rows = versions.loc[:, ["repo", "path", "lineage_id", "commit_date", "blob"]].copy()
+    rows["status"], rows["commit_seq"] = "A", 0
+    return rows
+
+
+# Stage 9b: summary
+
+
+def drift_of_origin_jaccard(versions: pd.DataFrame) -> dict[str, float | None]:
+    """Median origin Jaccard at the first and the last version of copies with two or more.
+
+    Drift is last minus first; below 0 means later texts share less with the origin.
+
+    >>> rows = pd.DataFrame({"repo": ["a"] * 2 + ["b"], "path": ["p"] * 3,
+    ...     "version_seq": [1, 2, 1], "origin_jaccard": [1.0, 0.6, 0.9]})
+    >>> drift_of_origin_jaccard(rows)
+    {'median_origin_jaccard_first': 1.0, 'median_origin_jaccard_last': 0.6, 'drift': -0.4}
+    """
+    ordered = versions.sort_values(["repo", "path", "version_seq"])
+    sizes = ordered.groupby(["repo", "path"])["version_seq"].transform("size")
+    multi = ordered.loc[sizes > 1]
+    if multi.empty:
+        return {"median_origin_jaccard_first": None, "median_origin_jaccard_last": None,
+                "drift": None}  # fmt: skip
+    # drop_duplicates keeps a null score of the first or last version (rule 3);
+    # groupby().first() would skip to the next non-null one.
+    keys = ["repo", "path"]
+    first = float(multi.drop_duplicates(keys, keep="first")["origin_jaccard"].median())
+    last = float(multi.drop_duplicates(keys, keep="last")["origin_jaccard"].median())
+    return {
+        "median_origin_jaccard_first": round(first, 4),
+        "median_origin_jaccard_last": round(last, 4),
+        "drift": round(last - first, 4),
+    }
+
+
+def share_behind_at_date(
+    versions: pd.DataFrame, registry_blobs: Mapping[tuple[str, int], str]
+) -> float | None:
+    """Share of versions with an at-date target whose registry had moved past the origin.
+
+    A version is behind when the at-date version is newer than the origin
+    (``at_date_seq > origin_seq``) and the copy's text is not that version's
+    text. Versions without an at-date target are left out. Stage 10 measures
+    staleness properly; this is the summary number of the card.
+
+    >>> rows = pd.DataFrame({"lineage_id": ["L"] * 3, "origin_seq": [1] * 3,
+    ...     "at_date_seq": [1, 2, 2], "blob": ["a", "a", "b"]})
+    >>> share_behind_at_date(rows, {("L", 1): "a", ("L", 2): "b"})
+    0.3333
+    """
+    dated = versions.loc[versions["at_date_seq"].notna()]
+    if dated.empty:
+        return None
+    at_blob = [
+        registry_blobs.get((lineage, int(seq)))
+        for lineage, seq in zip(dated["lineage_id"], dated["at_date_seq"], strict=True)
+    ]
+    moved = dated["at_date_seq"].astype(int) > dated["origin_seq"].astype(int)
+    behind = moved & (dated["blob"] != pd.Series(at_blob, index=dated.index))
+    return round(float(behind.mean()), 4)
+
+
+def note_kind_counts(versions: pd.DataFrame) -> dict[str, int]:
+    """How many notes of each kind the change notes hold.
+
+    >>> note = '[{"line": 2, "kind": "heading", "text": "# A"}]'
+    >>> rows = pd.DataFrame({"change_notes": [note, "[]"]})
+    >>> note_kind_counts(rows)["heading"]
+    1
+    """
+    counts = dict.fromkeys((*NOTE_KINDS, "permission"), 0)
+    for cell in versions["change_notes"]:
+        for note in json.loads(cell):
+            counts[note["kind"]] += 1
+    return counts
+
+
+def print_version_summary(
+    versions: pd.DataFrame, lineage_versions: pd.DataFrame, seconds: float
+) -> None:
+    """Print the stage 9b counts, the drift and two sample records."""
+    registry_blobs = _registry_blob_index(lineage_versions)
+    multi = versions.groupby(["repo", "path"]).size()
+    print_summary(
+        "Stage 9b copy version similarity",
+        {
+            **versions.attrs,
+            "copy_versions_scored": len(versions),
+            "copies_with_more_than_one_version": int((multi > 1).sum()),
+            "basis": versions["basis"].value_counts().to_dict(),
+            "change_kind": versions["change_kind"].value_counts().to_dict(),
+            **drift_of_origin_jaccard(versions),
+            "share_behind_at_date": share_behind_at_date(versions, registry_blobs),
+            "versions_without_at_date": int(versions["at_date_seq"].isna().sum()),
+            "versions_with_notes": int((versions["change_notes"] != "[]").sum()),
+            "note_kinds": note_kind_counts(versions),
+            "seconds": round(seconds, 1),
+        },
+    )
+    print_sample_records(versions, "copy_version_similarity.parquet, 2 sample records")
+
+
 # Outputs
 
 
@@ -995,7 +1912,18 @@ def print_run_summary(
     print_sample_records(profile, "change_profile.parquet, 2 sample records")
 
 
-def run(dev: bool, force: bool) -> None:
+def save_version_outputs(versions: pd.DataFrame, dev: bool) -> None:
+    """Write ``copy_version_similarity.parquet`` under a temporary name, then replace the file."""
+    path = version_output_path(dev)
+    temp = path.with_name(path.name + ".tmp")
+    try:
+        write_parquet(versions, temp, ["repo", "path", "version_seq"])
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def run_origin(dev: bool, force: bool) -> None:
     """Stage 9a: skip when the three outputs exist (unless ``force``), else build, save, print.
 
     With ``force`` the old files stay until the new build has finished, so a failed run
@@ -1017,19 +1945,52 @@ def run(dev: bool, force: bool) -> None:
     print_run_summary(copy_changes, history_edits, profile, counts, time.perf_counter() - started)
 
 
+def run_versions(dev: bool, force: bool) -> None:
+    """Stage 9b: skip when the output exists (unless ``force``), else build, save, print.
+
+    With ``force`` the old file stays until the new build has finished.
+    """
+    if outputs_exist([version_output_path(dev)]) and not force:
+        print("skip: stage 9b output exists (use --force to rebuild)", flush=True)
+        return
+    started = time.perf_counter()
+    progress = Progress(dev)
+    progress.stage("read inputs", "dev" if dev else "full")
+    inputs = read_inputs(dev)
+    versions = build_copy_version_similarity(dev, inputs, progress)
+    # Step 6: save and print
+    progress.stage("save outputs")
+    save_version_outputs(versions, dev)
+    progress.finish()
+    print_version_summary(versions, inputs["versions"], time.perf_counter() - started)
+
+
+# The parts of the stage, in the order a full run builds them.
+PARTS = {"origin": run_origin, "versions": run_versions}
+
+
+def run(dev: bool, force: bool, only: str | None = None) -> None:
+    """Run one part (``origin`` is 9a, ``versions`` is 9b), or every part in order."""
+    for name, run_part in PARTS.items():
+        if only is None or only == name:
+            run_part(dev, force)
+
+
 def main() -> None:
-    """Run stage 9a from the command line (``--dev``, ``--force``, ``--only origin``)."""
+    """Run stage 9 from the command line (``--dev``, ``--force``, ``--only origin|versions``)."""
     parser = build_arg_parser(
-        "Stage 9a: each copy against its origin, history edits, change profile."
+        "Stage 9a/9b: each copy against its origin, history edits, change profile;"
+        " every copy version against four comparison texts."
     )
     parser.add_argument(
         "--only",
-        choices=["origin"],
-        default="origin",
-        help="the part to run; versions and folders (G20, G21) are added by their cards",
+        choices=list(PARTS),
+        default=None,
+        help="run one part: origin (9a) or versions (9b); default runs both, each skips when"
+        " its outputs exist. Folders (G21) are added by their card",
     )
     args = parser.parse_args()
-    run(bool(args.dev), bool(args.force))
+    run(bool(args.dev), bool(args.force), args.only)
 
 
 if __name__ == "__main__":
