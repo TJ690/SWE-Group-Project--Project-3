@@ -340,6 +340,10 @@ LINEAGE_TEXT_BATCH = 40_000
 # origin texts, so 20,000 files stay well under 1 GB. A file's history is never
 # split, so edits are always read in order.
 COPY_CHANGE_FILE_BATCH = 20_000
+# Stage 9c: script shas per text read when flagging scripts (A16). Only the
+# flags are kept after a chunk; 50,000 scripts (median a few KB) stay well under
+# 1 GB. A memory bound, not a research cutoff.
+SCRIPT_TEXT_BATCH = 50_000
 # Stage 4 (G10 rule 0): registry kinds from stage 3c (registry_kinds.parquet)
 # that become lineages. A copier is never a lineage, root or origin, so every
 # later stage, which reads the stage 4 tables, leaves copiers out without a

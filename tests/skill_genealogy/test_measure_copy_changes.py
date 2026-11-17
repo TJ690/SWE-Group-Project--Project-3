@@ -679,3 +679,394 @@ def test_save_version_outputs_replaces_the_file(tmp_path, monkeypatch):
     module.save_version_outputs(frame, True)
     assert pd.read_parquet(target)["repo"].tolist() == ["a", "b"]
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# Stage 9c: copy folder changes and risky scripts
+
+
+def _packages() -> pd.DataFrame:
+    """Registry packages: p1 10 Jan (text v1), p2 1 Mar (text v1, script added), p3 15 May (v2)."""
+    return pd.DataFrame(
+        {
+            "lineage_id": ["L"] * 3,
+            "package_version_seq": [1, 2, 3],
+            "version_seq": [1, 1, 2],
+            "commit_date": pd.to_datetime(["2026-01-10", "2026-03-01", "2026-05-15"], utc=True),
+        }
+    )
+
+
+def _copy_version(**changes: object) -> dict[str, object]:
+    """One stage 9b copy version row with the columns stage 9c reads."""
+    row: dict[str, object] = {
+        "repo": "acme/tools",
+        "path": "skills/demo/SKILL.md",
+        "lineage_id": "L",
+        "origin_seq": 1,
+        "basis": "history",
+        "version_seq": 1,
+        "commit_date": pd.Timestamp("2026-04-01", tz="UTC"),
+        "blob": "t1",
+    }
+    row.update(changes)
+    return row
+
+
+def _folder_row(commit: str, day: str, status: str, file_path: str, sha: str, **extra) -> dict:
+    """One stage 6 change row of the copy folder ``skills/demo``."""
+    row = {
+        "repo": "acme/tools",
+        "skill_folder": "skills/demo",
+        "file_path": file_path,
+        "commit": commit,
+        "commit_date": f"{day}T00:00:00Z",
+        "commit_seq": int(commit[1:]),
+        "status": status,
+        "new_sha": sha,
+        "new_mode": "100644",
+        "repo_path": f"skills/demo/{file_path}",
+        "old_repo_path": None,
+        "history_role": "own",
+    }
+    row.update(extra)
+    return row
+
+
+def test_modified_script_gains_network_and_new_script_is_added():
+    from skill_genealogy.measure_copy_changes import (
+        add_risk_flags,
+        compare_copy_folders,
+        flags_of_texts,
+        index_packages,
+        script_shas_to_flag,
+        summarize_folder_changes,
+    )
+
+    versions = pd.DataFrame([_copy_version()])
+    registry = {("L", seq): (("scripts/a.py", "a_old", "100644", 10),) for seq in (1, 2, 3)}
+    copy = {
+        ("acme/tools", "skills/demo/SKILL.md", 1): (
+            ("scripts/a.py", "a_new", "100644", 30),
+            ("scripts/deploy.sh", "deploy", "100755", 5),
+        )
+    }
+    rows, pairs = compare_copy_folders(versions, copy, index_packages(_packages()), registry)
+    texts = {
+        "a_old": "print('hello')",
+        "a_new": "import os\nos.popen('curl https://x')",
+        "deploy": "echo deploy",
+    }
+    assert script_shas_to_flag(rows) == set(texts)
+    rows = add_risk_flags(rows, flags_of_texts(texts))
+    origin = rows.loc[rows["target"] == "origin"].set_index("file_path")
+    assert origin.loc["scripts/a.py", "result"] == "modified"
+    assert origin.loc["scripts/deploy.sh", "result"] == "added"
+    assert origin.loc["scripts/a.py", "new_risk_flags"] == ["network"]
+    assert origin.loc["scripts/deploy.sh", "new_risk_flags"] == []
+    assert origin.loc["scripts/a.py", "size_change"] == 20
+    summary = summarize_folder_changes(rows, pairs).set_index("target")
+    assert summary.loc["origin", "scripts_added"] == 1
+    assert summary.loc["origin", "scripts_modified"] == 1
+    assert summary.loc["origin", "new_risky_scripts"] == 1
+    assert "prev" not in summary.index  # version 1 has no previous folder
+
+
+def test_modified_script_without_old_text_has_unknown_new_flags():
+    from skill_genealogy.measure_copy_changes import add_risk_flags, summarize_folder_changes
+
+    rows = pd.DataFrame(
+        {
+            "repo": ["r"],
+            "path": ["p"],
+            "version_seq": [1],
+            "target": ["origin"],
+            "result": ["modified"],
+            "category": ["script"],
+            "old_sha": ["missing"],
+            "new_sha": ["n"],
+        }
+    )
+    flagged = add_risk_flags(rows, {"n": ["network"]})
+    assert flagged.loc[0, "risk_flags"] == ["network"]
+    assert flagged.loc[0, "new_risk_flags"] is None
+    pairs = rows.loc[:, ["repo", "path", "version_seq", "target"]].assign(target_package_seq=1)
+    assert summarize_folder_changes(flagged, pairs).loc[0, "new_risky_scripts"] == 0
+
+
+def test_large_script_is_not_flagged(monkeypatch):
+    from skill_genealogy import settings
+    from skill_genealogy.measure_copy_changes import flags_of_texts
+
+    monkeypatch.setattr(settings, "MAX_SCRIPT_BYTES", 10)
+    assert flags_of_texts({"big": "curl https://example.com", "small": "curl x"}) == {
+        "big": None,
+        "small": ["network"],
+    }
+
+
+def test_copy_without_history_uses_the_dataset_snapshot():
+    from skill_genealogy.measure_copy_changes import snapshot_folder_manifests
+
+    versions = pd.DataFrame([_copy_version(basis="dataset"), _copy_version(path="SKILL.md")])
+    siblings = pd.DataFrame(
+        {
+            "repo": ["acme/tools"] * 3,
+            "path": ["skills/demo/SKILL.md"] * 3,
+            "file_path": ["SKILL.md", "scripts/a.py", "node_modules/x.js"],
+            "sha": ["t", "abc", "n"],
+            "size": [9, 4, 2],
+        }
+    )
+    folders = snapshot_folder_manifests(
+        versions, siblings, {("acme/tools", "skills/demo/SKILL.md")}
+    )
+    assert folders == {
+        ("acme/tools", "skills/demo/SKILL.md", 1): (("scripts/a.py", "abc", None, 4),)
+    }
+
+
+def test_unlisted_dataset_folder_is_unknown_and_listed_empty_folder_is_empty():
+    from skill_genealogy.measure_copy_changes import snapshot_folder_manifests
+
+    versions = pd.DataFrame(
+        [_copy_version(basis="dataset"), _copy_version(basis="dataset", repo="other/repo")]
+    )
+    no_rows = pd.DataFrame(columns=["repo", "path", "file_path", "sha", "size"])
+    folders = snapshot_folder_manifests(versions, no_rows, {("acme/tools", "skills/demo/SKILL.md")})
+    assert folders == {("acme/tools", "skills/demo/SKILL.md", 1): ()}
+
+
+def test_dataset_snapshot_of_a_root_skill_keeps_only_package_folders():
+    from skill_genealogy.measure_copy_changes import snapshot_folder_manifests
+
+    versions = pd.DataFrame([_copy_version(basis="dataset", path="SKILL.md")])
+    siblings = pd.DataFrame(
+        {
+            "repo": ["acme/tools"] * 2,
+            "path": ["SKILL.md"] * 2,
+            "file_path": ["src/main.go", "scripts/run.sh"],
+            "sha": ["g", "s"],
+            "size": [1, 2],
+        }
+    )
+    folder = snapshot_folder_manifests(versions, siblings, {("acme/tools", "SKILL.md")})[
+        ("acme/tools", "SKILL.md", 1)
+    ]
+    assert [file[0] for file in folder] == ["scripts/run.sh"]
+
+
+def test_package_current_at_a_date_and_origin_package():
+    from skill_genealogy.measure_copy_changes import (
+        index_packages,
+        package_at_date,
+        pick_folder_targets,
+        registry_manifest_for,
+    )
+
+    index = index_packages(_packages())
+    day = pd.Timestamp
+    assert package_at_date(index, "L", day("2026-01-09", tz="UTC")) is None
+    assert package_at_date(index, "L", day("2026-01-10", tz="UTC")) == 1
+    assert package_at_date(index, "L", day("2026-04-01", tz="UTC")) == 2
+    assert package_at_date(index, "L", None) is None
+    # The copy started from text v1 on 1 Apr: it got the script p2 added, not p1.
+    version = _copy_version(commit_date=day("2026-06-01", tz="UTC"))
+    targets = pick_folder_targets(version, day("2026-04-01", tz="UTC"), index)
+    assert targets == {"origin": 2, "at_date": 3, "newest": 3}
+    # An undated copy starts from the first package of its origin text version.
+    assert pick_folder_targets(version, None, index)["origin"] == 1
+    manifests = pd.DataFrame(
+        {
+            "lineage_id": ["L", "L"],
+            "package_version_seq": [1, 2],
+            "path": ["SKILL-free.md", "scripts/a.py"],
+            "sha": ["x", "y"],
+            "mode": ["100644"] * 2,
+            "size": [1, 2],
+        }
+    )
+    files = registry_manifest_for("L", day("2026-04-01", tz="UTC"), _packages(), manifests)
+    assert [row["path"] for row in files] == ["scripts/a.py"]
+
+
+def test_same_date_packages_keep_the_higher_number():
+    from skill_genealogy.measure_copy_changes import index_packages, package_at_date
+
+    packages = _packages().assign(commit_date=pd.Timestamp("2026-01-10", tz="UTC"))
+    assert package_at_date(index_packages(packages), "L", pd.Timestamp("2026-02-01", tz="UTC")) == 3
+
+
+def test_copy_folder_walk_matches_the_registry_walk():
+    from skill_genealogy.build_registry_lineages import rebuild_folder_manifests
+    from skill_genealogy.measure_copy_changes import snapshot_copy_folders
+
+    rows = pd.DataFrame(
+        [
+            _folder_row("c1", "2026-01-01", "A", "SKILL.md", "t1"),
+            _folder_row("c1", "2026-01-01", "A", "scripts/a.py", "a1"),
+            _folder_row("c2", "2026-01-02", "A", "node_modules/x.js", "n"),
+            _folder_row("c3", "2026-01-03", "M", "scripts/a.py", "a2"),
+            _folder_row(
+                "c4",
+                "2026-01-04",
+                "R",
+                "scripts/b.py",
+                "a2",
+                old_repo_path="skills/demo/scripts/a.py",
+            ),  # fmt: skip
+            _folder_row("c5", "2026-01-05", "D", "scripts/b.py", None),
+        ]
+    )
+    commits = {"c1", "c2", "c3", "c4", "c5"}
+    at_commit, newest = snapshot_copy_folders(rows, {"acme/tools::skills/demo": commits})
+    registry = rebuild_folder_manifests(rows.assign(lineage_id="acme/tools::skills/demo"))
+    for commit, files in zip(registry["commit"], registry["files"], strict=True):
+        assert at_commit[("acme/tools::skills/demo", commit)] == files
+    assert at_commit[("acme/tools::skills/demo", "c4")] == (("scripts/b.py", "a2", "100644"),)
+    assert newest["acme/tools::skills/demo"] == ()
+
+
+def test_last_version_keeps_files_added_after_its_commit():
+    from skill_genealogy.measure_copy_changes import (
+        history_folder_manifests,
+        snapshot_copy_folders,
+        version_commits,
+    )
+
+    rows = pd.DataFrame(
+        [
+            _folder_row("c1", "2026-01-01", "A", "SKILL.md", "t1"),
+            _folder_row("c2", "2026-02-01", "M", "SKILL.md", "t2"),
+            _folder_row("c3", "2026-03-01", "A", "scripts/late.sh", "s"),
+        ]
+    )
+    history = pd.DataFrame(
+        {
+            "repo": ["acme/tools"] * 2,
+            "path": ["skills/demo/SKILL.md"] * 2,
+            "blob": ["t1", "t2"],
+            "status": ["A", "M"],
+            "commit": ["c1", "c2"],
+            "commit_seq": [1, 2],
+            "commit_date": pd.to_datetime(["2026-01-01", "2026-02-01"], utc=True),
+        }
+    )
+    versions = pd.DataFrame(
+        [
+            _copy_version(version_seq=1, blob="t1", commit_date=history["commit_date"][0]),
+            _copy_version(version_seq=2, blob="t2", commit_date=history["commit_date"][1]),
+        ]
+    )
+    commits = version_commits(versions, history)
+    assert list(commits.values()) == ["c1", "c2"]
+    at_commit, newest = snapshot_copy_folders(
+        rows, {"acme/tools::skills/demo": set(commits.values())}
+    )
+    folders = history_folder_manifests(versions, commits, at_commit, newest, {"s": 7})
+    assert folders[("acme/tools", "skills/demo/SKILL.md", 1)] == ()
+    assert folders[("acme/tools", "skills/demo/SKILL.md", 2)] == (
+        ("scripts/late.sh", "s", "100644", 7),
+    )
+
+
+def test_deleted_copy_keeps_the_folder_of_its_own_commit():
+    from skill_genealogy.measure_copy_changes import snapshot_copy_folders
+
+    rows = pd.DataFrame(
+        [
+            _folder_row("c1", "2026-01-01", "A", "SKILL.md", "t1"),
+            _folder_row("c1", "2026-01-01", "A", "run.sh", "r"),
+            _folder_row("c2", "2026-02-01", "D", "SKILL.md", None),
+            _folder_row("c2", "2026-02-01", "D", "run.sh", None),
+        ]
+    )
+    at_commit, newest = snapshot_copy_folders(rows, {"acme/tools::skills/demo": {"c1"}})
+    assert at_commit[("acme/tools::skills/demo", "c1")] == (("run.sh", "r", "100644"),)
+    assert "acme/tools::skills/demo" not in newest
+
+
+def test_same_folders_give_a_zero_summary_row_and_prev_compares_versions():
+    from skill_genealogy.measure_copy_changes import (
+        add_risk_flags,
+        compare_copy_folders,
+        index_packages,
+        summarize_folder_changes,
+    )
+
+    files = (("scripts/a.py", "a", "100644", 1),)
+    versions = pd.DataFrame([_copy_version(version_seq=1), _copy_version(version_seq=2, blob="t2")])
+    copy = {
+        ("acme/tools", "skills/demo/SKILL.md", 1): files,
+        ("acme/tools", "skills/demo/SKILL.md", 2): (*files, ("notes.md", "n", "100644", 3)),
+    }
+    registry = {("L", seq): files for seq in (1, 2, 3)}
+    rows, pairs = compare_copy_folders(versions, copy, index_packages(_packages()), registry)
+    summary = summarize_folder_changes(add_risk_flags(rows, {}), pairs)
+    summary = summary.set_index(["version_seq", "target"])
+    assert summary.loc[(1, "origin"), "files_added"] == 0
+    assert summary.loc[(2, "prev"), "files_added"] == 1
+    assert summary.loc[(2, "prev"), "target_package_seq"] is pd.NA
+    assert rows["result"].tolist() == ["added"] * 4  # prev, origin, at_date, newest of v2
+
+
+def test_mentions_count_missing_and_hidden_scripts():
+    from skill_genealogy.measure_copy_changes import mention_counts
+
+    key = ("acme/tools", "skills/demo/SKILL.md", 1)
+    folders = {key: (("scripts/a.py", "a", "100644", 1), ("scripts/c.py", "c", "100644", 1))}
+    counts = mention_counts(folders, {key: "t"}, {"t": "Run scripts/a.py, then b.sh."})
+    assert counts == {key: (1, 1)}
+    assert mention_counts(folders, {key: "gone"}, {}) == {key: (None, None)}
+
+
+def test_folder_headline_reads_the_last_version_against_origin():
+    from skill_genealogy.measure_copy_changes import folder_headline
+
+    summary = pd.DataFrame(
+        {
+            "repo": ["r", "r"],
+            "path": ["p", "p"],
+            "version_seq": [1, 2],
+            "target": ["origin", "origin"],
+            "files_added": [1, 0],
+            "files_removed": [0, 0],
+            "files_modified": [0, 0],
+            "files_renamed": [0, 0],
+            "scripts_added": [1, 0],
+            "scripts_modified": [0, 0],
+            "new_risky_scripts": [1, 0],
+            "missing_scripts": [0, None],
+            "hidden_scripts": [0, None],
+        }
+    )
+    changes = pd.DataFrame(
+        {
+            "repo": ["r"],
+            "path": ["p"],
+            "version_seq": [1],
+            "target": ["origin"],
+            "result": ["added"],
+            "category": ["script"],
+            "new_risk_flags": [["network"]],
+        }
+    )
+    numbers = folder_headline(summary, changes)
+    assert numbers["copies_folder_differs_from_origin"] == 0  # version 2 removed the script
+    assert numbers["copies_new_risky_scripts"] == 0
+
+
+def test_save_folder_outputs_replaces_both_files(tmp_path, monkeypatch):
+    from skill_genealogy import measure_copy_changes as module
+
+    paths = {
+        "folder_changes": tmp_path / "copy_folder_changes.parquet",
+        "folder_summary": tmp_path / "copy_version_folder_summary.parquet",
+    }
+    monkeypatch.setattr(module, "folder_output_paths", lambda dev: paths)
+    frame = pd.DataFrame(
+        {"repo": ["b", "a"], "path": ["p", "p"], "version_seq": [1, 1], "target": ["origin"] * 2,
+         "file_path": ["x", "y"]}
+    )  # fmt: skip
+    module.save_folder_outputs(frame, frame.drop(columns="file_path"), True)
+    assert pd.read_parquet(paths["folder_changes"])["repo"].tolist() == ["a", "b"]
+    assert not list(tmp_path.glob("*.tmp"))
