@@ -1,8 +1,8 @@
 # Copy families
 
-Stage 7a. Stage 5c linked each dataset text to a registry lineage by its **current** text. A copy's own git history (stage 6) is stronger evidence: a history that passes through a registry blob proves the copy, even when the current text has drifted away. This stage adds those history links, keeps the strongest link of each copy file, picks the registry version the copy started from **by date**, records when and in which batch each copy arrived in its repo, and gives every English text one family. It reads saved tables only; no network. Card G16.
+Stage 7a. Stage 5c linked each dataset text to a registry lineage by its **current** text. A copy's own git history (stage 6) is stronger evidence: a history that passes through a registry blob proves the copy, even when the current text has drifted away. This stage adds those history links, keeps the strongest link of each copy file, picks the registry version the copy started from **by date**, records when and in which batch each copy arrived in its repo, and gives every English text one family. Stage 7b (step 10) then uses the copies proven by their history as a test set and measures how many of them each text method finds. It reads saved tables only; no network. Cards G16 (7a) and G17 (7b).
 
-The code is `src/skill_genealogy/assign_families.py`. It reuses the stage 5 search code in `find_copies.py` (the LSH band index, the near-link choice, the signer) and the folder rule of stage 6 (`skill_folder_of`).
+The code is `src/skill_genealogy/assign_families.py`. It reuses the stage 5 search code in `find_copies.py` (the LSH band index, the near-link choice, the signer, the line check) and the folder rule of stage 6 (`skill_folder_of`).
 
 ## Scripts
 
@@ -18,7 +18,7 @@ bash scripts/skill_genealogy/dev_mode/13_copy_families.sh [--force]
 bash scripts/skill_genealogy/full_run/13_copy_families.sh [--force]
 ```
 
-`assign_families` in the background with `caffeinate`, log in `logs/assign_families_<date>.log`. The stage skips when its four outputs exist; `--force` deletes them first.
+`assign_families` in the background with `caffeinate`, log in `logs/assign_families_<date>.log`. The stage skips when its six outputs exist; `--force` deletes them first.
 
 ```bash
 bash scripts/skill_genealogy/tests/13_copy_families.sh
@@ -42,7 +42,7 @@ Runs `tests/skill_genealogy/test_assign_families.py` and the doctests of `assign
 
 **Step 3: `history_exact` links (Algorithm A30).**
 
-**Step 4: Signatures of the copy texts.** Steps 5 and 7 compare copy texts with registry versions by MinHash. The texts needed are the first downloaded version of every file and the current text of every non-exact file. A text that is a dataset text already has a stage 5a signature and is read from `dataset_signatures/`. An older history version is read from the stage 6 texts table and signed the stage 5a way (normalised, front matter and boilerplate lines removed, 5-word shingles, 128 values), `HISTORY_SIGN_BATCH` texts at a time, so both sides of every comparison are built the same way.
+**Step 4: Signatures of the copy texts.** Steps 5, 7 and 10 compare copy texts with registry versions by MinHash. The texts needed are the first downloaded version of every file, the current text of every non-exact file, and the newest history version of every file with a `history_exact` link. A text that is a dataset text already has a stage 5a signature and is read from `dataset_signatures/`. An older history version is read from the stage 6 texts table and signed the stage 5a way (normalised, front matter and boilerplate lines removed, 5-word shingles, 128 values), `HISTORY_SIGN_BATCH` texts at a time, so both sides of every comparison are built the same way.
 
 **Step 5: `history_near` links (Algorithm A31).**
 
@@ -60,7 +60,9 @@ Runs `tests/skill_genealogy/test_assign_families.py` and the doctests of `assign
 
 **Step 9: Families (Algorithm A34, queries Q7.6–Q7.9) and the copier result (Algorithm A34b, query Q7.5).**
 
-**Step 10: Save and print.** The four outputs are written, sorted so a rerun gives the same files. The run prints copy files per link and per history source, `copied_before_release` and `no_date` counts (with the `no_date` share of non-exact links), the fork share, folders, files, repos and first-commit arrivals per arrival group, removed folders and their share, the bundle share of the hand-labelled stored and used repos, texts and families per family kind, `registry_self` texts, copier-seen files per result (and how many only in weak copiers), and two sample rows of each output.
+**Step 10: History-proven test set and recall per text method (Algorithm A34d, query Q7.11).** Stage 7b. The files whose winning link is `history_exact` are scored against every version of their linked lineage by the four text methods of stage 5, and the share each method finds is the recall table.
+
+**Step 11: Save and print.** The six outputs are written, sorted so a rerun gives the same files. The run prints copy files per link and per history source, `copied_before_release` and `no_date` counts (with the `no_date` share of non-exact links), the fork share, folders, files, repos and first-commit arrivals per arrival group, removed folders and their share, the bundle share of the hand-labelled stored and used repos, texts and families per family kind, `registry_self` texts, copier-seen files per result (and how many only in weak copiers), two sample rows of each output, the recall table, and two proven pairs that no text method finds.
 
 ```text
 link order for one copy file (first in the list wins)
@@ -156,6 +158,38 @@ For each file outside the registries of a `copier_seen` text, compare the file's
 
 `weak_copiers_only` is carried from stage 5c: every copier that holds the text has a stage 3c confidence below 0.5.
 
+## Algorithm A34d: recall per text method on history-proven copies (stage 7b)
+
+**Goal.** Measure how often each text method of stage 5 still finds a copy that is known to be a copy, without hand labels.
+
+**Test set.** Every copy file whose winning link is `history_exact`: a blob of its own history is a registry blob, so it is a copy whatever its text looks like now. A `copier_seen` file has no lineage link and is never in the set. The file's **current text** is the newest blob of its history (a real date beats a missing one, then the later date, then the higher `commit_seq`); a file with no history row would keep its dataset text. The blob that matched is not scored: it would make every method succeed.
+
+**Rule.** The current text is compared with **every** version of the linked lineage. A method finds the copy when at least one version passes:
+
+- `exact`: the same `normalized_sha` (the stage 4a version key: normalised text without blank lines);
+- `minhash_jaccard`: estimated Jaccard ≥ `NEAR_COPY_MIN_JACCARD` (0.80);
+- `containment`: estimated containment of the registry text in the copy ≥ `NEAR_COPY_MIN_CONTAINMENT` (0.80);
+- `line_check`: share of registry body lines the copy still has ≥ `MIN_VERIFIED_LINE_SHARE` (0.50);
+- `any_text_method`: any of the four. A `tfidf` row is added only when a `tfidf_found` column exists (card G30).
+
+The MinHash scores use the stage 5a signatures (boilerplate lines removed, 5-word shingles, 128 values), so they are the scores stage 5c used. A text with no shingles scores 0. The line check does not remove boilerplate, as in stage 5c.
+
+`recall = found / proven_pairs`. `recall_without_forks` leaves out fork files, which share the registry's history. `recall_changed_since_crawl` counts only the pairs whose current text differs from the dataset text.
+
+**Worked example** (test `test_link_method_recall_on_three_proven_pairs`): lineage L has v1 (40 lines) and an unrelated later version v2.
+
+```text
+copy                      exact  jaccard  containment  line_check
+unchanged v1              yes    yes      yes          yes
+v1 + 60 new lines         no     no       yes          yes     (Jaccard about 0.4, 40/40 lines kept)
+fully reworded            no     no       no           no
+recall                    1/3    1/3      2/3          2/3     any_text_method 2/3
+```
+
+v2 matches nothing, and the older v1 still counts.
+
+**Speed.** `score_methods_on_pair` is the plain version: it signs and diffs the texts itself. `score_proven_pairs` is the fast one: Jaccard and containment come from stored signatures for all (pair, version) rows at once, and the line diffs run in a process pool. The pairs are sorted by lineage and scored `PROVEN_SCORE_BATCH` (2,000) at a time, so each batch reads few registry texts. A test and the dev run check that the two versions agree.
+
 ## Queries
 
 - **Q7.1** `COPY_HISTORY_SQL`: stage 6 change rows of the copy folders, top-level `SKILL.md`, role `own` or `former_folder`, date cast to `TIMESTAMPTZ`, blob null on a delete.
@@ -168,10 +202,11 @@ For each file outside the registries of a `copier_seen` text, compare the file's
 - **Q7.8** `ASSIGN_FAMILIES_SQL`: the five family rules; the cluster count is taken over unclaimed English members only.
 - **Q7.9** `FAMILY_COUNTS_SQL`: family totals, with and without forks and root-owner files.
 - **Q7.10** `ORIGIN_PICK_SQL`: per dated non-exact file, the scored versions released on or before its first commit; `QUALIFY row_number() = 1` over Jaccard (nulls last), newest release, highest `version_seq`.
+- **Q7.11** `PROVEN_DATASET_TEXTS_SQL`: `content` of the proven copies' current texts that are not stage 6 blobs (a file without history rows). For the full data this set is empty, because a `history_exact` file always has history.
 
 ## Outputs
 
-All four in the dev or full data folder.
+All six in the dev or full data folder.
 
 `copy_files.parquet`, one row per copy file: `repo`, `path`, `file_sha`, `lineage_id`, `root_lineage`, `link`, `link_similarity`, `history_source` (`copied` | `none`), `first_commit_date`, `origin_seq`, `origin_date`, `origin_basis` (`exact` | `similar_before_date` | `no_date` | null), `copied_before_release`, `is_fork`, `same_owner_as_registry`, `repo_role`, `arrival_commit`, `arrival_date`, `batch_size`, `arrival_group` (`chosen` | `small_set` | `bundle` | `unknown`), `arrival_in_first_commit`, `removed`, `removed_date`.
 
@@ -181,6 +216,10 @@ All four in the dev or full data folder.
 
 `history_link_counts.parquet`: `link`, `history_source`, `files`: copy files per winning link and history download.
 
+`proven_pairs.parquet` (stage 7b), one row per `history_exact` copy file: `repo`, `path`, `lineage_id`, `current_file_sha`, the four method flags `exact`, `jaccard_found`, `containment_found`, `verified_found`, the best score over the lineage's versions `best_jaccard`, `best_containment`, `best_line_share`, `stage5_link` (the file's stage 5c link), `current_is_dataset_text`, `is_fork`.
+
+`link_method_recall.parquet` (stage 7b), one row per method: `method`, `proven_pairs`, `found`, `recall`, `recall_without_forks`, `changed_pairs`, `recall_changed_since_crawl`.
+
 ## Limits
 
 - **History only for linked copies.** Stage 6 cloned the repos of linked copies only, so an unlinked text cannot gain a history link, and `copier_seen` files are dated by the dataset `first_commit_at` alone.
@@ -189,5 +228,6 @@ All four in the dev or full data folder.
 - **Git dates can lie.** A rebase or a squashed upload moves the first commit; `copied_before_release` and `arrival_in_first_commit` count the visible cases.
 - **The origin comes from the linked lineage, not its root.** When the best text match is a later re-host whose root stage 5b did not find, every version of the linked lineage can be newer than the copy, and the copy is `copied_before_release`. The dev sample shows this strongly: 916 shadcn copies from January link to a June re-host, because the original registry is not among the 30 dev registries.
 - **Dev mode.** Only the dev lineages and their copies are linked, but families cover every English text, so most dev texts fall into `independent` or `singleton`.
+- **The recall test set is not a random sample of copies.** Stage 6 cloned only repos of copies that stage 5c had already linked by text, so every proven copy was found by some text method on its crawled text. A copy whose crawled text is an exact registry blob wins `exact`, not `history_exact`, so it is not in the set either. The set is therefore the proven copies that had drifted from every exact registry text by the crawl, and the recall says how well each method recognises such edited copies. `recall_changed_since_crawl` is the part least tied to stage 5c, because stage 5c never saw that text. It is not precision: it says nothing about how often a method links two texts that are not copies.
 
 The full-run numbers are in the [copy families report](../report/13_copy_families_report.md).
